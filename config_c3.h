@@ -15,60 +15,9 @@ static const int SCREEN_H = 240;
 
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 
-#define RFID_DATA_PIN 3
-#define RFID_BIT_PERIOD 256
-#define RFID_DISPLAY_TIME 3000
-
-volatile uint64_t rfidData = 0;
-volatile uint8_t rfidBitCount = 0;
-volatile bool rfidDataReady = false;
-volatile unsigned long lastEdgeTime = 0;
-volatile bool rfidEnabled = false;
-
 // Expose these from the main app
 extern void triggerPhotoDownload();
 extern void showCurrentPhoto();
-
-void IRAM_ATTR rfidISR() {
-  if (!rfidEnabled) return;
-  unsigned long currentTime = micros();
-  unsigned long pulseWidth = currentTime - lastEdgeTime;
-  
-  if (lastEdgeTime == 0) {
-    lastEdgeTime = currentTime;
-    return;
-  }
-  
-  lastEdgeTime = currentTime;
-  if (pulseWidth < 100 || pulseWidth > 1000) return;
-  
-  if (pulseWidth > RFID_BIT_PERIOD / 2 && pulseWidth < RFID_BIT_PERIOD * 1.5) {
-    int bitValue = digitalRead(RFID_DATA_PIN);
-    if (rfidBitCount < 64) {
-      rfidData = (rfidData << 1) | bitValue;
-      rfidBitCount++;
-      if (rfidBitCount >= 64) {
-        rfidDataReady = true;
-      }
-    }
-  } else if (pulseWidth > RFID_BIT_PERIOD * 1.5) {
-    rfidData = 0;
-    rfidBitCount = 0;
-  }
-}
-
-uint64_t readRFID() {
-  if (rfidDataReady) {
-    noInterrupts();
-    rfidDataReady = false;
-    uint64_t tempData = rfidData;
-    rfidData = 0;
-    rfidBitCount = 0;
-    interrupts();
-    return tempData;
-  }
-  return 0;
-}
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   if (y >= tft.height()) return 0;
@@ -91,11 +40,6 @@ void board_init() {
   TJpgDec.setJpgScale(1);
   TJpgDec.setSwapBytes(false);
   TJpgDec.setCallback(tft_output);
-
-  pinMode(RFID_DATA_PIN, INPUT);
-  delay(100);
-  rfidEnabled = true;
-  attachInterrupt(digitalPinToInterrupt(RFID_DATA_PIN), rfidISR, CHANGE);
 }
 
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
@@ -141,17 +85,5 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
 }
 
 void board_loop() {
-  uint64_t cardID = readRFID();
-  if (cardID != 0) {
-    tft.fillScreen(ST77XX_BLACK);
-    tft.setTextColor(ST77XX_GREEN);
-    tft.setTextSize(3);
-    tft.setCursor(50, 80);
-    tft.println("RFID:");
-    tft.setCursor(20, 130);
-    tft.println((unsigned long)cardID);
-    
-    delay(RFID_DISPLAY_TIME);
-    triggerPhotoDownload(); // Re-trigger a photo update/download
-  }
+  // Empty loop now that RFID is removed
 }
