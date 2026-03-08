@@ -22,7 +22,7 @@ extern bool hasLastPhoto();
 
 void board_init() {
   gfx->begin();
-  gfx->fillScreen(BLACK);
+  gfx->fillScreen(0x0000); // Replaced BLACK with 0x0000 (black in RGB565)
 }
 
 void board_loop() {

@@ -38,7 +38,7 @@ void board_init() {
   digitalWrite(GFX_BL, HIGH);
 
   gfx->begin();
-  gfx->fillScreen(BLACK);
+  gfx->fillScreen(0x0000); // Replaced BLACK with 0x0000 (black in RGB565)
   
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();

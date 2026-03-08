@@ -72,7 +72,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     
-    gfx->fillScreen(BLACK);
+    gfx->fillScreen(0x0000); // Replaced BLACK with 0x0000
     jpeg.decode(x, y, decodeOption);
     jpeg.close();
   }

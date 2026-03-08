@@ -1,5 +1,4 @@
 #include <Arduino.h>
-
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
@@ -10,8 +9,6 @@
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
-
-#include <JPEGDEC.h>
 
 #define DEBUG_SERIAL 1
 #if DEBUG_SERIAL
@@ -32,10 +29,11 @@
   const char* test_http_password = "";
 #endif
 
+// Include hardware-specific configurations and routines
 #include "board_config.h"
-#include "html.h"
 
-static JPEGDEC jpeg;
+// Include WebUI html
+#include "html.h"
 
 char HOSTNAME[32];
 static const char* HOST_PREFIX = "syncframe-";
@@ -53,7 +51,7 @@ struct Config {
   String mqttUser;
   String mqttPass;
   bool mqttUseTLS;
-  bool mqttTlsInsecure;
+  bool mqttTlsInsecure; 
 } cfg;
 
 static const char* PREF_NS = "syncframe";
@@ -84,30 +82,33 @@ uint8_t* currentJpg = nullptr;
 size_t   currentJpgLen = 0;
 uint8_t* lastJpg = nullptr;
 size_t   lastJpgLen = 0;
-
 bool showingLast = false;
 
-static void renderJpegLetterboxed(const uint8_t* jpg, size_t len);
-
-bool hasLastPhoto() { return (lastJpg != nullptr && lastJpgLen > 0); }
+// ---------------------- Hardware Callbacks ----------------------
+bool hasLastPhoto() {
+  return (lastJpg != nullptr && lastJpgLen > 0);
+}
 
 void showCurrentPhoto() {
   if (currentJpg && currentJpgLen) {
     showingLast = false;
-    renderJpegLetterboxed(currentJpg, currentJpgLen);
+    board_draw_jpeg(currentJpg, currentJpgLen);
   }
 }
 
 void showLastPhoto() {
   if (lastJpg && lastJpgLen) {
     showingLast = true;
-    renderJpegLetterboxed(lastJpg, lastJpgLen);
+    board_draw_jpeg(lastJpg, lastJpgLen);
   }
 }
 
 static bool downloadAndShowPhoto();
-void triggerPhotoDownload() { downloadAndShowPhoto(); }
+void triggerPhotoDownload() {
+  downloadAndShowPhoto();
+}
 
+// ---------------------- Helpers ----------------------
 static void buildHostAndClientId() {
   uint32_t mac = (uint32_t)ESP.getEfuseMac();
   uint16_t shortId = (mac >> 20) & 0x0FFF;
@@ -116,7 +117,7 @@ static void buildHostAndClientId() {
 
 static String jsonEscape(const String& s) {
   String o; o.reserve(s.length() + 8);
-  for (size_t i = 0; i < s.length(); i++) {
+  for (size_t i=0;i<s.length();i++) {
     char c = s[i];
     if (c == '\\' || c == '\"') { o += '\\'; o += c; }
     else if (c == '\n') o += "\\n";
@@ -248,52 +249,11 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   return true;
 }
 
-static int JPEGDraw(JPEGDRAW *pDraw) {
-  board_draw_rgb565_block(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, (const uint16_t*)pDraw->pPixels);
-  return 1;
-}
-
-static void renderJpegLetterboxed(const uint8_t* jpg, size_t len) {
-  if (!jpg || !len) return;
-
-  board_fill_black();
-
-  if (!jpeg.openRAM((uint8_t*)jpg, (int)len, JPEGDraw)) {
-    return;
-  }
-
-  int imgW = jpeg.getWidth();
-  int imgH = jpeg.getHeight();
-  int scrW = board_screen_w();
-  int scrH = board_screen_h();
-
-  int scale = 1;
-  while (scale < 8 && ((imgW / scale) > scrW || (imgH / scale) > scrH)) {
-    scale *= 2;
-  }
-
-  int options = 0;
-  if (scale == 2) options = JPEG_SCALE_HALF;
-  else if (scale == 4) options = JPEG_SCALE_QUARTER;
-  else if (scale == 8) options = JPEG_SCALE_EIGHTH;
-
-  int drawW = imgW / scale;
-  int drawH = imgH / scale;
-
-  int x = (scrW - drawW) / 2;
-  int y = (scrH - drawH) / 2;
-  if (x < 0) x = 0;
-  if (y < 0) y = 0;
-
-  jpeg.decode(x, y, options);
-  jpeg.close();
-}
-
 static bool downloadAndShowPhoto() {
   uint8_t* newBuf = nullptr;
   size_t newLen = 0;
   String err;
-
+  
   if (WiFi.status() != WL_CONNECTED) {
     lastDownloadOk = false;
     lastDownloadErr = "no wifi";
@@ -317,16 +277,18 @@ static bool downloadAndShowPhoto() {
   lastDownloadOk = true;
   lastDownloadErr = "";
   showingLast = false;
-
-  renderJpegLetterboxed(currentJpg, currentJpgLen);
+  
+  board_draw_jpeg(currentJpg, currentJpgLen);
   return true;
 }
 
+// ---------------------- MQTT ----------------------
 static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   lastMqttMsgMs = millis();
-  (void)topic;
-  (void)payload;
-  (void)length;
+  String msg;
+  msg.reserve(length);
+  for (unsigned int i=0;i<length;i++) msg += (char)payload[i];
+  DBG("MQTT [%s] %s\n", topic, msg.c_str());
   downloadAndShowPhoto();
 }
 
@@ -365,6 +327,7 @@ static void mqttMaybeReconnect() {
   }
 }
 
+// ---------------------- WiFi / Network ----------------------
 static void startNetworkServicesOnce() {
   if (networkServicesStarted) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -398,27 +361,26 @@ static void ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) startNetworkServicesOnce();
 }
 
+// ---------------------- Web UI ----------------------
 static void handleRoot() { server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML)); }
 static void handleConfigPage() { server.send(200, "text/html; charset=utf-8", FPSTR(CONFIG_HTML)); }
 
 static void handleStatusJson() {
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
-
   String j = "{";
   j += "\"hostname\":\"" + jsonEscape(HOSTNAME) + "\",";
-  j += "\"wifi\":" + String(wifiOk ? "true" : "false") + ",";
+  j += "\"wifi\":" + String(wifiOk ? "true":"false") + ",";
   j += "\"ip\":\"" + (wifiOk ? WiFi.localIP().toString() : String("")) + "\",";
-  j += "\"mdns\":" + String(networkServicesStarted ? "true" : "false") + ",";
-  j += "\"ota\":" + String(networkServicesStarted ? "true" : "false") + ",";
-  j += "\"mqtt\":" + String(mqttConnected ? "true" : "false") + ",";
-  j += "\"lastDownloadOk\":" + String(lastDownloadOk ? "true" : "false") + ",";
+  j += "\"mdns\":" + String(networkServicesStarted ? "true":"false") + ",";
+  j += "\"ota\":" + String(networkServicesStarted ? "true":"false") + ",";
+  j += "\"mqtt\":" + String(mqttConnected ? "true":"false") + ",";
+  j += "\"lastDownloadOk\":" + String(lastDownloadOk ? "true":"false") + ",";
   j += "\"lastDownloadErr\":\"" + jsonEscape(lastDownloadErr) + "\",";
   j += "\"lastDownloadMs\":" + String(lastDownloadMs) + ",";
   j += "\"lastMqttMsgMs\":" + String(lastMqttMsgMs) + ",";
-  j += "\"screenW\":" + String(board_screen_w()) + ",";
-  j += "\"screenH\":" + String(board_screen_h());
+  j += "\"screenW\":" + String(SCREEN_W) + ",";
+  j += "\"screenH\":" + String(SCREEN_H);
   j += "}";
-
   server.send(200, "application/json", j);
 }
 
@@ -426,7 +388,7 @@ static void handleGetConfigJson() {
   String j = "{";
   j += "\"photoBaseUrl\":\"" + jsonEscape(cfg.photoBaseUrl) + "\",";
   j += "\"photoFilename\":\"" + jsonEscape(cfg.photoFilename) + "\",";
-  j += "\"httpsInsecure\":" + String(cfg.httpsInsecure ? "true" : "false") + ",";
+  j += "\"httpsInsecure\":" + String(cfg.httpsInsecure ? "true":"false") + ",";
   j += "\"httpUser\":\"" + jsonEscape(cfg.httpUser) + "\",";
   j += "\"httpPass\":\"" + String(cfg.httpPass.length() ? "********" : "") + "\",";
   j += "\"mqttHost\":\"" + jsonEscape(cfg.mqttHost) + "\",";
@@ -434,8 +396,8 @@ static void handleGetConfigJson() {
   j += "\"mqttTopic\":\"" + jsonEscape(cfg.mqttTopic) + "\",";
   j += "\"mqttUser\":\"" + jsonEscape(cfg.mqttUser) + "\",";
   j += "\"mqttPass\":\"" + String(cfg.mqttPass.length() ? "********" : "") + "\",";
-  j += "\"mqttUseTLS\":" + String(cfg.mqttUseTLS ? "true" : "false") + ",";
-  j += "\"mqttTlsInsecure\":" + String(cfg.mqttTlsInsecure ? "true" : "false");
+  j += "\"mqttUseTLS\":" + String(cfg.mqttUseTLS ? "true":"false") + ",";
+  j += "\"mqttTlsInsecure\":" + String(cfg.mqttTlsInsecure ? "true":"false");
   j += "}";
   server.send(200, "application/json", j);
 }
@@ -450,11 +412,9 @@ static void handlePostConfig() {
   if (server.hasArg("mqttPort")) cfg.mqttPort = (uint16_t)server.arg("mqttPort").toInt();
   if (server.hasArg("httpPass") && server.arg("httpPass").length() > 0) cfg.httpPass = server.arg("httpPass");
   if (server.hasArg("mqttPass") && server.arg("mqttPass").length() > 0) cfg.mqttPass = server.arg("mqttPass");
-
   cfg.httpsInsecure = server.hasArg("httpsInsecure");
   cfg.mqttUseTLS = server.hasArg("mqttUseTLS");
   cfg.mqttTlsInsecure = server.hasArg("mqttTlsInsecure");
-
   saveConfig();
   mqttSetupClient();
   server.send(200, "application/json", "{\"ok\":true}");
@@ -480,19 +440,16 @@ static void handleActionRefresh() {
 static void setupWeb() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/config", HTTP_GET, handleConfigPage);
-
   server.on("/api/status", HTTP_GET, handleStatusJson);
   server.on("/api/config", HTTP_GET, handleGetConfigJson);
   server.on("/api/config", HTTP_POST, handlePostConfig);
-
   server.on("/api/refresh", HTTP_POST, handleActionRefresh);
-
   server.on("/img/current", HTTP_GET, handleImgCurrent);
   server.on("/img/last", HTTP_GET, handleImgLast);
-
   server.begin();
 }
 
+// ---------------------- Main ----------------------
 void setup() {
   DBG_BEGIN(115200);
   buildHostAndClientId();
@@ -522,6 +479,8 @@ void loop() {
     if (mqtt.connected()) mqtt.loop();
   }
 
+  // Handle hardware-specific loop requirements (touch, etc.)
   board_loop();
+
   delay(10);
 }
