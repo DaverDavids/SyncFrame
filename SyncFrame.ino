@@ -11,6 +11,7 @@
 #include <PubSubClient.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include <Secrets.h>
 
 #define DEBUG_SERIAL 1
 #if DEBUG_SERIAL
