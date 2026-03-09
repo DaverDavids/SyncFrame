@@ -36,6 +36,7 @@
 #include "splash.h"
 
 char HOSTNAME[32];
+char MAC_STR[18];   // "AA:BB:CC:DD:EE:FF\0"
 static const char* HOST_PREFIX = "syncframe-";
 
 Preferences prefs;
@@ -126,8 +127,19 @@ void triggerPhotoDownload() {
 
 // ---------------------- Helpers ----------------------
 static void buildHostAndClientId() {
-  uint32_t mac = (uint32_t)ESP.getEfuseMac();
-  uint16_t shortId = (mac >> 20) & 0x0FFF;
+  uint64_t fullMac = ESP.getEfuseMac();
+  // ESP.getEfuseMac() returns bytes in little-endian order
+  uint8_t m[6];
+  m[0] = (fullMac >>  0) & 0xFF;
+  m[1] = (fullMac >>  8) & 0xFF;
+  m[2] = (fullMac >> 16) & 0xFF;
+  m[3] = (fullMac >> 24) & 0xFF;
+  m[4] = (fullMac >> 32) & 0xFF;
+  m[5] = (fullMac >> 40) & 0xFF;
+  snprintf(MAC_STR, sizeof(MAC_STR), "%02X:%02X:%02X:%02X:%02X:%02X",
+           m[0], m[1], m[2], m[3], m[4], m[5]);
+  uint32_t mac32 = (uint32_t)fullMac;
+  uint16_t shortId = (mac32 >> 20) & 0x0FFF;
   snprintf(HOSTNAME, sizeof(HOSTNAME), "%s%03X", HOST_PREFIX, shortId);
 }
 
@@ -462,7 +474,7 @@ static void startNetworkServicesOnce() {
 
   networkServicesStarted = true;
   wifiEverConnected = true;
-  logEvent("WIFI", "connected ip=%s", WiFi.localIP().toString().c_str());
+  logEvent("WIFI", "connected ip=%s mac=%s", WiFi.localIP().toString().c_str(), MAC_STR);
   logEvent("NET", "services mdns=%s ota=on", mdnsOk ? "on" : "off");
 }
 
@@ -529,10 +541,13 @@ static void handleConfigPage() {
 static void handleStatusJson() {
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
   String j;
-  j.reserve(384);
+  j.reserve(420);
   j += "{";
   j += "\"hostname\":\"";
   appendJsonEscaped(j, HOSTNAME);
+  j += "\",";
+  j += "\"mac\":\"";
+  appendJsonEscaped(j, MAC_STR);
   j += "\",";
   j += "\"wifi\":";
   j += (wifiOk ? "true" : "false");
@@ -645,6 +660,11 @@ static void handleGetConfigJson() {
   server.send(200, "application/json", j);
 }
 
+// Helper: returns true if the arg is present, non-empty, and is NOT the masked sentinel
+static bool isRealPassword(const String& val) {
+  return val.length() > 0 && val != "********";
+}
+
 static void handlePostConfig() {
   if (server.hasArg("photoBaseUrl")) cfg.photoBaseUrl = server.arg("photoBaseUrl");
   if (server.hasArg("photoFilename")) cfg.photoFilename = server.arg("photoFilename");
@@ -653,8 +673,13 @@ static void handlePostConfig() {
   if (server.hasArg("mqttTopic")) cfg.mqttTopic = server.arg("mqttTopic");
   if (server.hasArg("mqttUser")) cfg.mqttUser = server.arg("mqttUser");
   if (server.hasArg("mqttPort")) cfg.mqttPort = (uint16_t)server.arg("mqttPort").toInt();
-  if (server.hasArg("httpPass") && server.arg("httpPass").length() > 0) cfg.httpPass = server.arg("httpPass");
-  if (server.hasArg("mqttPass") && server.arg("mqttPass").length() > 0) cfg.mqttPass = server.arg("mqttPass");
+  // Only update passwords when a real new value was explicitly submitted
+  if (server.hasArg("httpPass") && isRealPassword(server.arg("httpPass"))) {
+    cfg.httpPass = server.arg("httpPass");
+  }
+  if (server.hasArg("mqttPass") && isRealPassword(server.arg("mqttPass"))) {
+    cfg.mqttPass = server.arg("mqttPass");
+  }
   cfg.httpsInsecure = server.hasArg("httpsInsecure");
   cfg.mqttUseTLS = server.hasArg("mqttUseTLS");
   cfg.mqttTlsInsecure = server.hasArg("mqttTlsInsecure");
@@ -709,7 +734,7 @@ void setup() {
   DBG_BEGIN(115200);
   delay(50);
   buildHostAndClientId();
-  logEvent("BOOT", "%s reset=%s", HOSTNAME, resetReasonToStr(esp_reset_reason()));
+  logEvent("BOOT", "%s mac=%s reset=%s", HOSTNAME, MAC_STR, resetReasonToStr(esp_reset_reason()));
 
   loadConfig();
   board_init();
@@ -721,8 +746,9 @@ void setup() {
   ensureWifi();
 
   if (WiFi.status() == WL_CONNECTED) {
-    String ipStr = "Wi-Fi Connected: " + WiFi.localIP().toString();
-    board_draw_boot_status(ipStr.c_str());
+    // Show IP on the left, MAC on the right of the same line
+    String ipMac = "IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR);
+    board_draw_boot_status(ipMac.c_str());
     delay(800);
   }
 

@@ -122,8 +122,11 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     button.secondary{background:#1f7ae0;color:#fff}
     a{color:#8ecbff}
     .small{opacity:.85;font-size:13px}
-    .msg{background:#2a4a2e;border:1px solid:#37d67a;padding:10px;border-radius:8px;margin:10px 0}
-    .status{margin-top:14px;padding:10px;border-radius:10px;background:#0b111a;border:1px solid #2a3c55}
+    .msg{background:#2a4a2e;border:1px solid #37d67a;padding:10px;border-radius:8px;margin:10px 0}
+    .status{margin-top:14px;padding:10px;border-radius:10px;background:#0b111a;border:1px solid #2a3c55;display:flex;flex-wrap:wrap;gap:16px;align-items:center}
+    .status .item{white-space:nowrap}
+    .ok{color:#37d67a;font-weight:600}
+    .bad{color:#ff5d5d;font-weight:600}
     .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}
     .console{margin-top:8px;background:#081018;border:1px solid #2a3c55;border-radius:10px;padding:10px;min-height:220px;max-height:280px;overflow:auto;white-space:pre-wrap;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   </style>
@@ -156,7 +159,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
           <input type="text" name="httpUser" id="httpUser" placeholder="admin"/>
         </div>
         <div>
-          <label>HTTP Basic auth pass (leave blank to keep)</label>
+          <label>HTTP Basic auth pass <span class="small">(leave blank to keep current)</span></label>
           <input type="password" name="httpPass" id="httpPass" placeholder=""/>
         </div>
       </div>
@@ -182,7 +185,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
           <input type="text" name="mqttUser" id="mqttUser" placeholder="mqttuser"/>
         </div>
         <div>
-          <label>Pass (leave blank to keep)</label>
+          <label>Pass <span class="small">(leave blank to keep current)</span></label>
           <input type="password" name="mqttPass" id="mqttPass" placeholder=""/>
         </div>
       </div>
@@ -204,7 +207,14 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     </form>
 
     <h3 style="margin-top:20px">Live status</h3>
-    <div id="debugStatus" class="status small">Loading status…</div>
+    <div id="debugStatus" class="status small">
+      <span class="item" id="ds_host">Host: …</span>
+      <span class="item" id="ds_mac">MAC: …</span>
+      <span class="item" id="ds_ip">IP: …</span>
+      <span class="item" id="ds_wifi">WiFi: …</span>
+      <span class="item" id="ds_mqtt">MQTT: …</span>
+      <span class="item" id="ds_photo">Photo: …</span>
+    </div>
 
     <h3 style="margin-top:20px">Live console</h3>
     <div class="toolbar small">
@@ -247,20 +257,30 @@ async function loadCfg() {
   }
 }
 
+function setSpan(id, text, ok) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (ok === true)  el.className = "item ok";
+  else if (ok === false) el.className = "item bad";
+  else el.className = "item";
+  el.textContent = text;
+}
+
 async function loadStatus() {
   try {
     const r = await fetch("/api/status", {cache:"no-store"});
     const s = await r.json();
-    const parts = [
-      "Host: " + (s.hostname || "-"),
-      s.ip ? ("IP: " + s.ip) : "IP: offline",
-      "WiFi: " + (s.wifi ? "connected" : "disconnected"),
-      "MQTT: " + (s.mqtt ? "connected" : "disconnected"),
-      "Photo: " + (s.lastDownloadOk ? "ok" : ("failed (" + (s.lastDownloadErr || "unknown") + ")"))
-    ];
-    debugStatus.textContent = parts.join(" | ");
+    setSpan("ds_host",  "Host: " + (s.hostname || "-"), null);
+    setSpan("ds_mac",   "MAC: "  + (s.mac || "-"),      null);
+    setSpan("ds_ip",    "IP: "   + (s.ip  || "offline"), null);
+    setSpan("ds_wifi",  "WiFi: " + (s.wifi ? "connected" : "disconnected"), !!s.wifi);
+    setSpan("ds_mqtt",  "MQTT: " + (s.mqtt ? "connected" : "disconnected"), !!s.mqtt);
+    const photoTxt = s.lastDownloadOk
+      ? "Photo: ok"
+      : ("Photo: failed (" + (s.lastDownloadErr || "unknown") + ")");
+    setSpan("ds_photo", photoTxt, !!s.lastDownloadOk);
   } catch(e) {
-    debugStatus.textContent = "Status unavailable: " + e;
+    setSpan("ds_host", "Status unavailable", false);
   }
 }
 
@@ -287,10 +307,7 @@ async function pollLogs(reset) {
 }
 
 function setLogPolling(enabled) {
-  if (logTimer) {
-    clearInterval(logTimer);
-    logTimer = null;
-  }
+  if (logTimer) { clearInterval(logTimer); logTimer = null; }
   if (!enabled) return;
   logSince = 0;
   pollLogs(true);
@@ -309,18 +326,16 @@ configForm.addEventListener('submit', async (e) => {
   formData.append('mqttTopic', mqttTopic.value);
   formData.append('mqttUser', mqttUser.value);
 
+  // Only send passwords if the user actually typed something
   if (httpPass.value.length > 0) formData.append('httpPass', httpPass.value);
   if (mqttPass.value.length > 0) formData.append('mqttPass', mqttPass.value);
+
   if (httpsInsecure.checked) formData.append('httpsInsecure', '1');
   if (mqttUseTLS.checked) formData.append('mqttUseTLS', '1');
   if (mqttTlsInsecure.checked) formData.append('mqttTlsInsecure', '1');
 
   try {
-    const resp = await fetch('/api/config', {
-      method: 'POST',
-      body: formData
-    });
-
+    const resp = await fetch('/api/config', { method: 'POST', body: formData });
     if (resp.ok) {
       saveMsg.style.display = 'block';
       setTimeout(() => saveMsg.style.display = 'none', 3000);
@@ -335,32 +350,21 @@ configForm.addEventListener('submit', async (e) => {
 
 logEnable.addEventListener('change', () => {
   if (!logEnable.checked) {
-    if (logTimer) {
-      clearInterval(logTimer);
-      logTimer = null;
-    }
+    if (logTimer) { clearInterval(logTimer); logTimer = null; }
     return;
   }
   setLogPolling(true);
 });
 
-clearLogBtn.addEventListener('click', () => {
-  logSince = 0;
-  pollLogs(true);
-});
+clearLogBtn.addEventListener('click', () => { logSince = 0; pollLogs(true); });
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    loadStatus();
-    if (logEnable.checked) pollLogs(false);
-  }
+  if (!document.hidden) { loadStatus(); if (logEnable.checked) pollLogs(false); }
 });
 
 loadCfg();
 loadStatus();
-setInterval(() => {
-  if (!document.hidden) loadStatus();
-}, 3000);
+setInterval(() => { if (!document.hidden) loadStatus(); }, 3000);
 </script>
 </body>
 </html>
