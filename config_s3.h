@@ -17,7 +17,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   0, 8, 4, 24,
   0, 8, 4, 16,
   1, 16000000,           // Reverted pclk to 16MHz
-  false, 0, 0, 800*20    // Reverted bounce buffer to 0 (some ESP32 Arduino Core versions crash with non-zero bounce buffer)
+  true, 0, 0, 800*20    // Reverted bounce buffer to 0 (some ESP32 Arduino Core versions crash with non-zero bounce buffer)
 );
 
 Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true); // true = double buffered (auto_flush disabled)
