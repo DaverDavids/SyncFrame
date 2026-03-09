@@ -76,7 +76,37 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
     jpeg.decode(x, y, decodeOption);
     jpeg.close();
 
-    // Force the screen to flush memory if the library uses an internal framebuffer (like the S3 RGB panel)
+    // Flush is handled by the caller or double-buffered panels
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
     gfx->flush();
+#endif
   }
+}
+
+// Draw a small text overlay over the existing image without clearing the screen
+void board_draw_boot_status(const char* text) {
+  // Set up text properties
+  gfx->setTextSize(2);
+  
+  // Calculate text width/height to draw a small background box
+  int16_t x1, y1;
+  uint16_t w, h;
+  gfx->getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  
+  // Position in bottom left corner
+  int padding = 4;
+  int x = 10;
+  int y = SCREEN_H - h - 10;
+  
+  // Draw solid black rectangle behind text so it's readable over the logo
+  gfx->fillRect(x - padding, y - padding, w + (padding * 2), h + (padding * 2), 0x0000);
+  
+  // Draw white text
+  gfx->setTextColor(0xFFFF); // White in RGB565
+  gfx->setCursor(x, y);
+  gfx->print(text);
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
+  gfx->flush();
+#endif
 }

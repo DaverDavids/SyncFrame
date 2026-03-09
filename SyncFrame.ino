@@ -10,7 +10,7 @@
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
 
-#define DEBUG_SERIAL 0
+#define DEBUG_SERIAL 1
 #if DEBUG_SERIAL
   #define DBG_BEGIN(x) Serial.begin(x)
   #define DBG(...)     Serial.printf(__VA_ARGS__)
@@ -34,6 +34,9 @@
 
 // Include WebUI html
 #include "html.h"
+
+// Include Splash Logo
+#include "splash.h"
 
 char HOSTNAME[32];
 static const char* HOST_PREFIX = "syncframe-";
@@ -260,6 +263,7 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
+  board_draw_boot_status("Downloading Photo...");
   bool ok = httpDownloadToBuffer(&newBuf, &newLen, &err);
   lastDownloadMs = millis();
 
@@ -267,6 +271,7 @@ static bool downloadAndShowPhoto() {
     lastDownloadOk = false;
     lastDownloadErr = err;
     DBG("Download failed: %s\n", err.c_str());
+    board_draw_boot_status(("Download failed: " + err).c_str());
     return false;
   }
 
@@ -457,16 +462,29 @@ void setup() {
 
   loadConfig();
   board_init();
-
+  
+  // Draw the startup splash logo immediately
+  board_draw_jpeg(splash_logo, splash_logo_len);
+  
+  board_draw_boot_status("Connecting to Wi-Fi...");
   ensureWifi();
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    String ipStr = "Wi-Fi Connected: " + WiFi.localIP().toString();
+    board_draw_boot_status(ipStr.c_str());
+    delay(1000); // Hold IP on screen for 1 second
+  }
+
   setupWeb();
 
+  board_draw_boot_status("Connecting to MQTT...");
   mqttNetPlain.setTimeout(1);
   mqttNetSecure.setTimeout(1);
   mqttSetupClient();
+  mqttMaybeReconnect();
   mqtt.setSocketTimeout(1);
 
-  downloadAndShowPhoto();
+  downloadAndShowPhoto(); // Contains its own "Downloading..." status update
 }
 
 void loop() {
