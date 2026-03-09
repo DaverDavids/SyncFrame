@@ -16,8 +16,8 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   8,  3,  46, 9,  1,
   0, 8, 4, 24,
   0, 8, 4, 16,
-  1, 15400000,
-  false, 0, 0, 800*10
+  1, 12000000,           // Lowered from 15.4MHz to 12MHz to prevent PSRAM DMA starvation during WiFi spikes
+  false, 0, 0, 800*20    // Increased bounce buffer from 10 lines to 20 lines to survive WiFi latency
 );
 
 Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true);
