@@ -20,7 +20,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   false, 0, 0, 800*10
 );
 
-Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel);
+Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true);
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 20
@@ -38,7 +38,8 @@ void board_init() {
   digitalWrite(GFX_BL, HIGH);
 
   gfx->begin();
-  gfx->fillScreen(0x0000); // Replaced BLACK with 0x0000 (black in RGB565)
+  gfx->fillScreen(0x0000); 
+  gfx->flush();
   
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();
