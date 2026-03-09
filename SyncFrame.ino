@@ -11,7 +11,6 @@
 #include <PubSubClient.h>
 #include <stdarg.h>
 #include <esp_system.h>
-#include <Secrets.h>
 
 #define DEBUG_SERIAL 1
 #if DEBUG_SERIAL
@@ -129,7 +128,6 @@ void triggerPhotoDownload() {
 // ---------------------- Helpers ----------------------
 static void buildHostAndClientId() {
   uint64_t fullMac = ESP.getEfuseMac();
-  // ESP.getEfuseMac() returns bytes in little-endian order
   uint8_t m[6];
   m[0] = (fullMac >>  0) & 0xFF;
   m[1] = (fullMac >>  8) & 0xFF;
@@ -253,6 +251,8 @@ static String makePhotoUrl() {
   return base + cfg.photoFilename;
 }
 
+// WiFiClientSecure (~4KB) and HTTPClient (~1KB) are allocated on the HEAP here,
+// NOT the stack, to prevent stack overflow / canary crash on ESP32-S3.
 static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outErr) {
   *outBuf = nullptr;
   *outLen = 0;
@@ -267,48 +267,79 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 
   logEvent("PHOTO", "GET %s", url.c_str());
 
-  WiFiClientSecure secureClient;
-  WiFiClient plainClient;
-  HTTPClient http;
+  // Heap-allocate the client objects — they are too large for the stack
+  WiFiClientSecure* secureClient = nullptr;
+  WiFiClient*       plainClient  = nullptr;
+  HTTPClient*       http         = new HTTPClient();
 
-  secureClient.setTimeout(5);
-  plainClient.setTimeout(5);
-  http.setConnectTimeout(4000);
-  http.setTimeout(5000);
-
-  if (url.startsWith("https://")) {
-    if (cfg.httpsInsecure) secureClient.setInsecure();
-    if (!http.begin(secureClient, url)) {
-      if (outErr) *outErr = "http.begin failed";
-      logEvent("HTTP", "begin failed https");
-      return false;
-    }
-  } else {
-    if (!http.begin(plainClient, url)) {
-      if (outErr) *outErr = "http.begin failed";
-      logEvent("HTTP", "begin failed http");
-      return false;
-    }
-  }
-
-  if (cfg.httpUser.length() > 0) {
-    http.setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
-  }
-
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    String err = (code < 0) ? http.errorToString(code) : ("HTTP " + String(code));
-    if (outErr) *outErr = err;
-    logEvent("HTTP", "GET failed %s", err.c_str());
-    http.end();
+  if (!http) {
+    if (outErr) *outErr = "alloc failed";
+    logEvent("HTTP", "HTTPClient alloc failed");
     return false;
   }
 
-  int64_t total = http.getSize();
+  http->setConnectTimeout(4000);
+  http->setTimeout(5000);
+
+  bool isHttps = url.startsWith("https://");
+  bool beginOk = false;
+
+  if (isHttps) {
+    secureClient = new WiFiClientSecure();
+    if (!secureClient) {
+      if (outErr) *outErr = "alloc failed";
+      logEvent("HTTP", "WiFiClientSecure alloc failed");
+      delete http;
+      return false;
+    }
+    secureClient->setTimeout(5);
+    if (cfg.httpsInsecure) secureClient->setInsecure();
+    beginOk = http->begin(*secureClient, url);
+  } else {
+    plainClient = new WiFiClient();
+    if (!plainClient) {
+      if (outErr) *outErr = "alloc failed";
+      logEvent("HTTP", "WiFiClient alloc failed");
+      delete http;
+      return false;
+    }
+    plainClient->setTimeout(5);
+    beginOk = http->begin(*plainClient, url);
+  }
+
+  if (!beginOk) {
+    if (outErr) *outErr = "http.begin failed";
+    logEvent("HTTP", "begin failed %s", isHttps ? "https" : "http");
+    delete http;
+    delete secureClient;
+    delete plainClient;
+    return false;
+  }
+
+  if (cfg.httpUser.length() > 0) {
+    http->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
+  }
+
+  int code = http->GET();
+  if (code != HTTP_CODE_OK) {
+    String err = (code < 0) ? http->errorToString(code) : ("HTTP " + String(code));
+    if (outErr) *outErr = err;
+    logEvent("HTTP", "GET failed %s", err.c_str());
+    http->end();
+    delete http;
+    delete secureClient;
+    delete plainClient;
+    return false;
+  }
+
+  int64_t total = http->getSize();
   if (total > (int64_t)MAX_JPG) {
     if (outErr) *outErr = "image too large";
     logEvent("PHOTO", "too large %lld", (long long)total);
-    http.end();
+    http->end();
+    delete http;
+    delete secureClient;
+    delete plainClient;
     return false;
   }
 
@@ -318,42 +349,51 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   if (!buf) {
     if (outErr) *outErr = "malloc failed";
     logEvent("PHOTO", "buffer alloc failed %u", (unsigned)allocSize);
-    http.end();
+    http->end();
+    delete http;
+    delete secureClient;
+    delete plainClient;
     return false;
   }
 
-  WiFiClient* stream = http.getStreamPtr();
+  WiFiClient* stream = http->getStreamPtr();
   size_t readTotal = 0;
   unsigned long lastProgressMs = millis();
 
-  while ((http.connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
+  while ((http->connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
     size_t avail = stream->available();
     if (!avail) {
       delay(1);
       continue;
     }
-
     size_t toRead = avail;
     if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
     if (toRead == 0) {
       free(buf);
       if (outErr) *outErr = "image too large";
       logEvent("PHOTO", "buffer full at %u", (unsigned)readTotal);
-      http.end();
+      http->end();
+      delete http;
+      delete secureClient;
+      delete plainClient;
       return false;
     }
-
     int n = stream->readBytes(buf + readTotal, toRead);
     if (n <= 0) break;
     readTotal += (size_t)n;
     lastProgressMs = millis();
   }
-  http.end();
+
+  http->end();
+  delete http;
+  delete secureClient;
+  delete plainClient;
 
   if ((total > 0 && readTotal != (size_t)total) || readTotal < 16) {
     free(buf);
     if (outErr) *outErr = "short read";
-    logEvent("PHOTO", "short read %u/%u", (unsigned)readTotal, (unsigned)((total > 0) ? total : 0));
+    logEvent("PHOTO", "short read %u/%u", (unsigned)readTotal,
+             (unsigned)((total > 0) ? total : 0));
     return false;
   }
 
@@ -661,7 +701,6 @@ static void handleGetConfigJson() {
   server.send(200, "application/json", j);
 }
 
-// Helper: returns true if the arg is present, non-empty, and is NOT the masked sentinel
 static bool isRealPassword(const String& val) {
   return val.length() > 0 && val != "********";
 }
@@ -674,7 +713,6 @@ static void handlePostConfig() {
   if (server.hasArg("mqttTopic")) cfg.mqttTopic = server.arg("mqttTopic");
   if (server.hasArg("mqttUser")) cfg.mqttUser = server.arg("mqttUser");
   if (server.hasArg("mqttPort")) cfg.mqttPort = (uint16_t)server.arg("mqttPort").toInt();
-  // Only update passwords when a real new value was explicitly submitted
   if (server.hasArg("httpPass") && isRealPassword(server.arg("httpPass"))) {
     cfg.httpPass = server.arg("httpPass");
   }
@@ -747,7 +785,6 @@ void setup() {
   ensureWifi();
 
   if (WiFi.status() == WL_CONNECTED) {
-    // Show IP on the left, MAC on the right of the same line
     String ipMac = "IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR);
     board_draw_boot_status(ipMac.c_str());
     delay(800);
