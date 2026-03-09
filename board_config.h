@@ -83,27 +83,28 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   }
 }
 
-// Draw a small text overlay over the existing image without clearing the screen
+// Draw a status bar at the bottom of the screen.
+// Always clears the full screen width so:
+//   - the background is a solid black bar (not just behind the text)
+//   - a shorter message replacing a longer one doesn't leave ghost text
 void board_draw_boot_status(const char* text) {
-  // Set up text properties
   gfx->setTextSize(2);
-  
-  // Calculate text width/height to draw a small background box
+
+  // Measure text height (use a fixed reference so bar height never changes)
   int16_t x1, y1;
-  uint16_t w, h;
-  gfx->getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
-  
-  // Position in bottom left corner
+  uint16_t tw, th;
+  gfx->getTextBounds("Ag", 0, 0, &x1, &y1, &tw, &th);
+
   int padding = 4;
-  int x = 10;
-  int y = SCREEN_H - h - 10;
-  
-  // Draw solid black rectangle behind text so it's readable over the logo
-  gfx->fillRect(x - padding, y - padding, w + (padding * 2), h + (padding * 2), 0x0000);
-  
-  // Draw white text
-  gfx->setTextColor(0xFFFF); // White in RGB565
-  gfx->setCursor(x, y);
+  int barH   = th + (padding * 2);
+  int barY   = SCREEN_H - barH - 6;
+
+  // Fill the ENTIRE width — solid black bar across the whole screen
+  gfx->fillRect(0, barY, SCREEN_W, barH, 0x0000);
+
+  // Draw white text left-aligned inside the bar
+  gfx->setTextColor(0xFFFF);
+  gfx->setCursor(10, barY + padding);
   gfx->print(text);
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
