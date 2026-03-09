@@ -9,6 +9,7 @@
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
+#include <Secrets.h>
 
 #define DEBUG_SERIAL 1
 #if DEBUG_SERIAL
