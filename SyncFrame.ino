@@ -10,7 +10,7 @@
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
 
-#define DEBUG_SERIAL 1
+#define DEBUG_SERIAL 0
 #if DEBUG_SERIAL
   #define DBG_BEGIN(x) Serial.begin(x)
   #define DBG(...)     Serial.printf(__VA_ARGS__)
