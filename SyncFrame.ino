@@ -64,7 +64,7 @@ static const char* DEFAULT_MQTT_USER = "david";
 static const char* DEFAULT_MQTT_HOST  = "192.168.6.202";
 static const uint16_t DEFAULT_MQTT_PORT = 8368;
 static const char* DEFAULT_MQTT_TOPIC = "photos";
-static const size_t MAX_JPG = 1200 * 1024;
+static const size_t MAX_JPG = 1200 * 1024;  // 1.2 MB max download
 
 WebServer server(80);
 WiFiClient mqttNetPlain;
@@ -268,7 +268,6 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 
   logEvent("PHOTO", "GET %s", url.c_str());
 
-  // Heap-allocate the client objects — they are too large for the stack
   WiFiClientSecure* secureClient = nullptr;
   WiFiClient*       plainClient  = nullptr;
   HTTPClient*       http         = new HTTPClient();
@@ -345,7 +344,9 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   }
 
   size_t allocSize = (total > 0) ? (size_t)total : MAX_JPG;
-  uint8_t* buf = (uint8_t*)ps_malloc(allocSize);
+  // Always allocate the compressed JPEG source in PSRAM — it's just raw bytes,
+  // no pointer-chasing, so cache coherency is not an issue here.
+  uint8_t* buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buf) buf = (uint8_t*)malloc(allocSize);
   if (!buf) {
     if (outErr) *outErr = "malloc failed";
