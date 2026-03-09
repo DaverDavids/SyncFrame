@@ -17,11 +17,33 @@
 static JPEGDEC jpeg;
 
 static int JPEGDraw(JPEGDRAW *pDraw) {
-  gfx->draw16bitRGBBitmap(
-    pDraw->x, pDraw->y,
-    (uint16_t*)pDraw->pPixels,
-    pDraw->iWidth, pDraw->iHeight
-  );
+  // Clip the MCU block to screen bounds. JPEGDEC emits blocks aligned to
+  // MCU boundaries (8 or 16px) which can extend a few pixels past the edge
+  // of a narrow/short image. Writing those pixels off the end of the
+  // framebuffer corrupts memory and causes a cache/MMU panic.
+  int x = pDraw->x;
+  int y = pDraw->y;
+  int w = pDraw->iWidth;
+  int h = pDraw->iHeight;
+
+  if (x >= SCREEN_W || y >= SCREEN_H) return 1; // fully off-screen, skip
+  if (x < 0) { w += x; x = 0; }                 // shouldn't happen but be safe
+  if (y < 0) { h += y; y = 0; }
+  if (w <= 0 || h <= 0) return 1;
+
+  int clipW = (x + w > SCREEN_W) ? (SCREEN_W - x) : w;
+  int clipH = (y + h > SCREEN_H) ? (SCREEN_H - y) : h;
+
+  if (clipW == w && clipH == h) {
+    // No clipping needed — fast path, no copy
+    gfx->draw16bitRGBBitmap(x, y, (uint16_t*)pDraw->pPixels, w, h);
+  } else {
+    // Need to draw row by row to honour the clipped width
+    uint16_t* src = (uint16_t*)pDraw->pPixels;
+    for (int row = 0; row < clipH; row++) {
+      gfx->draw16bitRGBBitmap(x, y + row, src + row * w, clipW, 1);
+    }
+  }
   return 1;
 }
 
