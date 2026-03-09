@@ -19,11 +19,12 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <JPEGDEC.h>
+#include <Secrets.h>
 
 // ---- USER CONFIG -------------------------------------------------------
-const char* WIFI_SSID     = "Yfi";          // your SSID
-const char* WIFI_PASS     = "";             // your password (empty = open)
-const char* IMAGE_URL     = "https://192.168.6.202:8369/syncframe/photo.800x480.jpg";
+const char* WIFI_SSID     = MYSSID;          // your SSID
+const char* WIFI_PASS     = MYPSK;             // your password (empty = open)
+const char* IMAGE_URL     = "https://david:rawson@192.168.6.202:8369/syncframe/photo.800x480.jpg";
 // Change IMAGE_URL to the crashing image URL, e.g.:
 // "https://192.168.6.202:8369/syncframe/photo.270x480.jpg"
 // ------------------------------------------------------------------------
@@ -194,7 +195,12 @@ static bool downloadImage(const char* url) {
   // Allocate in PSRAM if available, else heap
   if (jpegBuf) { free(jpegBuf); jpegBuf = nullptr; }
   size_t allocSize = (contentLen > 0) ? contentLen : 200000;
-  jpegBuf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  
+  // To this (internal RAM first, PSRAM fallback):
+  jpegBuf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!jpegBuf)
+      jpegBuf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
   if (!jpegBuf) {
     jpegBuf = (uint8_t*)malloc(allocSize);
   }
