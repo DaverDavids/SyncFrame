@@ -1,0 +1,1 @@
+sudo docker run --restart always --name SyncFrame -p 9368:9368 -p 9369:9369 -d rawdr/syncframe 
