@@ -141,6 +141,18 @@ IMAGE_MAX_WIDTH = config.getint("image", "max_width", fallback=1920)
 IMAGE_MAX_HEIGHT = config.getint("image", "max_height", fallback=1080)
 IMAGE_JPEG_QUALITY = config.getint("image", "jpeg_quality", fallback=85)
 
+# ---------------------------------------------------------------------------
+# RESOLUTIONS
+# All display resolutions to maintain as separate thumbnail files alongside
+# the master photo.jpg (1920x1080).  To add a new resolution, simply append
+# a (width, height) tuple here - every code path (upload, desaturation,
+# on-the-fly generation, and serving) will handle it automatically.
+# ---------------------------------------------------------------------------
+RESOLUTIONS = [
+    (800, 480),
+    (280, 240),
+]
+
 # Flask web app setup
 app = Flask(__name__)
 # Set a secret key for session management (change this to a random value in production)
@@ -475,27 +487,40 @@ def generate_mqtt_certificates():
         raise
 
 
-def generate_large_thumbnail():
-    """Generate 800x480 thumbnail from main photo"""
-    try:
-        if not os.path.exists(WATCH_FILE):
-            logging.warning(
-                "Cannot generate large thumbnail - photo.jpg does not exist"
-            )
-            return
+def generate_thumbnails(source_img=None):
+    """Generate all resolution variants listed in RESOLUTIONS from the master photo.jpg.
 
-        img = Image.open(WATCH_FILE)
-        img = fix_image_orientation(img)
-        large_path = WATCH_FILE.replace("photo.jpg", "photo.800x480.jpg")
-        large_img = img.copy()
-        large_maxsize = (800, 480)
-        large_img.thumbnail(large_maxsize, Image.LANCZOS)
-        large_img.save(large_path, format="JPEG", quality=75, optimize=True)
-        logging.info(
-            f"Large thumbnail regenerated at {large_path} - size: {large_img.size}"
-        )
+    Args:
+        source_img: An already-open Pillow Image to use as the source.  If None,
+                    the function opens WATCH_FILE from disk.  Passing the image
+                    directly avoids an extra disk read when the caller already
+                    has the image in memory (e.g. during upload or desaturation).
+    """
+    try:
+        if source_img is None:
+            if not os.path.exists(WATCH_FILE):
+                logging.warning(
+                    "Cannot generate thumbnails - photo.jpg does not exist"
+                )
+                return
+            source_img = Image.open(WATCH_FILE)
+            source_img = fix_image_orientation(source_img)
+
+        for (w, h) in RESOLUTIONS:
+            try:
+                thumb = source_img.copy()
+                thumb.thumbnail((w, h), Image.LANCZOS)
+                out_path = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
+                thumb.save(out_path, format="JPEG", quality=75, optimize=True)
+                logging.info(
+                    "Thumbnail saved: %s at size %s", out_path, thumb.size
+                )
+            except Exception as e:
+                logging.error(
+                    "Error generating %dx%d thumbnail: %s", w, h, e
+                )
     except Exception as e:
-        logging.error(f"Error generating large thumbnail: {e}")
+        logging.error("Error in generate_thumbnails: %s", e)
 
 
 # Class to watch for changes in a specific file
@@ -600,17 +625,28 @@ def desaturate_image():
         logging.info(
             "Desaturated %s by 34%% and saved to photo-changed.jpg", WATCH_FILE
         )
-        finalize_changes()
+        # Pass the desaturated image so finalize_changes can regenerate thumbnails
+        # without re-reading the file from disk.
+        finalize_changes(img)
     except Exception as e:
         logging.error(f"Error desaturating image: {e}")
 
 
-def finalize_changes():
+def finalize_changes(img=None):
+    """Copy photo-changed.jpg over the master photo.jpg and regenerate all thumbnails.
+
+    Args:
+        img: The already-processed Pillow Image.  Passed through to
+             generate_thumbnails() to avoid an extra disk read.  If None,
+             generate_thumbnails() will open WATCH_FILE itself.
+    """
     try:
         shutil.copy("photo-changed.jpg", WATCH_FILE)
         logging.info("Copied photo-changed.jpg to %s", WATCH_FILE)
+        # Regenerate ALL resolution variants so they stay in sync with the master
+        generate_thumbnails(source_img=img)
     except Exception as e:
-        logging.error(f"Error copying file: {e}")
+        logging.error(f"Error in finalize_changes: {e}")
 
 
 def schedule_desaturation():
@@ -947,24 +983,18 @@ def upload_file():
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
 
-        # Resize to fit within 1920x1080 while keeping aspect ratio
+        # Resize to fit within max dimensions (default 1920x1080) while keeping aspect ratio
         max_size = (IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT)
         img.thumbnail(max_size, Image.LANCZOS)
 
-        # Generate large thumbnail RIGHT HERE from img we already have
-        large_path = target_path.replace("photo.jpg", "photo.800x480.jpg")
-        large_img = img.copy()  # No need to reopen file!
-        large_img.thumbnail((800, 480), Image.LANCZOS)
-        large_img.save(large_path, format="JPEG", quality=75, optimize=True)
-        logging.info(
-            "Large thumbnail saved to %s at size %s", large_path, large_img.size
-        )
-
-        # Save optimized JPEG
+        # Save optimized JPEG master first
         img.save(target_path, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
         logging.info(
             "Uploaded image resized to max %s and saved to %s", max_size, target_path
         )
+
+        # Generate ALL resolution variants from the already-open image (no extra disk read)
+        generate_thumbnails(source_img=img)
 
         # Notify clients (don't send MQTT here - let the file watcher handle it)
         # send_mqtt_message("refresh")  # Commented out to avoid duplicate messages
@@ -988,25 +1018,35 @@ def serve_photo():
     return "No photo available", 404
 
 
-@bp.route("/photo.800x480.jpg")
+@bp.route("/photo.<int:w>x<int:h>.jpg")
 @requires_auth
-def serve_photo_large():
-    """Serve the large thumbnail (800x480)"""
-    large_file = WATCH_FILE.replace("photo.jpg", "photo.800x480.jpg")
-    if os.path.exists(large_file):
+def serve_photo_variant(w, h):
+    """Serve a resolution variant dynamically for any resolution in RESOLUTIONS.
+
+    The URL pattern /photo.<w>x<h>.jpg matches any width/height combination.
+    Only resolutions present in the RESOLUTIONS list are accepted; all others
+    return 404.  This replaces the old hardcoded /photo.800x480.jpg route while
+    remaining fully backwards-compatible with existing clients requesting that URL.
+    """
+    if (w, h) not in RESOLUTIONS:
+        return "Resolution not supported", 404
+
+    variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
+
+    if os.path.exists(variant_file):
         return send_from_directory(
-            os.path.dirname(os.path.abspath(large_file)) or ".",
-            os.path.basename(large_file),
+            os.path.dirname(os.path.abspath(variant_file)) or ".",
+            os.path.basename(variant_file),
         )
 
-    # If large thumbnail doesn't exist, try to generate it on-the-fly
+    # Variant missing - generate all thumbnails on-the-fly then serve
     if os.path.exists(WATCH_FILE):
-        logging.info("Large thumbnail missing - generating on-the-fly")
-        generate_large_thumbnail()
-        if os.path.exists(large_file):
+        logging.info("Variant %dx%d missing - generating all thumbnails on-the-fly", w, h)
+        generate_thumbnails()
+        if os.path.exists(variant_file):
             return send_from_directory(
-                os.path.dirname(os.path.abspath(large_file)) or ".",
-                os.path.basename(large_file),
+                os.path.dirname(os.path.abspath(variant_file)) or ".",
+                os.path.basename(variant_file),
             )
 
     return "No photo available - upload an image first", 404
