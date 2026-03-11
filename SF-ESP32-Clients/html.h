@@ -37,26 +37,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       color:#ffffff;
       text-shadow:0 2px 10px rgba(0,0,0,0.7);
       font-size:2.5em;
-      margin-bottom:10px;
+      margin-bottom:20px;
     }
-    .status-bar{
-      display:flex;
-      flex-wrap:wrap;
-      justify-content:center;
-      gap:14px;
-      margin-bottom:18px;
-      font-size:13px;
-    }
-    .status-bar span{
-      background:rgba(0,0,0,0.3);
-      backdrop-filter:blur(6px);
-      border:1px solid rgba(255,255,255,0.15);
-      border-radius:20px;
-      padding:4px 14px;
-      font-weight:600;
-    }
-    .ok{color:#37d67a}
-    .bad{color:#ff5d5d}
     .image-container{
       display:inline-block;
       width:min(92vw,860px);
@@ -98,7 +80,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     button:hover{background:rgba(255,255,255,0.25)}
     button:active{transform:scale(0.98)}
     footer{
-      margin-top:24px;
+      margin-top:20px;
       padding:8px;
       color:rgba(255,255,255,0.55);
       font-size:0.82em;
@@ -115,6 +97,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
       transition:color 0.2s;
     }
     footer a:hover{color:rgba(255,255,255,0.75)}
+    #last-updated{
+      width:100%;
+      text-align:center;
+      margin-top:4px;
+      color:rgba(255,255,255,0.5);
+      font-size:0.82em;
+    }
     @media(max-width:600px){
       h1{font-size:1.8em}
       footer{flex-direction:column;gap:6px}
@@ -124,20 +113,15 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 <body>
   <h1>SyncFrame</h1>
 
-  <div class="status-bar">
-    <span id="s_wifi">WiFi: &hellip;</span>
-    <span id="s_mdns">mDNS: &hellip;</span>
-    <span id="s_mqtt">MQTT: &hellip;</span>
-    <span id="s_dl">Photo: &hellip;</span>
-  </div>
-
   <div class="controls">
-    <button onclick="refreshNow()">&#8635; Refresh</button>
+    <button onclick="refreshNow()">&#8635; Refresh the Frame</button>
   </div>
 
   <div class="image-container">
     <img id="img" src="/img/current" alt="current photo"/>
   </div>
+
+  <p id="last-updated">No photo loaded yet</p>
 
   <footer>
     <span id="f_ip">IP: &hellip;</span>
@@ -147,36 +131,40 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   </footer>
 
 <script>
-function setStatus(id, label, ok) {
-  const el = document.getElementById(id);
-  el.innerHTML = label + ": " + (ok
-    ? "<span class='ok'>&#10003;</span>"
-    : "<span class='bad'>&#10007;</span>");
-}
 let lastImgStamp = 0;
+
+function formatTimestamp(ms) {
+  if (!ms) return null;
+  const date = new Date(ms);
+  return date.toLocaleString('en-US', {
+    month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true
+  });
+}
+
 async function poll() {
   try {
     const r = await fetch("/api/status", {cache:"no-store"});
     const s = await r.json();
-    setStatus("s_wifi", "WiFi",  !!s.wifi);
-    setStatus("s_mdns", "mDNS",  !!s.mdns);
-    setStatus("s_mqtt", "MQTT",  !!s.mqtt);
-    setStatus("s_dl",   "Photo", !!s.lastDownloadOk);
     if (s.ip)       document.getElementById("f_ip").textContent   = "IP: "   + s.ip;
     if (s.mac)      document.getElementById("f_mac").textContent  = "MAC: "  + s.mac;
     if (s.hostname) document.getElementById("f_host").textContent = "Host: " + s.hostname;
-    if (s.lastDownloadMs && s.lastDownloadMs !== lastImgStamp) {
-      lastImgStamp = s.lastDownloadMs;
-      document.getElementById("img").src = "/img/current?ts=" + lastImgStamp;
+    if (s.lastDownloadMs) {
+      const ts = formatTimestamp(s.lastDownloadMs);
+      if (ts) document.getElementById("last-updated").textContent = "Last updated: " + ts;
+      if (s.lastDownloadMs !== lastImgStamp) {
+        lastImgStamp = s.lastDownloadMs;
+        document.getElementById("img").src = "/img/current?ts=" + lastImgStamp;
+      }
     }
-  } catch(e) {
-    ["s_wifi","s_mdns","s_mqtt","s_dl"].forEach(id => setStatus(id.replace("s_",""), id.replace("s_",""), false));
-  }
+  } catch(e) {}
 }
+
 async function refreshNow() {
   await fetch("/api/refresh", {method:"POST"});
   await poll();
 }
+
 poll();
 setInterval(poll, 2000);
 </script>
@@ -269,6 +257,21 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       color:#37d67a;
       display:none;
     }
+    .status-bar{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      margin-bottom:4px;
+      font-size:13px;
+    }
+    .status-bar span{
+      background:rgba(0,0,0,0.3);
+      backdrop-filter:blur(6px);
+      border:1px solid rgba(255,255,255,0.15);
+      border-radius:20px;
+      padding:4px 14px;
+      font-weight:600;
+    }
     .status-box{
       margin-top:6px;
       padding:12px;
@@ -308,6 +311,14 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <div class="header-row">
       <h1>Config / Debug</h1>
       <a class="back-link" href="/">&larr; Back</a>
+    </div>
+
+    <h3>Device Status</h3>
+    <div class="status-bar">
+      <span id="s_wifi">WiFi: &hellip;</span>
+      <span id="s_mdns">mDNS: &hellip;</span>
+      <span id="s_mqtt">MQTT: &hellip;</span>
+      <span id="s_dl">Photo: &hellip;</span>
     </div>
 
     <div id="saveMsg" class="msg">Settings saved!</div>
@@ -410,19 +421,27 @@ async function loadCfg() {
     const r = await fetch("/api/config", {cache:"no-store"});
     const c = await r.json();
     currentConfig = c;
-    photoBaseUrl.value    = c.photoBaseUrl    || "";
-    photoFilename.value   = c.photoFilename   || "";
-    httpsInsecure.checked = !!c.httpsInsecure;
-    httpUser.value        = c.httpUser        || "";
-    httpPass.value        = "";
-    mqttHost.value        = c.mqttHost        || "";
-    mqttPort.value        = c.mqttPort        || "";
-    mqttTopic.value       = c.mqttTopic       || "";
-    mqttUser.value        = c.mqttUser        || "";
-    mqttPass.value        = "";
-    mqttUseTLS.checked    = !!c.mqttUseTLS;
+    photoBaseUrl.value      = c.photoBaseUrl    || "";
+    photoFilename.value     = c.photoFilename   || "";
+    httpsInsecure.checked   = !!c.httpsInsecure;
+    httpUser.value          = c.httpUser        || "";
+    httpPass.value          = "";
+    mqttHost.value          = c.mqttHost        || "";
+    mqttPort.value          = c.mqttPort        || "";
+    mqttTopic.value         = c.mqttTopic       || "";
+    mqttUser.value          = c.mqttUser        || "";
+    mqttPass.value          = "";
+    mqttUseTLS.checked      = !!c.mqttUseTLS;
     mqttTlsInsecure.checked = !!c.mqttTlsInsecure;
   } catch(e) { console.error("Failed to load config:", e); }
+}
+
+function setPill(id, label, ok) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = label + ": " + (ok
+    ? "<span class='ok'>&#10003;</span>"
+    : "<span class='bad'>&#10007;</span>");
 }
 
 function setSpan(id, text, ok) {
@@ -438,6 +457,12 @@ async function loadStatus() {
   try {
     const r = await fetch("/api/status", {cache:"no-store"});
     const s = await r.json();
+    // pill indicators at top
+    setPill("s_wifi", "WiFi",  !!s.wifi);
+    setPill("s_mdns", "mDNS",  !!s.mdns);
+    setPill("s_mqtt", "MQTT",  !!s.mqtt);
+    setPill("s_dl",   "Photo", !!s.lastDownloadOk);
+    // detailed status box
     setSpan("ds_host",  "Host: "  + (s.hostname || "-"), null);
     setSpan("ds_mac",   "MAC: "   + (s.mac      || "-"), null);
     setSpan("ds_ip",    "IP: "    + (s.ip       || "offline"), null);
