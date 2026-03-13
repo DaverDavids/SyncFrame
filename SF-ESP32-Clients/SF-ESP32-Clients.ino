@@ -44,10 +44,10 @@ static const char* HOST_PREFIX = "syncframe-";
 // Captive Portal DNS + Web portal state
 // ---------------------------------------------------------------------------
 DNSServer dnsServer;
-static bool portalActive = false;         // true while captive portal is running
-static bool portalDone   = false;         // set true once credentials saved
+static bool portalActive = false;
+static bool portalDone   = false;
 static unsigned long portalStartMs = 0;
-static const uint32_t PORTAL_TIMEOUT_MS = 180000; // 3 min
+static const uint32_t PORTAL_TIMEOUT_MS = 180000;
 
 // ---------------------------------------------------------------------------
 // Config / Prefs
@@ -68,20 +68,24 @@ struct Config {
   String mqttPass;
   bool mqttUseTLS;
   bool mqttTlsInsecure;
-  String updateUrl;       // URL to a plain-text manifest listing .bin filenames
-  uint32_t updateIntervalMin; // how often to check (minutes), 0 = disabled
+  String updateUrl;
+  uint32_t updateIntervalMin;
+  String webUser;    // web UI login username
+  String webPass;    // web UI login password (empty = no auth)
 } cfg;
 
 static const char* PREF_NS = "syncframe";
-static const char* DEFAULT_PHOTO_BASEURL = "https://192.168.6.202:8369/syncframe/";
-static const char* DEFAULT_PHOTO_FILE    = "photo.800x480.jpg";
-static const char* DEFAULT_HTTP_USER     = "david";
-static const char* DEFAULT_MQTT_USER     = "david";
-static const char* DEFAULT_MQTT_HOST     = "192.168.6.202";
-static const uint16_t DEFAULT_MQTT_PORT  = 8368;
-static const char* DEFAULT_MQTT_TOPIC    = "photos";
-static const char* DEFAULT_UPDATE_URL    = "";  // blank = disabled by default
+static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
+static const char* DEFAULT_PHOTO_FILE          = "photo.800x480.jpg";
+static const char* DEFAULT_HTTP_USER           = "david";
+static const char* DEFAULT_MQTT_USER           = "david";
+static const char* DEFAULT_MQTT_HOST           = "192.168.6.202";
+static const uint16_t DEFAULT_MQTT_PORT        = 8368;
+static const char* DEFAULT_MQTT_TOPIC          = "photos";
+static const char* DEFAULT_UPDATE_URL          = "";
 static const uint32_t DEFAULT_UPDATE_INTERVAL_MIN = 60;
+static const char* DEFAULT_WEB_USER            = "admin";
+static const char* DEFAULT_WEB_PASS            = "";  // blank = open by default
 static const size_t MAX_JPG = 1200 * 1024;
 
 WebServer server(80);
@@ -106,7 +110,6 @@ size_t   lastJpgLen    = 0;
 bool showingLast        = false;
 bool wifiEverConnected  = false;
 
-// OTA update task
 static TaskHandle_t otaTaskHandle = nullptr;
 static volatile bool otaInProgress = false;
 
@@ -122,6 +125,19 @@ static LogEntry logBuf[LOG_CAP];
 static uint8_t  logHead  = 0;
 static uint8_t  logCount = 0;
 static uint32_t logSeq   = 0;
+
+// ============================================================
+// Web Authentication
+// Returns true if request is authorised (or no password set).
+// Sends 401 + WWW-Authenticate header and returns false if not.
+// ============================================================
+static bool requireWebAuth() {
+  if (cfg.webPass.length() == 0) return true;  // no password configured
+  if (server.authenticate(cfg.webUser.c_str(), cfg.webPass.c_str())) return true;
+  server.requestAuthentication(BASIC_AUTH, "SyncFrame",
+    "Authentication required");
+  return false;
+}
 
 // ---------------------- Hardware Callbacks ----------------------
 bool hasLastPhoto() { return (lastJpg != nullptr && lastJpgLen > 0); }
@@ -183,12 +199,10 @@ static void logEvent(const char* tag, const char* fmt, ...) {
   e.ms  = millis();
   strncpy(e.tag, tag ? tag : "LOG", sizeof(e.tag) - 1);
   e.tag[sizeof(e.tag) - 1] = 0;
-
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(e.msg, sizeof(e.msg), fmt, ap);
   va_end(ap);
-
   logHead = (logHead + 1) % LOG_CAP;
   if (logCount < LOG_CAP) logCount++;
   DBG("[%s] %s\n", e.tag, e.msg);
@@ -228,25 +242,26 @@ static void applyWifiDefaults() {
 
 static void loadConfig() {
   prefs.begin(PREF_NS, true);
-  cfg.wifiSsid            = prefs.getString("wssid", "");
-  cfg.wifiPass            = prefs.getString("wpsk",  "");
-  cfg.photoBaseUrl        = prefs.getString("pbase",  DEFAULT_PHOTO_BASEURL);
-  cfg.photoFilename       = prefs.getString("pfile",  DEFAULT_PHOTO_FILE);
-  cfg.httpsInsecure       = prefs.getBool("pinsec",   true);
-  cfg.httpUser            = prefs.getString("puser",  DEFAULT_HTTP_USER);
-  cfg.httpPass            = prefs.getString("ppass",  String(test_http_password));
-  cfg.mqttHost            = prefs.getString("mhost",  DEFAULT_MQTT_HOST);
-  cfg.mqttPort            = prefs.getUShort("mport",  DEFAULT_MQTT_PORT);
-  cfg.mqttTopic           = prefs.getString("mtopic", DEFAULT_MQTT_TOPIC);
-  cfg.mqttUser            = prefs.getString("muser",  DEFAULT_MQTT_USER);
-  cfg.mqttPass            = prefs.getString("mpass",  String(test_http_password));
-  cfg.mqttUseTLS          = prefs.getBool("mtls",     true);
-  cfg.mqttTlsInsecure     = prefs.getBool("mtlsins",  true);
-  cfg.updateUrl           = prefs.getString("updurl", DEFAULT_UPDATE_URL);
-  cfg.updateIntervalMin   = prefs.getUInt("updint",   DEFAULT_UPDATE_INTERVAL_MIN);
+  cfg.wifiSsid          = prefs.getString("wssid",   "");
+  cfg.wifiPass          = prefs.getString("wpsk",    "");
+  cfg.photoBaseUrl      = prefs.getString("pbase",   DEFAULT_PHOTO_BASEURL);
+  cfg.photoFilename     = prefs.getString("pfile",   DEFAULT_PHOTO_FILE);
+  cfg.httpsInsecure     = prefs.getBool("pinsec",    true);
+  cfg.httpUser          = prefs.getString("puser",   DEFAULT_HTTP_USER);
+  cfg.httpPass          = prefs.getString("ppass",   String(test_http_password));
+  cfg.mqttHost          = prefs.getString("mhost",   DEFAULT_MQTT_HOST);
+  cfg.mqttPort          = prefs.getUShort("mport",   DEFAULT_MQTT_PORT);
+  cfg.mqttTopic         = prefs.getString("mtopic",  DEFAULT_MQTT_TOPIC);
+  cfg.mqttUser          = prefs.getString("muser",   DEFAULT_MQTT_USER);
+  cfg.mqttPass          = prefs.getString("mpass",   String(test_http_password));
+  cfg.mqttUseTLS        = prefs.getBool("mtls",      true);
+  cfg.mqttTlsInsecure   = prefs.getBool("mtlsins",   true);
+  cfg.updateUrl         = prefs.getString("updurl",  DEFAULT_UPDATE_URL);
+  cfg.updateIntervalMin = prefs.getUInt("updint",    DEFAULT_UPDATE_INTERVAL_MIN);
+  cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
+  cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
   prefs.end();
 
-  // Fall back to compile-time credentials if NVS has none
   if (cfg.wifiSsid.length() == 0 && MYSSID && strlen(MYSSID)) {
     cfg.wifiSsid = String(MYSSID);
     cfg.wifiPass = String(MYPSK);
@@ -255,22 +270,24 @@ static void loadConfig() {
 
 static void saveConfig() {
   prefs.begin(PREF_NS, false);
-  prefs.putString("wssid",   cfg.wifiSsid);
-  prefs.putString("wpsk",    cfg.wifiPass);
-  prefs.putString("pbase",   cfg.photoBaseUrl);
-  prefs.putString("pfile",   cfg.photoFilename);
-  prefs.putBool("pinsec",    cfg.httpsInsecure);
-  prefs.putString("puser",   cfg.httpUser);
-  prefs.putString("ppass",   cfg.httpPass);
-  prefs.putString("mhost",   cfg.mqttHost);
-  prefs.putUShort("mport",   cfg.mqttPort);
-  prefs.putString("mtopic",  cfg.mqttTopic);
-  prefs.putString("muser",   cfg.mqttUser);
-  prefs.putString("mpass",   cfg.mqttPass);
-  prefs.putBool("mtls",      cfg.mqttUseTLS);
-  prefs.putBool("mtlsins",   cfg.mqttTlsInsecure);
-  prefs.putString("updurl",  cfg.updateUrl);
-  prefs.putUInt("updint",    cfg.updateIntervalMin);
+  prefs.putString("wssid",  cfg.wifiSsid);
+  prefs.putString("wpsk",   cfg.wifiPass);
+  prefs.putString("pbase",  cfg.photoBaseUrl);
+  prefs.putString("pfile",  cfg.photoFilename);
+  prefs.putBool("pinsec",   cfg.httpsInsecure);
+  prefs.putString("puser",  cfg.httpUser);
+  prefs.putString("ppass",  cfg.httpPass);
+  prefs.putString("mhost",  cfg.mqttHost);
+  prefs.putUShort("mport",  cfg.mqttPort);
+  prefs.putString("mtopic", cfg.mqttTopic);
+  prefs.putString("muser",  cfg.mqttUser);
+  prefs.putString("mpass",  cfg.mqttPass);
+  prefs.putBool("mtls",     cfg.mqttUseTLS);
+  prefs.putBool("mtlsins",  cfg.mqttTlsInsecure);
+  prefs.putString("updurl", cfg.updateUrl);
+  prefs.putUInt("updint",   cfg.updateIntervalMin);
+  prefs.putString("wbuser", cfg.webUser);
+  prefs.putString("wbpass", cfg.webPass);
   prefs.end();
 }
 
@@ -283,9 +300,6 @@ static String makePhotoUrl() {
 // ============================================================
 // Captive Portal
 // ============================================================
-
-// Minimal HTML for the captive portal Wi-Fi setup page.
-// Served from PROGMEM to save RAM.
 static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head>
 <meta charset='utf-8'>
@@ -327,7 +341,6 @@ static const char PORTAL_SAVED_HTML[] PROGMEM = R"rawliteral(
 </div></body></html>
 )rawliteral";
 
-// Redirect all unknown requests to the portal page (captive portal behaviour)
 static void handleCaptiveRedirect() {
   server.sendHeader("Location", "http://192.168.4.1/portal", true);
   server.send(302, "text/plain", "");
@@ -350,21 +363,18 @@ static void handlePortalSave() {
   server.send(200, "text/html; charset=utf-8", FPSTR(PORTAL_SAVED_HTML));
 }
 
-// Register portal-specific routes. Called before startPortalMode.
 static void setupPortalRoutes() {
-  server.on("/portal",       HTTP_GET,  handlePortalPage);
-  server.on("/portal/save",  HTTP_POST, handlePortalSave);
-  // iOS / Android captive portal detection endpoints -> redirect to our page
-  server.on("/hotspot-detect.html",              HTTP_GET, handleCaptiveRedirect);
-  server.on("/generate_204",                     HTTP_GET, handleCaptiveRedirect);
-  server.on("/gen_204",                          HTTP_GET, handleCaptiveRedirect);
-  server.on("/ncsi.txt",                         HTTP_GET, handleCaptiveRedirect);
-  server.on("/connecttest.txt",                  HTTP_GET, handleCaptiveRedirect);
-  server.on("/redirect",                         HTTP_GET, handleCaptiveRedirect);
+  server.on("/portal",              HTTP_GET,  handlePortalPage);
+  server.on("/portal/save",         HTTP_POST, handlePortalSave);
+  server.on("/hotspot-detect.html", HTTP_GET,  handleCaptiveRedirect);
+  server.on("/generate_204",        HTTP_GET,  handleCaptiveRedirect);
+  server.on("/gen_204",             HTTP_GET,  handleCaptiveRedirect);
+  server.on("/ncsi.txt",            HTTP_GET,  handleCaptiveRedirect);
+  server.on("/connecttest.txt",     HTTP_GET,  handleCaptiveRedirect);
+  server.on("/redirect",            HTTP_GET,  handleCaptiveRedirect);
   server.onNotFound(handleCaptiveRedirect);
 }
 
-// Bring up AP + DNS server for captive portal
 static void startPortalMode() {
   if (portalActive) return;
   String apName = String(HOSTNAME) + "-setup";
@@ -375,20 +385,18 @@ static void startPortalMode() {
   WiFi.softAP(apName.c_str());
   delay(100);
 
-  // DNS: redirect every hostname to the AP IP so any HTTP request triggers portal
   dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
   dnsServer.start(53, "*", WiFi.softAPIP());
 
   setupPortalRoutes();
   server.begin();
 
-  portalActive   = true;
-  portalDone     = false;
-  portalStartMs  = millis();
+  portalActive  = true;
+  portalDone    = false;
+  portalStartMs = millis();
   logEvent("PORTAL", "active ip=%s", WiFi.softAPIP().toString().c_str());
 }
 
-// Call from loop() while portal is active
 static void handlePortalLoop() {
   if (!portalActive) return;
   dnsServer.processNextRequest();
@@ -400,10 +408,9 @@ static void handlePortalLoop() {
     dnsServer.stop();
     server.stop();
     WiFi.softAPdisconnect(true);
-    portalActive = false;
-    // Reset so we retry normal connection with new (or same) credentials
-    wifiEverConnected  = false;
-    lastWifiAttemptMs  = 0;
+    portalActive      = false;
+    wifiEverConnected = false;
+    lastWifiAttemptMs = 0;
   }
 }
 
@@ -427,10 +434,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   WiFiClientSecure* secureClient = nullptr;
   WiFiClient*       plainClient  = nullptr;
   HTTPClient*       http         = new HTTPClient();
-  if (!http) {
-    if (outErr) *outErr = "alloc failed";
-    return false;
-  }
+  if (!http) { if (outErr) *outErr = "alloc failed"; return false; }
 
   http->setConnectTimeout(4000);
   http->setTimeout(5000);
@@ -457,9 +461,8 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     return false;
   }
 
-  if (cfg.httpUser.length() > 0) {
+  if (cfg.httpUser.length() > 0)
     http->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
-  }
 
   int code = http->GET();
   if (code != HTTP_CODE_OK) {
@@ -496,8 +499,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     size_t toRead = avail;
     if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
     if (toRead == 0) {
-      free(buf);
-      if (outErr) *outErr = "image too large";
+      free(buf); if (outErr) *outErr = "image too large";
       http->end(); delete http; delete secureClient; delete plainClient;
       return false;
     }
@@ -510,8 +512,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   http->end(); delete http; delete secureClient; delete plainClient;
 
   if ((total > 0 && readTotal != (size_t)total) || readTotal < 16) {
-    free(buf);
-    if (outErr) *outErr = "short read";
+    free(buf); if (outErr) *outErr = "short read";
     logEvent("PHOTO", "short read %u/%u", (unsigned)readTotal, (unsigned)((total > 0) ? total : 0));
     return false;
   }
@@ -534,9 +535,7 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
-  if (!currentJpg && !lastJpg) {
-    board_draw_boot_status("Downloading Photo...");
-  }
+  if (!currentJpg && !lastJpg) board_draw_boot_status("Downloading Photo...");
 
   bool ok = httpDownloadToBuffer(&newBuf, &newLen, &err);
   lastDownloadMs = millis();
@@ -545,15 +544,15 @@ static bool downloadAndShowPhoto() {
     lastDownloadOk  = false;
     lastDownloadErr = err;
     logEvent("PHOTO", "download failed %s", err.c_str());
-    if (currentJpg && currentJpgLen)       showCurrentPhoto();
-    else if (lastJpg && lastJpgLen)         showLastPhoto();
-    else                                    board_draw_boot_status((String("Download failed: ") + err).c_str());
+    if (currentJpg && currentJpgLen)   showCurrentPhoto();
+    else if (lastJpg && lastJpgLen)     showLastPhoto();
+    else                                board_draw_boot_status((String("Download failed: ") + err).c_str());
     return false;
   }
 
   freeBuf(lastJpg, lastJpgLen);
-  lastJpg    = currentJpg;
-  lastJpgLen = currentJpgLen;
+  lastJpg       = currentJpg;
+  lastJpgLen    = currentJpgLen;
   currentJpg    = newBuf;
   currentJpgLen = newLen;
   lastDownloadOk  = true;
@@ -565,31 +564,21 @@ static bool downloadAndShowPhoto() {
 }
 
 // ============================================================
-// Background OTA update task
-// Runs on core 0 at low priority. Wakes every updateIntervalMin minutes,
-// fetches a plain-text manifest URL, looks for a line containing HOSTNAME,
-// and if found performs an HTTP(S) firmware update then reboots.
-// The task never interferes with loop() on core 1.
+// Background OTA update task (core 0, priority 1)
 // ============================================================
 static void otaUpdateTask(void* pv) {
-  // Initial delay: wait until WiFi is up before first check.
-  // Polls every 5 s until connected, then starts the interval timer.
-  while (WiFi.status() != WL_CONNECTED) {
-    vTaskDelay(pdMS_TO_TICKS(5000));
-  }
-  // Stagger first check by 30 s after boot to let everything settle.
+  while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
   vTaskDelay(pdMS_TO_TICKS(30000));
 
   for (;;) {
     uint32_t intervalMs = cfg.updateIntervalMin * 60UL * 1000UL;
-    if (intervalMs == 0) intervalMs = 3600000UL; // default 1 h if misconfigured
+    if (intervalMs == 0) intervalMs = 3600000UL;
 
     if (cfg.updateUrl.length() > 0 && WiFi.status() == WL_CONNECTED && !otaInProgress) {
       logEvent("OTA", "checking manifest %s", cfg.updateUrl.c_str());
 
-      // Fetch the manifest (plain text, one filename/URL per line)
-      HTTPClient* http = new HTTPClient();
-      WiFiClientSecure* sec  = nullptr;
+      HTTPClient*       http  = new HTTPClient();
+      WiFiClientSecure* sec   = nullptr;
       WiFiClient*       plain = nullptr;
       String binUrl = "";
 
@@ -605,7 +594,6 @@ static void otaUpdateTask(void* pv) {
           if (plain) ok = http->begin(*plain, cfg.updateUrl);
         }
         if (ok && http->GET() == HTTP_CODE_OK) {
-          // Read manifest line by line, find one containing our hostname
           WiFiClient* s = http->getStreamPtr();
           String line;
           unsigned long t = millis();
@@ -615,11 +603,9 @@ static void otaUpdateTask(void* pv) {
               if (c == '\n' || c == '\r') {
                 line.trim();
                 if (line.length() > 0 && line.indexOf(HOSTNAME) >= 0) {
-                  // Line is the full URL or just a filename
                   if (line.startsWith("http")) {
                     binUrl = line;
                   } else {
-                    // Treat as filename relative to the base of the manifest URL
                     String base = cfg.updateUrl;
                     int lastSlash = base.lastIndexOf('/');
                     if (lastSlash > 7) base = base.substring(0, lastSlash + 1);
@@ -640,26 +626,22 @@ static void otaUpdateTask(void* pv) {
         } else {
           logEvent("OTA", "manifest fetch failed");
         }
-        http->end();
-        delete http;
-        delete sec;
-        delete plain;
+        http->end(); delete http; delete sec; delete plain;
       }
 
-      // If we found a matching .bin, download and flash it
       if (binUrl.length() > 0) {
         otaInProgress = true;
         logEvent("OTA", "starting flash from %s", binUrl.c_str());
         board_draw_boot_status("OTA Update...");
 
-        HTTPClient* fhttp = new HTTPClient();
+        HTTPClient*       fhttp  = new HTTPClient();
         WiFiClientSecure* fsec   = nullptr;
         WiFiClient*       fplain = nullptr;
         bool flashed = false;
 
         if (fhttp) {
           fhttp->setConnectTimeout(10000);
-          fhttp->setTimeout(60000);  // firmware can be large
+          fhttp->setTimeout(60000);
           bool fok = false;
           if (binUrl.startsWith("https://")) {
             fsec = new WiFiClientSecure();
@@ -668,7 +650,6 @@ static void otaUpdateTask(void* pv) {
             fplain = new WiFiClient();
             if (fplain) fok = fhttp->begin(*fplain, binUrl);
           }
-
           if (fok) {
             int code = fhttp->GET();
             if (code == HTTP_CODE_OK) {
@@ -689,46 +670,31 @@ static void otaUpdateTask(void* pv) {
               logEvent("OTA", "firmware fetch failed code=%d", code);
             }
           }
-          fhttp->end();
-          delete fhttp;
-          delete fsec;
-          delete fplain;
+          fhttp->end(); delete fhttp; delete fsec; delete fplain;
         }
-
-        if (flashed) {
-          delay(500);
-          ESP.restart();
-        }
+        if (flashed) { delay(500); ESP.restart(); }
         otaInProgress = false;
       } else {
         logEvent("OTA", "no update for %s", HOSTNAME);
       }
     }
 
-    // Sleep until next check interval
-    // Break into 1-second sleeps so the task stays responsive to interval changes
     uint32_t elapsed = 0;
     while (elapsed < intervalMs) {
       vTaskDelay(pdMS_TO_TICKS(1000));
       elapsed += 1000;
-      // Re-read interval in case config changed while sleeping
       uint32_t newInterval = cfg.updateIntervalMin * 60UL * 1000UL;
-      if (newInterval != intervalMs) break; // interval changed, restart loop
+      if (newInterval != intervalMs) break;
     }
   }
 }
 
 static void startOtaTask() {
-  if (cfg.updateUrl.length() == 0) return; // nothing configured, don't spawn task
+  if (cfg.updateUrl.length() == 0) return;
   if (otaTaskHandle != nullptr) return;
   xTaskCreatePinnedToCore(
-    otaUpdateTask,
-    "ota_check",
-    8192,       // stack: 8 KB is plenty for HTTP + string ops
-    nullptr,
-    1,          // priority 1 (low) — loop() runs at priority 1 on core 1, this is on core 0
-    &otaTaskHandle,
-    0           // core 0
+    otaUpdateTask, "ota_check", 8192, nullptr,
+    1, &otaTaskHandle, 0
   );
   logEvent("OTA", "task started interval=%umin url=%s",
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str());
@@ -784,83 +750,70 @@ static void mqttMaybeReconnect() {
 static void startNetworkServicesOnce() {
   if (networkServicesStarted) return;
   if (WiFi.status() != WL_CONNECTED) return;
-
   bool mdnsOk = MDNS.begin(HOSTNAME);
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.begin();
-
   networkServicesStarted = true;
   wifiEverConnected      = true;
-  logEvent("WIFI", "connected ip=%s mac=%s",
-           WiFi.localIP().toString().c_str(), MAC_STR);
+  logEvent("WIFI", "connected ip=%s mac=%s", WiFi.localIP().toString().c_str(), MAC_STR);
   logEvent("NET", "services mdns=%s ota=on", mdnsOk ? "on" : "off");
 }
 
 static void ensureWifi() {
-  // While captive portal is active, service it and return — don't fight it.
-  if (portalActive) {
-    handlePortalLoop();
-    return;
-  }
+  if (portalActive) { handlePortalLoop(); return; }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    startNetworkServicesOnce();
-    return;
-  }
-
+  if (WiFi.status() == WL_CONNECTED) { startNetworkServicesOnce(); return; }
   if (lastWifiAttemptMs != 0 && (millis() - lastWifiAttemptMs) < 5000) return;
   lastWifiAttemptMs = millis();
 
   applyWifiDefaults();
 
-  if (wifiEverConnected) {
-    logEvent("WIFI", "reconnect attempt");
-    WiFi.reconnect();
-    return;
-  }
+  if (wifiEverConnected) { logEvent("WIFI", "reconnect attempt"); WiFi.reconnect(); return; }
 
   if (cfg.wifiSsid.length() > 0) {
     logEvent("WIFI", "connect begin ssid=%s", cfg.wifiSsid.c_str());
     WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
     unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
-      delay(100);
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      startNetworkServicesOnce();
-      return;
-    }
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) delay(100);
+    if (WiFi.status() == WL_CONNECTED) { startNetworkServicesOnce(); return; }
     logEvent("WIFI", "connect timed out status=%d", WiFi.status());
   } else {
     logEvent("WIFI", "no saved credentials");
   }
 
-  // No credentials or connect failed — start captive portal
   startPortalMode();
 }
 
 // ---------------------- Web UI ----------------------
-static void handleRoot()          { server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML)); }
-static void handleConfigPage()    { server.send(200, "text/html; charset=utf-8", FPSTR(CONFIG_HTML)); }
+static void handleRoot() {
+  if (!requireWebAuth()) return;
+  server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML));
+}
+
+static void handleConfigPage() {
+  if (!requireWebAuth()) return;
+  server.send(200, "text/html; charset=utf-8", FPSTR(CONFIG_HTML));
+}
 
 static void handleStatusJson() {
+  if (!requireWebAuth()) return;
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
   String j;
-  j.reserve(480);
+  j.reserve(512);
   j += "{";
   j += "\"hostname\":\""; appendJsonEscaped(j, HOSTNAME); j += "\",";
   j += "\"mac\":\"";      appendJsonEscaped(j, MAC_STR);  j += "\",";
-  j += "\"wifi\":"; j += (wifiOk ? "true" : "false"); j += ",";
+  j += "\"wifi\":";       j += (wifiOk ? "true" : "false");           j += ",";
   j += "\"wifiEverConnected\":"; j += (wifiEverConnected ? "true" : "false"); j += ",";
   j += "\"ip\":\""; appendJsonEscaped(j, wifiOk ? WiFi.localIP().toString() : String("")); j += "\",";
   j += "\"mdns\":";  j += (networkServicesStarted ? "true" : "false"); j += ",";
   j += "\"ota\":";   j += (networkServicesStarted ? "true" : "false"); j += ",";
-  j += "\"mqtt\":";  j += (mqttConnected ? "true" : "false"); j += ",";
-  j += "\"lastDownloadOk\":"; j += (lastDownloadOk ? "true" : "false"); j += ",";
+  j += "\"mqtt\":";  j += (mqttConnected ? "true" : "false");          j += ",";
+  j += "\"lastDownloadOk\":";  j += (lastDownloadOk ? "true" : "false"); j += ",";
   j += "\"lastDownloadErr\":\""; appendJsonEscaped(j, lastDownloadErr); j += "\",";
   j += "\"lastDownloadMs\":"; j += String(lastDownloadMs); j += ",";
-  j += "\"lastMqttMsgMs\":";  j += String(lastMqttMsgMs); j += ",";
-  j += "\"lastLogSeq\":";     j += String(logSeq); j += ",";
+  j += "\"lastMqttMsgMs\":";  j += String(lastMqttMsgMs);  j += ",";
+  j += "\"lastLogSeq\":";     j += String(logSeq);          j += ",";
   j += "\"otaInProgress\":";  j += (otaInProgress ? "true" : "false"); j += ",";
   j += "\"screenW\":"; j += String(SCREEN_W); j += ",";
   j += "\"screenH\":"; j += String(SCREEN_H);
@@ -869,6 +822,7 @@ static void handleStatusJson() {
 }
 
 static void handleLogJson() {
+  if (!requireWebAuth()) return;
   uint32_t since = 0;
   if (server.hasArg("since")) since = strtoul(server.arg("since").c_str(), nullptr, 10);
 
@@ -905,23 +859,26 @@ static void handleLogJson() {
 }
 
 static void handleGetConfigJson() {
+  if (!requireWebAuth()) return;
   String j;
-  j.reserve(512);
+  j.reserve(600);
   j += "{";
-  j += "\"photoBaseUrl\":\"";   appendJsonEscaped(j, cfg.photoBaseUrl);   j += "\",";
-  j += "\"photoFilename\":\"";  appendJsonEscaped(j, cfg.photoFilename);  j += "\",";
-  j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
-  j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);       j += "\",";
-  j += "\"httpPass\":\"";       j += (cfg.httpPass.length() ? "********" : ""); j += "\",";
-  j += "\"mqttHost\":\"";       appendJsonEscaped(j, cfg.mqttHost);       j += "\",";
-  j += "\"mqttPort\":";         j += String(cfg.mqttPort);               j += ",";
-  j += "\"mqttTopic\":\"";      appendJsonEscaped(j, cfg.mqttTopic);      j += "\",";
-  j += "\"mqttUser\":\"";       appendJsonEscaped(j, cfg.mqttUser);       j += "\",";
-  j += "\"mqttPass\":\"";       j += (cfg.mqttPass.length() ? "********" : ""); j += "\",";
-  j += "\"mqttUseTLS\":";       j += (cfg.mqttUseTLS ? "true" : "false"); j += ",";
-  j += "\"mqttTlsInsecure\":";  j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
-  j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);      j += "\",";
-  j += "\"updateIntervalMin\":"; j += String(cfg.updateIntervalMin);
+  j += "\"photoBaseUrl\":\"";    appendJsonEscaped(j, cfg.photoBaseUrl);   j += "\",";
+  j += "\"photoFilename\":\"";   appendJsonEscaped(j, cfg.photoFilename);  j += "\",";
+  j += "\"httpsInsecure\":";     j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
+  j += "\"httpUser\":\"";        appendJsonEscaped(j, cfg.httpUser);       j += "\",";
+  j += "\"httpPass\":\"";        j += (cfg.httpPass.length()  ? "********" : ""); j += "\",";
+  j += "\"mqttHost\":\"";        appendJsonEscaped(j, cfg.mqttHost);       j += "\",";
+  j += "\"mqttPort\":";          j += String(cfg.mqttPort);                j += ",";
+  j += "\"mqttTopic\":\"";       appendJsonEscaped(j, cfg.mqttTopic);      j += "\",";
+  j += "\"mqttUser\":\"";        appendJsonEscaped(j, cfg.mqttUser);       j += "\",";
+  j += "\"mqttPass\":\"";        j += (cfg.mqttPass.length()  ? "********" : ""); j += "\",";
+  j += "\"mqttUseTLS\":";        j += (cfg.mqttUseTLS ? "true" : "false");  j += ",";
+  j += "\"mqttTlsInsecure\":";   j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
+  j += "\"updateUrl\":\"";       appendJsonEscaped(j, cfg.updateUrl);      j += "\",";
+  j += "\"updateIntervalMin\":"; j += String(cfg.updateIntervalMin);       j += ",";
+  j += "\"webUser\":\"";         appendJsonEscaped(j, cfg.webUser);        j += "\",";
+  j += "\"webPass\":\"";         j += (cfg.webPass.length()   ? "********" : "");
   j += "}";
   server.send(200, "application/json", j);
 }
@@ -931,17 +888,23 @@ static bool isRealPassword(const String& val) {
 }
 
 static void handlePostConfig() {
-  if (server.hasArg("photoBaseUrl"))  cfg.photoBaseUrl  = server.arg("photoBaseUrl");
-  if (server.hasArg("photoFilename")) cfg.photoFilename = server.arg("photoFilename");
-  if (server.hasArg("httpUser"))      cfg.httpUser      = server.arg("httpUser");
-  if (server.hasArg("mqttHost"))      cfg.mqttHost      = server.arg("mqttHost");
-  if (server.hasArg("mqttTopic"))     cfg.mqttTopic     = server.arg("mqttTopic");
-  if (server.hasArg("mqttUser"))      cfg.mqttUser      = server.arg("mqttUser");
-  if (server.hasArg("mqttPort"))      cfg.mqttPort      = (uint16_t)server.arg("mqttPort").toInt();
-  if (server.hasArg("updateUrl"))     cfg.updateUrl     = server.arg("updateUrl");
-  if (server.hasArg("updateIntervalMin")) cfg.updateIntervalMin = (uint32_t)server.arg("updateIntervalMin").toInt();
-  if (server.hasArg("httpPass") && isRealPassword(server.arg("httpPass")))   cfg.httpPass = server.arg("httpPass");
-  if (server.hasArg("mqttPass") && isRealPassword(server.arg("mqttPass")))   cfg.mqttPass = server.arg("mqttPass");
+  if (!requireWebAuth()) return;
+  if (server.hasArg("photoBaseUrl"))       cfg.photoBaseUrl       = server.arg("photoBaseUrl");
+  if (server.hasArg("photoFilename"))      cfg.photoFilename      = server.arg("photoFilename");
+  if (server.hasArg("httpUser"))           cfg.httpUser           = server.arg("httpUser");
+  if (server.hasArg("mqttHost"))           cfg.mqttHost           = server.arg("mqttHost");
+  if (server.hasArg("mqttTopic"))          cfg.mqttTopic          = server.arg("mqttTopic");
+  if (server.hasArg("mqttUser"))           cfg.mqttUser           = server.arg("mqttUser");
+  if (server.hasArg("mqttPort"))           cfg.mqttPort           = (uint16_t)server.arg("mqttPort").toInt();
+  if (server.hasArg("updateUrl"))          cfg.updateUrl          = server.arg("updateUrl");
+  if (server.hasArg("updateIntervalMin"))  cfg.updateIntervalMin  = (uint32_t)server.arg("updateIntervalMin").toInt();
+  if (server.hasArg("webUser") && server.arg("webUser").length() > 0)
+    cfg.webUser = server.arg("webUser");
+  if (server.hasArg("httpPass")  && isRealPassword(server.arg("httpPass")))  cfg.httpPass  = server.arg("httpPass");
+  if (server.hasArg("mqttPass")  && isRealPassword(server.arg("mqttPass")))  cfg.mqttPass  = server.arg("mqttPass");
+  if (server.hasArg("webPass")   && isRealPassword(server.arg("webPass")))   cfg.webPass   = server.arg("webPass");
+  // Allow explicitly clearing web password by sending empty string
+  if (server.hasArg("webPassClear") && server.arg("webPassClear") == "1")    cfg.webPass   = "";
   cfg.httpsInsecure   = server.hasArg("httpsInsecure");
   cfg.mqttUseTLS      = server.hasArg("mqttUseTLS");
   cfg.mqttTlsInsecure = server.hasArg("mqttTlsInsecure");
@@ -949,40 +912,42 @@ static void handlePostConfig() {
   mqtt.disconnect();
   mqttSetupClient();
   lastMqttAttemptMs = 0;
-  // If OTA task not yet started (e.g. URL just filled in), start it now
   startOtaTask();
   logEvent("WEB", "config saved");
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handleImgCurrent() {
+  if (!requireWebAuth()) return;
   if (!currentJpg || !currentJpgLen) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
   server.send_P(200, "image/jpeg", (const char*)currentJpg, currentJpgLen);
 }
 
 static void handleImgLast() {
+  if (!requireWebAuth()) return;
   if (!lastJpg || !lastJpgLen) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
   server.send_P(200, "image/jpeg", (const char*)lastJpg, lastJpgLen);
 }
 
 static void handleActionRefresh() {
+  if (!requireWebAuth()) return;
   logEvent("WEB", "manual refresh");
   bool ok = downloadAndShowPhoto();
   server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
 static void setupWeb() {
-  server.on("/",             HTTP_GET,  handleRoot);
-  server.on("/config",       HTTP_GET,  handleConfigPage);
-  server.on("/api/status",   HTTP_GET,  handleStatusJson);
-  server.on("/api/log",      HTTP_GET,  handleLogJson);
-  server.on("/api/config",   HTTP_GET,  handleGetConfigJson);
-  server.on("/api/config",   HTTP_POST, handlePostConfig);
-  server.on("/api/refresh",  HTTP_POST, handleActionRefresh);
-  server.on("/img/current",  HTTP_GET,  handleImgCurrent);
-  server.on("/img/last",     HTTP_GET,  handleImgLast);
+  server.on("/",            HTTP_GET,  handleRoot);
+  server.on("/config",      HTTP_GET,  handleConfigPage);
+  server.on("/api/status",  HTTP_GET,  handleStatusJson);
+  server.on("/api/log",     HTTP_GET,  handleLogJson);
+  server.on("/api/config",  HTTP_GET,  handleGetConfigJson);
+  server.on("/api/config",  HTTP_POST, handlePostConfig);
+  server.on("/api/refresh", HTTP_POST, handleActionRefresh);
+  server.on("/img/current", HTTP_GET,  handleImgCurrent);
+  server.on("/img/last",    HTTP_GET,  handleImgLast);
   server.begin();
   logEvent("WEB", "server started");
 }
@@ -1007,21 +972,16 @@ void setup() {
     String ipMac = "IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR);
     board_draw_boot_status(ipMac.c_str());
     delay(800);
-
     setupWeb();
-
     board_draw_boot_status("Connecting to MQTT...");
     mqttNetPlain.setTimeout(1);
     mqttNetSecure.setTimeout(1);
     mqttSetupClient();
     mqttMaybeReconnect();
     mqtt.setSocketTimeout(1);
-
     downloadAndShowPhoto();
-
     startOtaTask();
   } else if (portalActive) {
-    // Portal is up; web server already started inside startPortalMode()
     logEvent("BOOT", "waiting for Wi-Fi credentials via portal");
   }
 }
@@ -1030,7 +990,6 @@ void loop() {
   ensureWifi();
 
   if (WiFi.status() == WL_CONNECTED) {
-    // Start web + services on first successful connection after portal
     if (!networkServicesStarted) {
       setupWeb();
       mqttNetPlain.setTimeout(1);
