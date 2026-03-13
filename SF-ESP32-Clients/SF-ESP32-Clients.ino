@@ -70,8 +70,8 @@ struct Config {
   bool mqttTlsInsecure;
   String updateUrl;
   uint32_t updateIntervalMin;
-  String webUser;    // web UI login username
-  String webPass;    // web UI login password (empty = no auth)
+  String webUser;
+  String webPass;
 } cfg;
 
 static const char* PREF_NS = "syncframe";
@@ -85,7 +85,7 @@ static const char* DEFAULT_MQTT_TOPIC          = "photos";
 static const char* DEFAULT_UPDATE_URL          = "";
 static const uint32_t DEFAULT_UPDATE_INTERVAL_MIN = 60;
 static const char* DEFAULT_WEB_USER            = "admin";
-static const char* DEFAULT_WEB_PASS            = "";  // blank = open by default
+static const char* DEFAULT_WEB_PASS            = "";
 static const size_t MAX_JPG = 1200 * 1024;
 
 WebServer server(80);
@@ -113,6 +113,10 @@ bool wifiEverConnected  = false;
 static TaskHandle_t otaTaskHandle = nullptr;
 static volatile bool otaInProgress = false;
 
+// Tracks whether the OTA splash has been drawn yet for this flash cycle
+// so we only fill the screen once and never overdraw it.
+static volatile bool otaSplashDrawn = false;
+
 static const uint8_t LOG_CAP = 48;
 static const size_t LOG_MSG_LEN = 96;
 struct LogEntry {
@@ -128,15 +132,43 @@ static uint32_t logSeq   = 0;
 
 // ============================================================
 // Web Authentication
-// Returns true if request is authorised (or no password set).
-// Sends 401 + WWW-Authenticate header and returns false if not.
 // ============================================================
 static bool requireWebAuth() {
-  if (cfg.webPass.length() == 0) return true;  // no password configured
+  if (cfg.webPass.length() == 0) return true;
   if (server.authenticate(cfg.webUser.c_str(), cfg.webPass.c_str())) return true;
-  server.requestAuthentication(BASIC_AUTH, "SyncFrame",
-    "Authentication required");
+  server.requestAuthentication(BASIC_AUTH, "SyncFrame", "Authentication required");
   return false;
+}
+
+// ============================================================
+// Display helpers
+// Safe wrappers that refuse to draw while OTA is in progress
+// so the flashing screen stays frozen on the OTA status message.
+// ============================================================
+static void safeDrawJpeg(const uint8_t* buf, size_t len) {
+  if (otaInProgress) return;   // never overdraw the OTA splash
+  board_draw_jpeg(buf, len);
+}
+
+static void safeDrawStatus(const char* msg) {
+  if (otaInProgress) return;
+  board_draw_boot_status(msg);
+}
+
+// Called once when OTA begins - fills screen with a clean update notice.
+// Uses board_draw_boot_status directly (bypassing the safe wrapper)
+// because we intentionally WANT to draw at this point.
+static void drawOtaSplash(const char* binUrl) {
+  if (otaSplashDrawn) return;
+  // Fill screen black then overlay the status text.
+  // board_draw_boot_status already clears to its background colour;
+  // call it twice: first with a blank to clear any old image, then
+  // with the real message so it paints over fully.
+  board_draw_boot_status("");
+  char msg[128];
+  snprintf(msg, sizeof(msg), "Firmware update\nDownloading...\n%s", binUrl);
+  board_draw_boot_status(msg);
+  otaSplashDrawn = true;
 }
 
 // ---------------------- Hardware Callbacks ----------------------
@@ -145,14 +177,14 @@ bool hasLastPhoto() { return (lastJpg != nullptr && lastJpgLen > 0); }
 void showCurrentPhoto() {
   if (currentJpg && currentJpgLen) {
     showingLast = false;
-    board_draw_jpeg(currentJpg, currentJpgLen);
+    safeDrawJpeg(currentJpg, currentJpgLen);
   }
 }
 
 void showLastPhoto() {
   if (lastJpg && lastJpgLen) {
     showingLast = true;
-    board_draw_jpeg(lastJpg, lastJpgLen);
+    safeDrawJpeg(lastJpg, lastJpgLen);
   }
 }
 
@@ -524,6 +556,9 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 }
 
 static bool downloadAndShowPhoto() {
+  // Don't disturb the display during OTA
+  if (otaInProgress) return false;
+
   uint8_t* newBuf = nullptr;
   size_t   newLen = 0;
   String   err;
@@ -535,7 +570,7 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
-  if (!currentJpg && !lastJpg) board_draw_boot_status("Downloading Photo...");
+  if (!currentJpg && !lastJpg) safeDrawStatus("Downloading Photo...");
 
   bool ok = httpDownloadToBuffer(&newBuf, &newLen, &err);
   lastDownloadMs = millis();
@@ -546,7 +581,7 @@ static bool downloadAndShowPhoto() {
     logEvent("PHOTO", "download failed %s", err.c_str());
     if (currentJpg && currentJpgLen)   showCurrentPhoto();
     else if (lastJpg && lastJpgLen)     showLastPhoto();
-    else                                board_draw_boot_status((String("Download failed: ") + err).c_str());
+    else                                safeDrawStatus((String("Download failed: ") + err).c_str());
     return false;
   }
 
@@ -558,7 +593,7 @@ static bool downloadAndShowPhoto() {
   lastDownloadOk  = true;
   lastDownloadErr = "";
   showingLast = false;
-  board_draw_jpeg(currentJpg, currentJpgLen);
+  safeDrawJpeg(currentJpg, currentJpgLen);
   logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)currentJpgLen);
   return true;
 }
@@ -630,9 +665,13 @@ static void otaUpdateTask(void* pv) {
       }
 
       if (binUrl.length() > 0) {
+        // Set flag FIRST so main-loop draw calls stop immediately,
+        // THEN paint the OTA splash exactly once.
         otaInProgress = true;
+        otaSplashDrawn = false;
+        drawOtaSplash(binUrl.c_str());
+
         logEvent("OTA", "starting flash from %s", binUrl.c_str());
-        board_draw_boot_status("OTA Update...");
 
         HTTPClient*       fhttp  = new HTTPClient();
         WiFiClientSecure* fsec   = nullptr;
@@ -659,21 +698,31 @@ static void otaUpdateTask(void* pv) {
                 size_t written = Update.writeStream(*fs);
                 if (Update.end() && Update.isFinished()) {
                   logEvent("OTA", "flash ok bytes=%u rebooting", (unsigned)written);
+                  // Update the splash to show completion before reboot
+                  board_draw_boot_status("Update complete!\nRebooting...");
                   flashed = true;
                 } else {
                   logEvent("OTA", "Update.end error: %s", Update.errorString());
+                  board_draw_boot_status("OTA failed - see log");
                 }
               } else {
                 logEvent("OTA", "Update.begin error: %s", Update.errorString());
+                board_draw_boot_status("OTA failed - see log");
               }
             } else {
               logEvent("OTA", "firmware fetch failed code=%d", code);
+              board_draw_boot_status("OTA fetch failed");
             }
           }
           fhttp->end(); delete fhttp; delete fsec; delete fplain;
         }
-        if (flashed) { delay(500); ESP.restart(); }
+        if (flashed) { delay(1500); ESP.restart(); }
+        // If flash failed, clear the flag so normal operation resumes
         otaInProgress = false;
+        otaSplashDrawn = false;
+        // Restore the display to the last good photo
+        if (currentJpg && currentJpgLen)  board_draw_jpeg(currentJpg, currentJpgLen);
+        else if (lastJpg && lastJpgLen)    board_draw_jpeg(lastJpg, lastJpgLen);
       } else {
         logEvent("OTA", "no update for %s", HOSTNAME);
       }
@@ -705,7 +754,8 @@ static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   (void)payload;
   lastMqttMsgMs = millis();
   logEvent("MQTT", "message topic=%s bytes=%u", topic ? topic : "", length);
-  downloadAndShowPhoto();
+  // Don't trigger a photo download/draw while OTA is flashing
+  if (!otaInProgress) downloadAndShowPhoto();
 }
 
 static void mqttSetupClient() {
@@ -861,24 +911,25 @@ static void handleLogJson() {
 static void handleGetConfigJson() {
   if (!requireWebAuth()) return;
   String j;
-  j.reserve(600);
+  j.reserve(640);
   j += "{";
-  j += "\"photoBaseUrl\":\"";    appendJsonEscaped(j, cfg.photoBaseUrl);   j += "\",";
-  j += "\"photoFilename\":\"";   appendJsonEscaped(j, cfg.photoFilename);  j += "\",";
-  j += "\"httpsInsecure\":";     j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
-  j += "\"httpUser\":\"";        appendJsonEscaped(j, cfg.httpUser);       j += "\",";
-  j += "\"httpPass\":\"";        j += (cfg.httpPass.length()  ? "********" : ""); j += "\",";
-  j += "\"mqttHost\":\"";        appendJsonEscaped(j, cfg.mqttHost);       j += "\",";
-  j += "\"mqttPort\":";          j += String(cfg.mqttPort);                j += ",";
-  j += "\"mqttTopic\":\"";       appendJsonEscaped(j, cfg.mqttTopic);      j += "\",";
-  j += "\"mqttUser\":\"";        appendJsonEscaped(j, cfg.mqttUser);       j += "\",";
-  j += "\"mqttPass\":\"";        j += (cfg.mqttPass.length()  ? "********" : ""); j += "\",";
-  j += "\"mqttUseTLS\":";        j += (cfg.mqttUseTLS ? "true" : "false");  j += ",";
-  j += "\"mqttTlsInsecure\":";   j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
-  j += "\"updateUrl\":\"";       appendJsonEscaped(j, cfg.updateUrl);      j += "\",";
-  j += "\"updateIntervalMin\":"; j += String(cfg.updateIntervalMin);       j += ",";
-  j += "\"webUser\":\"";         appendJsonEscaped(j, cfg.webUser);        j += "\",";
-  j += "\"webPass\":\"";         j += (cfg.webPass.length()   ? "********" : "");
+  j += "\"hostname\":\"";      appendJsonEscaped(j, HOSTNAME);          j += "\",";
+  j += "\"photoBaseUrl\":\"";   appendJsonEscaped(j, cfg.photoBaseUrl);  j += "\",";
+  j += "\"photoFilename\":\"";  appendJsonEscaped(j, cfg.photoFilename); j += "\",";
+  j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
+  j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
+  j += "\"httpPass\":\"";       j += (cfg.httpPass.length()  ? "********" : ""); j += "\",";
+  j += "\"mqttHost\":\"";       appendJsonEscaped(j, cfg.mqttHost);      j += "\",";
+  j += "\"mqttPort\":";         j += String(cfg.mqttPort);               j += ",";
+  j += "\"mqttTopic\":\"";      appendJsonEscaped(j, cfg.mqttTopic);     j += "\",";
+  j += "\"mqttUser\":\"";       appendJsonEscaped(j, cfg.mqttUser);      j += "\",";
+  j += "\"mqttPass\":\"";       j += (cfg.mqttPass.length()  ? "********" : ""); j += "\",";
+  j += "\"mqttUseTLS\":";       j += (cfg.mqttUseTLS ? "true" : "false");  j += ",";
+  j += "\"mqttTlsInsecure\":";  j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
+  j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
+  j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
+  j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
+  j += "\"webPass\":\"";        j += (cfg.webPass.length()   ? "********" : "");
   j += "}";
   server.send(200, "application/json", j);
 }
@@ -903,7 +954,6 @@ static void handlePostConfig() {
   if (server.hasArg("httpPass")  && isRealPassword(server.arg("httpPass")))  cfg.httpPass  = server.arg("httpPass");
   if (server.hasArg("mqttPass")  && isRealPassword(server.arg("mqttPass")))  cfg.mqttPass  = server.arg("mqttPass");
   if (server.hasArg("webPass")   && isRealPassword(server.arg("webPass")))   cfg.webPass   = server.arg("webPass");
-  // Allow explicitly clearing web password by sending empty string
   if (server.hasArg("webPassClear") && server.arg("webPassClear") == "1")    cfg.webPass   = "";
   cfg.httpsInsecure   = server.hasArg("httpsInsecure");
   cfg.mqttUseTLS      = server.hasArg("mqttUseTLS");
@@ -933,6 +983,7 @@ static void handleImgLast() {
 
 static void handleActionRefresh() {
   if (!requireWebAuth()) return;
+  if (otaInProgress) { server.send(503, "application/json", "{\"ok\":false,\"err\":\"ota in progress\"}"); return; }
   logEvent("WEB", "manual refresh");
   bool ok = downloadAndShowPhoto();
   server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
@@ -1000,8 +1051,10 @@ void loop() {
     }
     if (networkServicesStarted) ArduinoOTA.handle();
     server.handleClient();
-    mqttMaybeReconnect();
-    if (mqtt.connected()) mqtt.loop();
+    if (!otaInProgress) {
+      mqttMaybeReconnect();
+      if (mqtt.connected()) mqtt.loop();
+    }
   }
 
   board_loop();

@@ -173,7 +173,10 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     button:hover{background:rgba(255,255,255,0.25)}
     button.save{background:rgba(55,214,122,0.25);border-color:rgba(55,214,122,0.6);color:#37d67a}
     button.save:hover{background:rgba(55,214,122,0.4)}
+    button:disabled{opacity:0.4;cursor:not-allowed}
+    button.save:disabled{background:rgba(55,214,122,0.08);color:rgba(55,214,122,0.4)}
     .msg{background:rgba(55,214,122,0.15);border:1px solid rgba(55,214,122,0.5);padding:10px;border-radius:8px;margin:10px 0;color:#37d67a;display:none}
+    .err{background:rgba(255,93,93,0.12);border:1px solid rgba(255,93,93,0.4);padding:10px;border-radius:8px;margin:10px 0;color:#ff8a8a;display:none}
     .status-bar{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:4px;font-size:13px}
     .status-bar span{background:rgba(0,0,0,0.3);backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,0.15);border-radius:20px;padding:4px 14px;font-weight:600}
     .status-box{margin-top:6px;padding:12px;border-radius:10px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.12);display:flex;flex-wrap:wrap;gap:14px;font-size:0.85em}
@@ -205,6 +208,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
   </div>
 
   <div id="saveMsg" class="msg">Settings saved!</div>
+  <div id="errMsg"  class="err">Failed to load config &mdash; settings may not be current. Refresh to retry.</div>
 
   <form id="configForm">
     <h3>Photo</h3>
@@ -223,7 +227,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       </div>
       <div>
         <label>HTTP Basic auth pass <span class="small">(blank = keep current)</span></label>
-        <input type="password" name="httpPass" id="httpPass" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="off"/>
+        <input type="password" name="httpPass" id="httpPass" autocomplete="off"/>
       </div>
     </div>
 
@@ -250,7 +254,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       </div>
       <div>
         <label>Pass <span class="small">(blank = keep current)</span></label>
-        <input type="password" name="mqttPass" id="mqttPass" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="off"/>
+        <input type="password" name="mqttPass" id="mqttPass" autocomplete="off"/>
       </div>
     </div>
 
@@ -280,14 +284,16 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       </div>
       <div>
         <label>Password <span class="small">(blank = keep current)</span></label>
-        <input type="password" name="webPass" id="webPass" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="new-password"/>
+        <input type="password" name="webPass" id="webPass" autocomplete="new-password"/>
       </div>
     </div>
     <label style="margin-top:8px">
       <input type="checkbox" id="webPassClearCb"/> Clear password (disable authentication)
     </label>
 
-    <button type="submit" class="save" style="margin-top:20px;width:100%">&#10003; Save Settings</button>
+    <button type="submit" id="saveBtn" class="save" style="margin-top:20px;width:100%" disabled>
+      &#8987; Loading current settings&hellip;
+    </button>
   </form>
 
   <h3 style="margin-top:24px">Live Status</h3>
@@ -311,42 +317,59 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
 </div>
 
 <script>
-// Shared fetch wrapper — always sends stored Basic Auth credentials
+// Shared fetch wrapper - always sends stored Basic Auth credentials
 function apiFetch(url, opts) {
   return fetch(url, Object.assign({credentials:"include",cache:"no-store"}, opts||{}));
 }
 
-let currentConfig = {};
 let logSince = 0;
 let logTimer = null;
 
 async function loadCfg() {
+  const saveBtn = document.getElementById("saveBtn");
+  const errMsg  = document.getElementById("errMsg");
   try {
     const r = await apiFetch("/api/config");
-    if (!r.ok) { console.warn("loadCfg HTTP", r.status); return; }
+    if (!r.ok) {
+      errMsg.style.display = 'block';
+      saveBtn.disabled = true;
+      saveBtn.textContent = '\u26A0 Could not load settings';
+      console.warn("loadCfg HTTP", r.status);
+      return;
+    }
     const c = await r.json();
-    currentConfig = c;
+    errMsg.style.display = 'none';
+
     document.getElementById("photoBaseUrl").value      = c.photoBaseUrl      || "";
     document.getElementById("photoFilename").value     = c.photoFilename     || "";
     document.getElementById("httpsInsecure").checked   = !!c.httpsInsecure;
     document.getElementById("httpUser").value          = c.httpUser          || "";
-    // password fields: leave empty so user must re-type to change;
-    // show dot placeholder only when a password is already set server-side
+    document.getElementById("httpPass").value          = "";
     document.getElementById("httpPass").placeholder    = c.httpPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
     document.getElementById("mqttHost").value          = c.mqttHost          || "";
     document.getElementById("mqttPort").value          = c.mqttPort          || "";
     document.getElementById("mqttTopic").value         = c.mqttTopic         || "";
     document.getElementById("mqttUser").value          = c.mqttUser          || "";
+    document.getElementById("mqttPass").value          = "";
     document.getElementById("mqttPass").placeholder    = c.mqttPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
     document.getElementById("mqttUseTLS").checked      = !!c.mqttUseTLS;
     document.getElementById("mqttTlsInsecure").checked = !!c.mqttTlsInsecure;
     document.getElementById("updateUrl").value         = c.updateUrl         || "";
     document.getElementById("updateIntervalMin").value = c.updateIntervalMin || 60;
     document.getElementById("webUser").value           = c.webUser           || "admin";
+    document.getElementById("webPass").value           = "";
     document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
-    // Show actual hostname in the OTA hint
     if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;
-  } catch(e) { console.error("loadCfg error:", e); }
+
+    // Enable save only after successful load
+    saveBtn.disabled = false;
+    saveBtn.textContent = '\u2713 Save Settings';
+  } catch(e) {
+    errMsg.style.display = 'block';
+    saveBtn.disabled = true;
+    saveBtn.textContent = '\u26A0 Could not load settings';
+    console.error("loadCfg error:", e);
+  }
 }
 
 function setPill(id, label, ok) {
@@ -384,7 +407,6 @@ async function loadStatus() {
       !!s.lastDownloadOk);
     setSpan("ds_ota", s.otaInProgress?"OTA: flashing...":"OTA: idle",
       s.otaInProgress?null:true);
-    // Keep hostname hint in sync
     if (s.hostname) document.getElementById("hostnameHint").textContent = s.hostname;
   } catch(e) { setSpan("ds_host","Status unavailable",false); }
 }
@@ -424,6 +446,8 @@ function setLogPolling(enabled) {
 
 document.getElementById("configForm").addEventListener('submit', async (e) => {
   e.preventDefault();
+  const saveBtn = document.getElementById("saveBtn");
+  if (saveBtn.disabled) return;
   const f = new URLSearchParams();
   f.append('photoBaseUrl',       document.getElementById("photoBaseUrl").value);
   f.append('photoFilename',      document.getElementById("photoFilename").value);
@@ -434,18 +458,20 @@ document.getElementById("configForm").addEventListener('submit', async (e) => {
   f.append('mqttUser',           document.getElementById("mqttUser").value);
   f.append('updateUrl',          document.getElementById("updateUrl").value);
   f.append('updateIntervalMin',  document.getElementById("updateIntervalMin").value);
-  const webUserVal = document.getElementById("webUser").value;
+  const webUserVal  = document.getElementById("webUser").value;
   const httpPassVal = document.getElementById("httpPass").value;
   const mqttPassVal = document.getElementById("mqttPass").value;
   const webPassVal  = document.getElementById("webPass").value;
-  if (webUserVal.length > 0)  f.append('webUser',  webUserVal);
+  if (webUserVal.length  > 0) f.append('webUser',  webUserVal);
   if (httpPassVal.length > 0) f.append('httpPass', httpPassVal);
   if (mqttPassVal.length > 0) f.append('mqttPass', mqttPassVal);
-  if (webPassVal.length > 0)  f.append('webPass',  webPassVal);
+  if (webPassVal.length  > 0) f.append('webPass',  webPassVal);
   if (document.getElementById('webPassClearCb').checked) f.append('webPassClear','1');
-  if (document.getElementById("httpsInsecure").checked)    f.append('httpsInsecure',   '1');
-  if (document.getElementById("mqttUseTLS").checked)       f.append('mqttUseTLS',      '1');
-  if (document.getElementById("mqttTlsInsecure").checked)  f.append('mqttTlsInsecure', '1');
+  if (document.getElementById("httpsInsecure").checked)   f.append('httpsInsecure',   '1');
+  if (document.getElementById("mqttUseTLS").checked)      f.append('mqttUseTLS',      '1');
+  if (document.getElementById("mqttTlsInsecure").checked) f.append('mqttTlsInsecure', '1');
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving\u2026';
   try {
     const resp = await apiFetch('/api/config',{method:'POST',body:f});
     if (resp.ok) {
@@ -455,8 +481,15 @@ document.getElementById("configForm").addEventListener('submit', async (e) => {
       setTimeout(loadStatus, 500);
       const logEnable = document.getElementById("logEnable");
       if (logEnable.checked) setTimeout(()=>pollLogs(false), 500);
+    } else {
+      saveBtn.disabled = false;
+      saveBtn.textContent = '\u2713 Save Settings';
     }
-  } catch(e) { alert('Save failed: '+e); }
+  } catch(e) {
+    alert('Save failed: '+e);
+    saveBtn.disabled = false;
+    saveBtn.textContent = '\u2713 Save Settings';
+  }
 });
 
 document.getElementById("logEnable").addEventListener('change', function() {
