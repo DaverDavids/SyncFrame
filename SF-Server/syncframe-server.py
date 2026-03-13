@@ -1,5 +1,6 @@
 import configparser
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -7,7 +8,7 @@ import ssl
 import subprocess
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from io import BytesIO
 
@@ -16,7 +17,7 @@ import pillow_heif
 import schedule
 from flask import (Blueprint, Flask, Response, redirect,
                    render_template_string, request, send_from_directory,
-                   session, url_for)
+                   session, url_for, jsonify)
 from PIL import Image, ImageEnhance, ImageSequence
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -68,14 +69,12 @@ default_config = {
 }
 
 if not os.path.exists(CONFIG_PATH):
-    # create default config file
     config.read_dict(default_config)
     with open(CONFIG_PATH, "w") as cfgfile:
         config.write(cfgfile)
     logging.info(f"Configuration file created at {CONFIG_PATH} with defaults.")
 else:
     config.read(CONFIG_PATH)
-    # ensure missing sections/keys are filled with defaults
     updated = False
     for section, values in default_config.items():
         if not config.has_section(section):
@@ -107,17 +106,14 @@ KEYFILE = os.path.abspath(
     config.get("server", "keyfile", fallback=default_config["server"]["keyfile"])
 )
 
-# URL prefix handling (for reverse tunnel at e.g. https://host/syncframe/)
 _raw_prefix = config.get(
     "server", "url_prefix", fallback=default_config["server"]["url_prefix"]
 ).strip()
 if _raw_prefix in ("", "/"):
     URL_PREFIX = ""
 else:
-    # Ensure leading slash, no trailing slash: '/syncframe'
     URL_PREFIX = "/" + _raw_prefix.strip("/")
 
-# Basic auth credentials
 USERNAME = config.get(
     "server", "username", fallback=default_config["server"]["username"]
 )
@@ -141,28 +137,62 @@ IMAGE_MAX_WIDTH = config.getint("image", "max_width", fallback=1920)
 IMAGE_MAX_HEIGHT = config.getint("image", "max_height", fallback=1080)
 IMAGE_JPEG_QUALITY = config.getint("image", "jpeg_quality", fallback=85)
 
-# ---------------------------------------------------------------------------
-# RESOLUTIONS
-# All display resolutions to maintain as separate thumbnail files alongside
-# the master photo.jpg (1920x1080).  To add a new resolution, simply append
-# a (width, height) tuple here - every code path (upload, desaturation,
-# on-the-fly generation, and serving) will handle it automatically.
-# ---------------------------------------------------------------------------
 RESOLUTIONS = [
     (800, 480),
     (280, 240),
 ]
 
+# ---------------------------------------------------------------------------
+# OTA / Admin state
+# Stored in ota_clients.json alongside the server config.
+# Schema: { "hostname": { "mac": str, "label": str, "last_seen": iso8601|null,
+#                         "firmware": filename|null } }
+# ---------------------------------------------------------------------------
+OTA_CLIENTS_PATH = os.path.join(os.getcwd(), "ota_clients.json")
+OTA_FIRMWARE_DIR = os.path.join(os.getcwd(), "ota_firmware")
+os.makedirs(OTA_FIRMWARE_DIR, exist_ok=True)
+
+_ota_lock = threading.Lock()
+
+
+def _load_clients():
+    if os.path.exists(OTA_CLIENTS_PATH):
+        try:
+            with open(OTA_CLIENTS_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_clients(clients):
+    with open(OTA_CLIENTS_PATH, "w") as f:
+        json.dump(clients, f, indent=2)
+
+
+def _rebuild_manifest():
+    """Write ota_firmware/manifest.txt based on current client->firmware mappings."""
+    clients = _load_clients()
+    lines = []
+    for hostname, info in clients.items():
+        fw = info.get("firmware")
+        if fw:
+            lines.append(f"{hostname} {fw}")
+    manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
+    with open(manifest_path, "w") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+    logging.info("manifest.txt rebuilt with %d entries", len(lines))
+
+
 # Flask web app setup
 app = Flask(__name__)
-# Set a secret key for session management (change this to a random value in production)
 app.secret_key = os.environ.get(
     "SECRET_KEY", "syncframe-secret-key-change-me-in-production"
 )
-# We'll use a blueprint so url_prefix is applied cleanly
 bp = Blueprint("syncframe", __name__)
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "heic", "webp", "gif"}
-UPLOAD_FOLDER = os.getcwd()  # Use current directory for uploads
+ALLOWED_FIRMWARE_EXTENSIONS = {"bin"}
+UPLOAD_FOLDER = os.getcwd()
 
 
 def check_auth(username, password):
@@ -174,7 +204,6 @@ def create_mqtt_password_file():
     mosq_dir = os.path.join(os.getcwd(), "mosq")
     pwfile = os.path.join(mosq_dir, "pwfile")
 
-    # Check if file doesn't exist OR is empty
     file_is_empty = os.path.exists(pwfile) and os.path.getsize(pwfile) == 0
 
     if (
@@ -183,7 +212,6 @@ def create_mqtt_password_file():
         and MQTT_PASSWORD
     ):
         try:
-            # Use mosquitto_passwd to create hashed password
             subprocess.check_call(
                 ["mosquitto_passwd", "-c", "-b", pwfile, MQTT_USERNAME, MQTT_PASSWORD],
                 stdout=subprocess.DEVNULL,
@@ -191,7 +219,6 @@ def create_mqtt_password_file():
             )
             os.chmod(pwfile, 0o600)
 
-            # Change ownership to mosquitto user
             try:
                 import pwd
 
@@ -201,7 +228,6 @@ def create_mqtt_password_file():
                 logging.info(f"Created MQTT password file for user {MQTT_USERNAME}")
             except Exception as e:
                 logging.warning(f"Could not change pwfile ownership: {e}")
-                # Try more permissive permissions as fallback
                 os.chmod(pwfile, 0o644)
                 logging.info(
                     f"Created MQTT password file for user {MQTT_USERNAME} (with relaxed permissions)"
@@ -214,21 +240,16 @@ def create_mqtt_password_file():
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        # Check if user is already logged in via session
         if session.get("authenticated"):
             return f(*args, **kwargs)
 
-        # Check for Basic Auth credentials
         auth = request.authorization
         if auth and check_auth(auth.username, auth.password):
-            # Set session to remember authentication permanently
             session.permanent = True
             session["authenticated"] = True
-            # Set session to last for 10 years (effectively never expires)
             app.permanent_session_lifetime = timedelta(days=3650)
             return f(*args, **kwargs)
 
-        # Not authenticated - request Basic Auth
         return Response(
             "Authentication required",
             401,
@@ -268,7 +289,6 @@ def generate_self_signed_cert_py(
         .sign(key, hashes.SHA256())
     )
 
-    # write key
     with open(keyfile, "wb") as f:
         f.write(
             key.private_bytes(
@@ -279,7 +299,6 @@ def generate_self_signed_cert_py(
         )
     os.chmod(keyfile, 0o600)
 
-    # write cert
     with open(certfile, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
@@ -322,7 +341,6 @@ def ensure_certificates(certfile, keyfile):
         logging.info("Certificate and key already exist: %s, %s", certfile, keyfile)
         return
 
-    # create parent directories if necessary
     for path in (certfile, keyfile):
         d = os.path.dirname(path)
         if d and not os.path.exists(d):
@@ -350,15 +368,14 @@ def fix_image_orientation(image):
         if not exif:
             return image
 
-        # exif is already a dict: {tag_id: value}
-        orientation = exif.get(274)  # 274 = Orientation tag
+        orientation = exif.get(274)
 
         if orientation == 3:
             image = image.rotate(180, expand=True)
         elif orientation == 6:
-            image = image.rotate(270, expand=True)  # 90° CW
+            image = image.rotate(270, expand=True)
         elif orientation == 8:
-            image = image.rotate(90, expand=True)  # 90° CCW
+            image = image.rotate(90, expand=True)
 
         return image
     except Exception:
@@ -376,7 +393,6 @@ def generate_mqtt_certificates():
     server_crt = os.path.join(mosq_dir, "server.crt")
     server_csr = os.path.join(mosq_dir, "server.csr")
 
-    # Check if certificates already exist
     if (
         os.path.exists(ca_crt)
         and os.path.exists(server_crt)
@@ -388,7 +404,6 @@ def generate_mqtt_certificates():
     logging.info("Generating MQTT certificates in ./mosq/...")
 
     try:
-        # Generate CA key and certificate
         subprocess.check_call(
             ["openssl", "genrsa", "-out", ca_key, "2048"],
             stdout=subprocess.DEVNULL,
@@ -397,70 +412,38 @@ def generate_mqtt_certificates():
 
         subprocess.check_call(
             [
-                "openssl",
-                "req",
-                "-new",
-                "-x509",
-                "-days",
-                "3650",
-                "-key",
-                ca_key,
-                "-out",
-                ca_crt,
-                "-subj",
-                "/CN=MQTT-CA",
+                "openssl", "req", "-new", "-x509", "-days", "3650",
+                "-key", ca_key, "-out", ca_crt, "-subj", "/CN=MQTT-CA",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        # Generate server key
         subprocess.check_call(
             ["openssl", "genrsa", "-out", server_key, "2048"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        # Generate server certificate signing request
         subprocess.check_call(
             [
-                "openssl",
-                "req",
-                "-new",
-                "-key",
-                server_key,
-                "-out",
-                server_csr,
-                "-subj",
-                "/CN=localhost",
+                "openssl", "req", "-new", "-key", server_key,
+                "-out", server_csr, "-subj", "/CN=localhost",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        # Sign server certificate with CA
         subprocess.check_call(
             [
-                "openssl",
-                "x509",
-                "-req",
-                "-in",
-                server_csr,
-                "-CA",
-                ca_crt,
-                "-CAkey",
-                ca_key,
-                "-CAcreateserial",
-                "-out",
-                server_crt,
-                "-days",
-                "3650",
+                "openssl", "x509", "-req", "-in", server_csr,
+                "-CA", ca_crt, "-CAkey", ca_key, "-CAcreateserial",
+                "-out", server_crt, "-days", "3650",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        # Set appropriate permissions
         os.chmod(ca_key, 0o600)
         os.chmod(server_key, 0o600)
 
@@ -476,7 +459,6 @@ def generate_mqtt_certificates():
         except Exception as e:
             logging.warning(f"Could not change certificate ownership: {e}")
 
-        # Clean up CSR
         if os.path.exists(server_csr):
             os.remove(server_csr)
 
@@ -488,20 +470,11 @@ def generate_mqtt_certificates():
 
 
 def generate_thumbnails(source_img=None):
-    """Generate all resolution variants listed in RESOLUTIONS from the master photo.jpg.
-
-    Args:
-        source_img: An already-open Pillow Image to use as the source.  If None,
-                    the function opens WATCH_FILE from disk.  Passing the image
-                    directly avoids an extra disk read when the caller already
-                    has the image in memory (e.g. during upload or desaturation).
-    """
+    """Generate all resolution variants listed in RESOLUTIONS from the master photo.jpg."""
     try:
         if source_img is None:
             if not os.path.exists(WATCH_FILE):
-                logging.warning(
-                    "Cannot generate thumbnails - photo.jpg does not exist"
-                )
+                logging.warning("Cannot generate thumbnails - photo.jpg does not exist")
                 return
             source_img = Image.open(WATCH_FILE)
             source_img = fix_image_orientation(source_img)
@@ -512,18 +485,13 @@ def generate_thumbnails(source_img=None):
                 thumb.thumbnail((w, h), Image.LANCZOS)
                 out_path = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
                 thumb.save(out_path, format="JPEG", quality=75, optimize=True)
-                logging.info(
-                    "Thumbnail saved: %s at size %s", out_path, thumb.size
-                )
+                logging.info("Thumbnail saved: %s at size %s", out_path, thumb.size)
             except Exception as e:
-                logging.error(
-                    "Error generating %dx%d thumbnail: %s", w, h, e
-                )
+                logging.error("Error generating %dx%d thumbnail: %s", w, h, e)
     except Exception as e:
         logging.error("Error in generate_thumbnails: %s", e)
 
 
-# Class to watch for changes in a specific file
 class Watcher:
     FILE_TO_WATCH = WATCH_FILE
 
@@ -531,7 +499,7 @@ class Watcher:
         self.observer = Observer()
         self.last_md5 = self.calculate_md5()
         self.last_notification = 0
-        self.debounce_ms = 1000  # Wait 1 second after last modification before sending MQTT
+        self.debounce_ms = 1000
 
     def calculate_md5(self):
         hash_md5 = hashlib.md5()
@@ -561,7 +529,6 @@ class Handler(FileSystemEventHandler):
         self.watcher = watcher
 
     def on_modified(self, event):
-        # normalize path comparison
         try:
             event_path = os.path.abspath(event.src_path)
             watched_path = os.path.abspath(self.watcher.FILE_TO_WATCH)
@@ -571,9 +538,8 @@ class Handler(FileSystemEventHandler):
         if event.is_directory or event_path != watched_path:
             return None
 
-        current_time = int(time.time() * 1000)  # milliseconds
+        current_time = int(time.time() * 1000)
         if current_time - self.watcher.last_notification < self.watcher.debounce_ms:
-            # Too soon since last notification, ignore this event
             return None
 
         current_md5 = self.watcher.calculate_md5()
@@ -588,19 +554,16 @@ def send_mqtt_message(message):
     logging.info("Sending MQTT message: %s", message)
     client = mqtt.Client()
 
-    # Configure TLS with self-signed certificates
     ca_crt = os.path.join(os.getcwd(), "mosq", "ca.crt")
 
     if os.path.exists(ca_crt):
         try:
             client.tls_set(ca_certs=ca_crt, tls_version=ssl.PROTOCOL_TLSv1_2)
-            # Skip hostname verification for self-signed certs
             client.tls_insecure_set(True)
             logging.info("MQTT TLS enabled")
         except Exception as e:
             logging.warning(f"Could not enable MQTT TLS: {e}")
 
-    # Set username and password if configured
     if MQTT_USERNAME and MQTT_PASSWORD:
         client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 
@@ -625,25 +588,15 @@ def desaturate_image():
         logging.info(
             "Desaturated %s by 34%% and saved to photo-changed.jpg", WATCH_FILE
         )
-        # Pass the desaturated image so finalize_changes can regenerate thumbnails
-        # without re-reading the file from disk.
         finalize_changes(img)
     except Exception as e:
         logging.error(f"Error desaturating image: {e}")
 
 
 def finalize_changes(img=None):
-    """Copy photo-changed.jpg over the master photo.jpg and regenerate all thumbnails.
-
-    Args:
-        img: The already-processed Pillow Image.  Passed through to
-             generate_thumbnails() to avoid an extra disk read.  If None,
-             generate_thumbnails() will open WATCH_FILE itself.
-    """
     try:
         shutil.copy("photo-changed.jpg", WATCH_FILE)
         logging.info("Copied photo-changed.jpg to %s", WATCH_FILE)
-        # Regenerate ALL resolution variants so they stay in sync with the master
         generate_thumbnails(source_img=img)
     except Exception as e:
         logging.error(f"Error in finalize_changes: {e}")
@@ -656,14 +609,16 @@ def schedule_desaturation():
         time.sleep(1)
 
 
-# Flask routes (on blueprint)
+# ---------------------------------------------------------------------------
+# Flask routes - main photo viewer
+# ---------------------------------------------------------------------------
+
 @bp.route("/", methods=["GET"])
 @requires_auth
 def index():
     last_updated = None
     if os.path.exists(WATCH_FILE):
         last_updated = int(os.path.getmtime(WATCH_FILE) * 1000)
-    # use url_for inside template so generated URLs include the prefix automatically
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -823,6 +778,23 @@ def index():
             background: rgba(255, 255, 255, 0.25);
         }
 
+        .admin-link {
+            display: inline-block;
+            margin-top: 20px;
+            color: rgba(255,255,255,0.6);
+            text-decoration: none;
+            font-size: 0.85em;
+            border: 1px solid rgba(255,255,255,0.2);
+            padding: 6px 16px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .admin-link:hover {
+            color: #fff;
+            border-color: rgba(255,255,255,0.5);
+            background: rgba(255,255,255,0.1);
+        }
+
         @media (max-width: 768px) {
             .container {
                 flex-direction: column;
@@ -863,7 +835,6 @@ def index():
             </div>
         </div>
                 <script>
-            // Update the uploaded photo preview after file selection
             const fileInput = document.querySelector('input[type="file"]');
             const uploadButton = document.querySelector('button[type="submit"]');
             const uploadedPhoto = document.getElementById('uploaded-photo');
@@ -872,7 +843,6 @@ def index():
                 const file = event.target.files[0];
 
                 if (file) {
-                    // Show preview
                     const reader = new FileReader();
                     reader.onload = function(e) {
                         uploadedPhoto.src = e.target.result;
@@ -880,14 +850,12 @@ def index():
                     };
                     reader.readAsDataURL(file);
 
-                    // Make upload button more prominent
                     uploadButton.style.background = 'rgba(0, 255, 100, 0.8)';
                     uploadButton.style.border = '2px solid rgba(0, 255, 100, 1)';
                     uploadButton.style.transform = 'scale(1.1)';
                     uploadButton.style.boxShadow = '0 0 20px rgba(0, 255, 100, 0.6)';
                     uploadButton.textContent = '✓ Click to Upload!';
                 } else {
-                    // Reset if no file
                     uploadedPhoto.src = '';
                     uploadedPhoto.style.display = 'none';
                     uploadButton.style.background = 'rgba(255, 255, 255, 0.15)';
@@ -902,9 +870,9 @@ def index():
             <p id="last-updated">
                 {% if last_updated %}Last updated: <span id='update-time'></span>{% else %}No photo uploaded yet{% endif %}
             </p>
+            <a class="admin-link" href="{{ url_for('syncframe.admin_page') }}">⚙ OTA Admin</a>
         </footer>
         <script>
-            // Display last updated time in user's local timezone
             const lastUpdated = {{ last_updated if last_updated else 'null' }};
             if (lastUpdated) {
                 const date = new Date(lastUpdated);
@@ -933,7 +901,6 @@ def upload_file():
     if not file or not allowed_file(file.filename):
         return "File not allowed", 400
 
-    # Always write to WATCH_FILE (e.g. ./photo.jpg)
     target_path = WATCH_FILE
     ext = file.filename.rsplit(".", 1)[1].lower()
 
@@ -941,7 +908,6 @@ def upload_file():
         data = file.read()
         buf = BytesIO(data)
 
-        # Normalize all uploads into a Pillow Image
         if ext == "heic":
             try:
                 heif_file = pillow_heif.read_heif(buf.getvalue())
@@ -957,7 +923,6 @@ def upload_file():
                 logging.error("HEIC conversion failed: %s", e)
                 return "HEIC conversion failed", 500
         elif ext == "gif":
-            # Take first frame of GIF
             try:
                 buf.seek(0)
                 img = Image.open(buf)
@@ -970,7 +935,6 @@ def upload_file():
                 logging.error("GIF processing failed: %s", e)
                 return "GIF processing failed", 500
         else:
-            # Common image types (jpg, jpeg, png, etc.)
             try:
                 buf.seek(0)
                 img = Image.open(buf)
@@ -979,25 +943,18 @@ def upload_file():
                 logging.error("Image open failed: %s", e)
                 return "Image open failed", 500
 
-        # Ensure color mode is RGB for JPEG
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
 
-        # Resize to fit within max dimensions (default 1920x1080) while keeping aspect ratio
         max_size = (IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT)
         img.thumbnail(max_size, Image.LANCZOS)
 
-        # Save optimized JPEG master first
         img.save(target_path, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
         logging.info(
             "Uploaded image resized to max %s and saved to %s", max_size, target_path
         )
 
-        # Generate ALL resolution variants from the already-open image (no extra disk read)
         generate_thumbnails(source_img=img)
-
-        # Notify clients (don't send MQTT here - let the file watcher handle it)
-        # send_mqtt_message("refresh")  # Commented out to avoid duplicate messages
 
         return redirect(url_for("syncframe.index"))
 
@@ -1009,7 +966,6 @@ def upload_file():
 @bp.route("/photo.jpg")
 @requires_auth
 def serve_photo():
-    # Serve the watched photo path (the current frame image)
     if os.path.exists(WATCH_FILE):
         return send_from_directory(
             os.path.dirname(os.path.abspath(WATCH_FILE)) or ".",
@@ -1021,13 +977,6 @@ def serve_photo():
 @bp.route("/photo.<int:w>x<int:h>.jpg")
 @requires_auth
 def serve_photo_variant(w, h):
-    """Serve a resolution variant dynamically for any resolution in RESOLUTIONS.
-
-    The URL pattern /photo.<w>x<h>.jpg matches any width/height combination.
-    Only resolutions present in the RESOLUTIONS list are accepted; all others
-    return 404.  This replaces the old hardcoded /photo.800x480.jpg route while
-    remaining fully backwards-compatible with existing clients requesting that URL.
-    """
     if (w, h) not in RESOLUTIONS:
         return "Resolution not supported", 404
 
@@ -1039,7 +988,6 @@ def serve_photo_variant(w, h):
             os.path.basename(variant_file),
         )
 
-    # Variant missing - generate all thumbnails on-the-fly then serve
     if os.path.exists(WATCH_FILE):
         logging.info("Variant %dx%d missing - generating all thumbnails on-the-fly", w, h)
         generate_thumbnails()
@@ -1054,12 +1002,436 @@ def serve_photo_variant(w, h):
 
 @bp.route("/static/<path:filename>")
 def serve_static(filename):
-    """Serve static files like favicon.png and manifest - NO AUTH required"""
+    """Serve static files - NO AUTH required"""
     return send_from_directory("static", filename)
 
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def allowed_firmware(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_FIRMWARE_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# OTA public endpoints (no auth - ESP32 fetches these)
+# ---------------------------------------------------------------------------
+
+@bp.route("/manifest.txt")
+def serve_manifest():
+    """Serve the OTA manifest. Public - no auth - ESP32 polls this."""
+    manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
+    if not os.path.exists(manifest_path):
+        # Return empty manifest if none exists yet
+        return Response("", mimetype="text/plain")
+    return send_from_directory(OTA_FIRMWARE_DIR, "manifest.txt", mimetype="text/plain")
+
+
+@bp.route("/firmware/<path:filename>")
+def serve_firmware(filename):
+    """Serve firmware .bin files. Public - no auth - ESP32 downloads these."""
+    safe_name = os.path.basename(filename)
+    fw_path = os.path.join(OTA_FIRMWARE_DIR, safe_name)
+    if not os.path.exists(fw_path):
+        return "Firmware not found", 404
+    return send_from_directory(OTA_FIRMWARE_DIR, safe_name,
+                                mimetype="application/octet-stream")
+
+
+@bp.route("/checkin", methods=["POST"])
+def ota_checkin():
+    """
+    ESP32 clients POST here to record their presence.
+    Expected JSON body: { "hostname": "syncframe-4A2", "mac": "AA:BB:CC:DD:EE:FF" }
+    Or form fields with the same keys.
+    Returns 200 JSON with { "firmware": "<filename or null>" }
+    """
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+    else:
+        data = request.form
+
+    hostname = (data.get("hostname") or "").strip()
+    mac = (data.get("mac") or "").strip()
+
+    if not hostname:
+        return jsonify({"error": "hostname required"}), 400
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with _ota_lock:
+        clients = _load_clients()
+        if hostname not in clients:
+            # Auto-register unknown clients so they appear in the admin UI
+            clients[hostname] = {"mac": mac, "label": hostname, "last_seen": now_iso, "firmware": None}
+            logging.info("OTA: auto-registered new client %s (%s)", hostname, mac)
+        else:
+            clients[hostname]["last_seen"] = now_iso
+            if mac:
+                clients[hostname]["mac"] = mac
+        firmware = clients[hostname].get("firmware")
+        _save_clients(clients)
+
+    return jsonify({"firmware": firmware}), 200
+
+
+# ---------------------------------------------------------------------------
+# OTA Admin page (auth required)
+# ---------------------------------------------------------------------------
+
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SyncFrame OTA Admin</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #f85149;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 24px; }
+  h1 { font-size: 1.6em; margin-bottom: 6px; }
+  h1 span { color: var(--accent); }
+  .subtitle { color: var(--text-dim); font-size: 0.9em; margin-bottom: 28px; }
+  .subtitle a { color: var(--accent); text-decoration: none; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; }
+  .card h2 { font-size: 1.05em; margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.8em; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+  th { text-align: left; padding: 8px 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 0.8em; text-transform: uppercase; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; font-weight: 600; }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--accent2); border: 1px solid rgba(63,185,80,0.3); }
+  .badge-gray  { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 1px solid rgba(139,148,158,0.2); }
+  .badge-blue  { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+  input[type=text], input[type=file] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 12px; font-size: 0.9em; width: 100%;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  .btn {
+    display: inline-block; padding: 7px 16px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); cursor: pointer; font-size: 0.88em;
+    transition: border-color 0.15s, background 0.15s; text-decoration: none;
+  }
+  .btn:hover { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+  .btn-primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+  .btn-primary:hover { background: #79b8ff; border-color: #79b8ff; }
+  .btn-danger { color: var(--warn); border-color: rgba(248,81,73,0.3); }
+  .btn-danger:hover { background: rgba(248,81,73,0.08); border-color: var(--warn); }
+  .btn-sm { padding: 4px 10px; font-size: 0.8em; }
+  .form-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .form-group { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 160px; }
+  .form-group label { font-size: 0.8em; color: var(--text-dim); }
+  .no-clients { color: var(--text-dim); font-size: 0.9em; padding: 12px 0; }
+  .flash { padding: 10px 16px; border-radius: 6px; margin-bottom: 20px; font-size: 0.9em; }
+  .flash-ok  { background: rgba(63,185,80,0.12); border: 1px solid rgba(63,185,80,0.3); color: var(--accent2); }
+  .flash-err { background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.3); color: var(--warn); }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.85em; }
+  .fw-name { color: var(--accent2); }
+  .stale { color: var(--warn); }
+  details summary { cursor: pointer; color: var(--text-dim); font-size: 0.85em; margin-top: 10px; }
+  details[open] summary { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<h1>SyncFrame <span>OTA Admin</span></h1>
+<p class="subtitle">
+  Manage remote firmware updates &nbsp;·&nbsp;
+  <a href="{{ home_url }}">← Back to Photo Viewer</a>
+</p>
+
+{% if flash_ok %}<div class="flash flash-ok">{{ flash_ok }}</div>{% endif %}
+{% if flash_err %}<div class="flash flash-err">{{ flash_err }}</div>{% endif %}
+
+<!-- Add client -->
+<div class="card">
+  <h2>Register Client</h2>
+  <form method="POST" action="{{ add_url }}">
+    <div class="form-row">
+      <div class="form-group">
+        <label>Hostname (e.g. syncframe-4A2)</label>
+        <input type="text" name="hostname" placeholder="syncframe-XXXX" required>
+      </div>
+      <div class="form-group">
+        <label>MAC Address (optional)</label>
+        <input type="text" name="mac" placeholder="AA:BB:CC:DD:EE:FF">
+      </div>
+      <div class="form-group">
+        <label>Label / Notes</label>
+        <input type="text" name="label" placeholder="Living room frame">
+      </div>
+      <div style="display:flex;align-items:flex-end;">
+        <button class="btn btn-primary" type="submit">Add Client</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<!-- Client table -->
+<div class="card">
+  <h2>Registered Clients</h2>
+  {% if clients %}
+  <table>
+    <thead>
+      <tr>
+        <th>Hostname</th>
+        <th>MAC</th>
+        <th>Label</th>
+        <th>Last Check-In</th>
+        <th>Pending Firmware</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for hostname, info in clients.items() %}
+      <tr>
+        <td class="mono">{{ hostname }}</td>
+        <td class="mono">{{ info.mac or '—' }}</td>
+        <td>{{ info.label or '—' }}</td>
+        <td>
+          {% if info.last_seen %}
+            <span class="badge {{ 'badge-green' if info.fresh else 'badge-gray' }}">
+              {{ info.last_seen_human }}
+            </span>
+          {% else %}
+            <span class="badge badge-gray">Never</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if info.firmware %}
+            <span class="badge badge-blue fw-name mono">{{ info.firmware }}</span>
+          {% else %}
+            <span class="badge badge-gray">None</span>
+          {% endif %}
+        </td>
+        <td>
+          <!-- Upload firmware for this client -->
+          <details>
+            <summary>Upload firmware</summary>
+            <form method="POST" action="{{ upload_fw_url }}" enctype="multipart/form-data"
+                  style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+              <input type="hidden" name="hostname" value="{{ hostname }}">
+              <input type="file" name="firmware" accept=".bin" required style="flex:1;min-width:180px;">
+              <button class="btn btn-primary btn-sm" type="submit">Upload .bin</button>
+            </form>
+          </details>
+          {% if info.firmware %}
+          &nbsp;
+          <form method="POST" action="{{ clear_fw_url }}" style="display:inline;">
+            <input type="hidden" name="hostname" value="{{ hostname }}">
+            <button class="btn btn-sm btn-danger" type="submit"
+                    onclick="return confirm('Clear firmware for {{ hostname }}?')">Clear fw</button>
+          </form>
+          {% endif %}
+          &nbsp;
+          <form method="POST" action="{{ remove_url }}" style="display:inline;">
+            <input type="hidden" name="hostname" value="{{ hostname }}">
+            <button class="btn btn-sm btn-danger" type="submit"
+                    onclick="return confirm('Remove {{ hostname }}?')">Remove</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="no-clients">No clients registered yet. Add one above or let a device check in automatically.</p>
+  {% endif %}
+</div>
+
+<!-- Manifest preview -->
+<div class="card">
+  <h2>Current manifest.txt</h2>
+  <pre class="mono" style="white-space:pre-wrap;color:var(--accent2);font-size:0.85em;">{{ manifest_content or '(empty)' }}</pre>
+  <p style="margin-top:10px;font-size:0.8em;color:var(--text-dim);">
+    Served at <span class="mono">{{ manifest_url }}</span>
+  </p>
+</div>
+
+<script>
+  // Auto-refresh last-seen timestamps
+  setInterval(() => { location.reload(); }, 60000);
+</script>
+</body>
+</html>
+"""
+
+
+def _humanize(iso_str):
+    """Return a human-readable relative time string from an ISO8601 UTC string."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - dt
+        s = int(delta.total_seconds())
+        if s < 60:
+            return f"{s}s ago"
+        elif s < 3600:
+            return f"{s // 60}m ago"
+        elif s < 86400:
+            return f"{s // 3600}h ago"
+        else:
+            return f"{s // 86400}d ago"
+    except Exception:
+        return iso_str
+
+
+@bp.route("/admin")
+@requires_auth
+def admin_page():
+    flash_ok = request.args.get("ok")
+    flash_err = request.args.get("err")
+
+    with _ota_lock:
+        raw_clients = _load_clients()
+
+    # Annotate clients with human-readable / freshness info
+    clients = {}
+    for hostname, info in raw_clients.items():
+        entry = dict(info)
+        entry["last_seen_human"] = _humanize(info.get("last_seen"))
+        # "fresh" = checked in within the last 24 hours
+        try:
+            dt = datetime.fromisoformat(info["last_seen"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            entry["fresh"] = (datetime.now(timezone.utc) - dt).total_seconds() < 86400
+        except Exception:
+            entry["fresh"] = False
+        clients[hostname] = entry
+
+    manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
+    manifest_content = ""
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest_content = f.read().strip()
+
+    # Build the public manifest URL hint (best-effort)
+    manifest_url = (URL_PREFIX or "") + "/manifest.txt"
+
+    return render_template_string(
+        ADMIN_HTML,
+        clients=clients,
+        flash_ok=flash_ok,
+        flash_err=flash_err,
+        manifest_content=manifest_content,
+        manifest_url=manifest_url,
+        home_url=url_for("syncframe.index"),
+        add_url=url_for("syncframe.admin_add_client"),
+        remove_url=url_for("syncframe.admin_remove_client"),
+        upload_fw_url=url_for("syncframe.admin_upload_firmware"),
+        clear_fw_url=url_for("syncframe.admin_clear_firmware"),
+    )
+
+
+@bp.route("/admin/add", methods=["POST"])
+@requires_auth
+def admin_add_client():
+    hostname = request.form.get("hostname", "").strip()
+    mac = request.form.get("mac", "").strip()
+    label = request.form.get("label", "").strip()
+
+    if not hostname:
+        return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
+
+    with _ota_lock:
+        clients = _load_clients()
+        if hostname in clients:
+            return redirect(url_for("syncframe.admin_page") + "?err=Client+already+exists")
+        clients[hostname] = {"mac": mac, "label": label or hostname, "last_seen": None, "firmware": None}
+        _save_clients(clients)
+        _rebuild_manifest()
+
+    return redirect(url_for("syncframe.admin_page") + f"?ok=Client+{hostname}+added")
+
+
+@bp.route("/admin/remove", methods=["POST"])
+@requires_auth
+def admin_remove_client():
+    hostname = request.form.get("hostname", "").strip()
+    if not hostname:
+        return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
+
+    with _ota_lock:
+        clients = _load_clients()
+        if hostname in clients:
+            # Optionally remove firmware file if no other client uses it
+            fw = clients[hostname].get("firmware")
+            del clients[hostname]
+            _save_clients(clients)
+            _rebuild_manifest()
+            # Clean up orphaned firmware
+            if fw and not any(c.get("firmware") == fw for c in clients.values()):
+                fw_path = os.path.join(OTA_FIRMWARE_DIR, fw)
+                try:
+                    os.remove(fw_path)
+                except Exception:
+                    pass
+
+    return redirect(url_for("syncframe.admin_page") + f"?ok=Client+{hostname}+removed")
+
+
+@bp.route("/admin/upload_firmware", methods=["POST"])
+@requires_auth
+def admin_upload_firmware():
+    hostname = request.form.get("hostname", "").strip()
+    if not hostname:
+        return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
+
+    if "firmware" not in request.files:
+        return redirect(url_for("syncframe.admin_page") + "?err=No+file+provided")
+
+    fw_file = request.files["firmware"]
+    if not fw_file or not allowed_firmware(fw_file.filename):
+        return redirect(url_for("syncframe.admin_page") + "?err=Only+.bin+files+allowed")
+
+    # Name the file after the hostname for clarity
+    safe_hostname = hostname.replace("/", "_").replace("..", "_")
+    filename = f"{safe_hostname}.bin"
+    dest = os.path.join(OTA_FIRMWARE_DIR, filename)
+    fw_file.save(dest)
+    logging.info("Firmware saved for %s -> %s", hostname, dest)
+
+    with _ota_lock:
+        clients = _load_clients()
+        if hostname not in clients:
+            clients[hostname] = {"mac": "", "label": hostname, "last_seen": None, "firmware": None}
+        clients[hostname]["firmware"] = filename
+        _save_clients(clients)
+        _rebuild_manifest()
+
+    return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+uploaded+for+{hostname}")
+
+
+@bp.route("/admin/clear_firmware", methods=["POST"])
+@requires_auth
+def admin_clear_firmware():
+    hostname = request.form.get("hostname", "").strip()
+    if not hostname:
+        return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
+
+    with _ota_lock:
+        clients = _load_clients()
+        if hostname in clients:
+            clients[hostname]["firmware"] = None
+            _save_clients(clients)
+            _rebuild_manifest()
+
+    return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+cleared+for+{hostname}")
 
 
 # Register blueprint with or without prefix
@@ -1069,28 +1441,21 @@ else:
     app.register_blueprint(bp)
 
 
-# Start the Flask web server in the background
 def start_web_server():
     if USE_HTTPS:
         try:
-            # Ensure certificates exist (create if necessary)
             ensure_certificates(CERTFILE, KEYFILE)
         except Exception as e:
             logging.error("Could not ensure certificates: %s. Falling back to HTTP.", e)
-            logging.info(
-                "Starting HTTP Flask server on %s:%s", SERVER_HOST, SERVER_PORT
-            )
+            logging.info("Starting HTTP Flask server on %s:%s", SERVER_HOST, SERVER_PORT)
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
             return
 
         if os.path.exists(CERTFILE) and os.path.exists(KEYFILE):
             logging.info(
                 "Starting HTTPS Flask server on %s:%s (prefix=%s)",
-                SERVER_HOST,
-                SERVER_PORT,
-                URL_PREFIX or "/",
+                SERVER_HOST, SERVER_PORT, URL_PREFIX or "/",
             )
-            # ssl_context expects either ('cert.pem', 'key.pem') or SSLContext
             app.run(
                 host=SERVER_HOST,
                 port=SERVER_PORT,
@@ -1100,25 +1465,19 @@ def start_web_server():
         else:
             logging.error(
                 "CERTFILE or KEYFILE not found after generation. Falling back to HTTP. Cert: %s Key: %s",
-                CERTFILE,
-                KEYFILE,
+                CERTFILE, KEYFILE,
             )
-            logging.info(
-                "Starting HTTP Flask server on %s:%s", SERVER_HOST, SERVER_PORT
-            )
+            logging.info("Starting HTTP Flask server on %s:%s", SERVER_HOST, SERVER_PORT)
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
     else:
         logging.info(
             "Starting HTTP Flask server on %s:%s (prefix=%s)",
-            SERVER_HOST,
-            SERVER_PORT,
-            URL_PREFIX or "/",
+            SERVER_HOST, SERVER_PORT, URL_PREFIX or "/",
         )
         app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
 
 
 if __name__ == "__main__":
-    # Generate MQTT certificates if they don't exist
     generate_mqtt_certificates()
     create_mqtt_password_file()
 
@@ -1136,7 +1495,6 @@ if __name__ == "__main__":
         )
 
     try:
-        # Start the watcher
         w = Watcher()
         logging.info("Watcher started. Monitoring file changes on %s...", WATCH_FILE)
         logging.info(
@@ -1145,22 +1503,18 @@ if __name__ == "__main__":
         )
         logging.info("Basic auth enabled. Username: %s", USERNAME)
 
-        # Start the Flask web server in a separate thread
         web_server_thread = threading.Thread(target=start_web_server)
         web_server_thread.daemon = True
         web_server_thread.start()
 
-        # Start background thread for image desaturation
         desaturation_thread = threading.Thread(target=schedule_desaturation)
         desaturation_thread.daemon = True
         desaturation_thread.start()
 
-        # Run the watcher (blocking)
         w.run()
     except Exception as e:
         logging.error(f"Error: {e}")
     finally:
-        # Terminating the Mosquitto MQTT broker
         logging.info("Terminating Mosquitto MQTT broker...")
         if broker_process:
             try:
