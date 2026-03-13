@@ -103,7 +103,7 @@ function formatTimestamp(ms) {
 }
 async function poll() {
   try {
-    const r = await fetch("/api/status",{cache:"no-store"});
+    const r = await fetch("/api/status",{cache:"no-store",credentials:"include"});
     const s = await r.json();
     if (s.ip)       document.getElementById("f_ip").textContent   = "IP: "  +s.ip;
     if (s.mac)      document.getElementById("f_mac").textContent  = "MAC: " +s.mac;
@@ -119,7 +119,7 @@ async function poll() {
   } catch(e) {}
 }
 async function refreshNow() {
-  await fetch("/api/refresh",{method:"POST"});
+  await fetch("/api/refresh",{method:"POST",credentials:"include"});
   await poll();
 }
 poll();
@@ -223,7 +223,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       </div>
       <div>
         <label>HTTP Basic auth pass <span class="small">(blank = keep current)</span></label>
-        <input type="password" name="httpPass" id="httpPass" placeholder=""/>
+        <input type="password" name="httpPass" id="httpPass" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="off"/>
       </div>
     </div>
 
@@ -250,7 +250,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       </div>
       <div>
         <label>Pass <span class="small">(blank = keep current)</span></label>
-        <input type="password" name="mqttPass" id="mqttPass" placeholder=""/>
+        <input type="password" name="mqttPass" id="mqttPass" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="off"/>
       </div>
     </div>
 
@@ -266,7 +266,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <input type="number" name="updateIntervalMin" id="updateIntervalMin" min="1" placeholder="60"/>
 
     <p class="small" style="margin-top:6px">
-      The device checks the manifest for a line containing its hostname (e.g. <em>syncframe-4A2</em>).
+      The device checks the manifest for a line containing its hostname (e.g. <em id="hostnameHint">syncframe-XXX</em>).
       If found, that firmware is downloaded and flashed automatically.
     </p>
 
@@ -280,7 +280,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       </div>
       <div>
         <label>Password <span class="small">(blank = keep current)</span></label>
-        <input type="password" name="webPass" id="webPass" placeholder="" autocomplete="new-password"/>
+        <input type="password" name="webPass" id="webPass" placeholder="&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;&#9679;" autocomplete="new-password"/>
       </div>
     </div>
     <label style="margin-top:8px">
@@ -311,32 +311,42 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
 </div>
 
 <script>
+// Shared fetch wrapper — always sends stored Basic Auth credentials
+function apiFetch(url, opts) {
+  return fetch(url, Object.assign({credentials:"include",cache:"no-store"}, opts||{}));
+}
+
 let currentConfig = {};
 let logSince = 0;
 let logTimer = null;
 
 async function loadCfg() {
   try {
-    const r = await fetch("/api/config",{cache:"no-store"});
+    const r = await apiFetch("/api/config");
+    if (!r.ok) { console.warn("loadCfg HTTP", r.status); return; }
     const c = await r.json();
     currentConfig = c;
-    photoBaseUrl.value        = c.photoBaseUrl       || "";
-    photoFilename.value       = c.photoFilename      || "";
-    httpsInsecure.checked     = !!c.httpsInsecure;
-    httpUser.value            = c.httpUser           || "";
-    httpPass.value            = "";
-    mqttHost.value            = c.mqttHost           || "";
-    mqttPort.value            = c.mqttPort           || "";
-    mqttTopic.value           = c.mqttTopic          || "";
-    mqttUser.value            = c.mqttUser           || "";
-    mqttPass.value            = "";
-    mqttUseTLS.checked        = !!c.mqttUseTLS;
-    mqttTlsInsecure.checked   = !!c.mqttTlsInsecure;
-    updateUrl.value           = c.updateUrl          || "";
-    updateIntervalMin.value   = c.updateIntervalMin  || 60;
-    webUser.value             = c.webUser            || "admin";
-    webPass.value             = "";
-  } catch(e) { console.error("Failed to load config:", e); }
+    document.getElementById("photoBaseUrl").value      = c.photoBaseUrl      || "";
+    document.getElementById("photoFilename").value     = c.photoFilename     || "";
+    document.getElementById("httpsInsecure").checked   = !!c.httpsInsecure;
+    document.getElementById("httpUser").value          = c.httpUser          || "";
+    // password fields: leave empty so user must re-type to change;
+    // show dot placeholder only when a password is already set server-side
+    document.getElementById("httpPass").placeholder    = c.httpPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
+    document.getElementById("mqttHost").value          = c.mqttHost          || "";
+    document.getElementById("mqttPort").value          = c.mqttPort          || "";
+    document.getElementById("mqttTopic").value         = c.mqttTopic         || "";
+    document.getElementById("mqttUser").value          = c.mqttUser          || "";
+    document.getElementById("mqttPass").placeholder    = c.mqttPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
+    document.getElementById("mqttUseTLS").checked      = !!c.mqttUseTLS;
+    document.getElementById("mqttTlsInsecure").checked = !!c.mqttTlsInsecure;
+    document.getElementById("updateUrl").value         = c.updateUrl         || "";
+    document.getElementById("updateIntervalMin").value = c.updateIntervalMin || 60;
+    document.getElementById("webUser").value           = c.webUser           || "admin";
+    document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
+    // Show actual hostname in the OTA hint
+    if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;
+  } catch(e) { console.error("loadCfg error:", e); }
 }
 
 function setPill(id, label, ok) {
@@ -355,47 +365,53 @@ function setSpan(id, text, ok) {
 
 async function loadStatus() {
   try {
-    const r = await fetch("/api/status",{cache:"no-store"});
+    const r = await apiFetch("/api/status");
+    if (!r.ok) { setSpan("ds_host","Status unavailable (HTTP "+r.status+")",false); return; }
     const s = await r.json();
     setPill("s_wifi", "WiFi",  !!s.wifi);
     setPill("s_mdns", "mDNS",  !!s.mdns);
     setPill("s_mqtt", "MQTT",  !!s.mqtt);
     setPill("s_dl",   "Photo", !!s.lastDownloadOk);
     setPill("s_ota",  "OTA",   !s.otaInProgress);
-    setSpan("ds_host",  "Host: "+(s.hostname||"-"),          null);
-    setSpan("ds_mac",   "MAC: " +(s.mac     ||"-"),          null);
-    setSpan("ds_ip",    "IP: "  +(s.ip      ||"offline"),    null);
+    setSpan("ds_host",  "Host: "+(s.hostname||"-"),       null);
+    setSpan("ds_mac",   "MAC: " +(s.mac     ||"-"),       null);
+    setSpan("ds_ip",    "IP: "  +(s.ip      ||"offline"), null);
     setSpan("ds_wifi",  "WiFi: "+(s.wifi  ?"connected":"disconnected"), !!s.wifi);
     setSpan("ds_mqtt",  "MQTT: "+(s.mqtt  ?"connected":"disconnected"), !!s.mqtt);
     setSpan("ds_photo", s.lastDownloadOk
       ? "Photo: ok"
       : "Photo: failed ("+(s.lastDownloadErr||"unknown")+")",
       !!s.lastDownloadOk);
-    setSpan("ds_ota",  s.otaInProgress ? "OTA: flashing..." : "OTA: idle",
-      s.otaInProgress ? null : true);
+    setSpan("ds_ota", s.otaInProgress?"OTA: flashing...":"OTA: idle",
+      s.otaInProgress?null:true);
+    // Keep hostname hint in sync
+    if (s.hostname) document.getElementById("hostnameHint").textContent = s.hostname;
   } catch(e) { setSpan("ds_host","Status unavailable",false); }
 }
 
 function appendLogLine(item) {
   const t = (Number(item.ms||0)/1000).toFixed(3);
   const line = "["+t+"] "+(item.tag||"LOG")+" "+(item.msg||"");
-  const lines = logBox.textContent ? logBox.textContent.split("\n") : [];
+  const lb = document.getElementById("logBox");
+  const lines = lb.textContent ? lb.textContent.split("\n") : [];
   lines.push(line);
   if (lines.length > 80) lines.splice(0, lines.length-80);
-  logBox.textContent = lines.join("\n");
-  logBox.scrollTop = logBox.scrollHeight;
+  lb.textContent = lines.join("\n");
+  lb.scrollTop = lb.scrollHeight;
 }
 
 async function pollLogs(reset) {
+  const logEnable = document.getElementById("logEnable");
   if (!logEnable.checked || document.hidden) return;
   let url = "/api/log";
   if (!reset && logSince) url += "?since="+encodeURIComponent(logSince);
-  const r = await fetch(url,{cache:"no-store"});
+  const r = await apiFetch(url);
   const data = await r.json();
-  if (reset) logBox.textContent = "";
+  const lb = document.getElementById("logBox");
+  if (reset) lb.textContent = "";
   (data.items||[]).forEach(appendLogLine);
   if (typeof data.nextSince==="number") logSince = data.nextSince;
-  if (!logBox.textContent) logBox.textContent = "No events yet.";
+  if (!lb.textContent) lb.textContent = "No events yet.";
 }
 
 function setLogPolling(enabled) {
@@ -406,45 +422,50 @@ function setLogPolling(enabled) {
   logTimer = setInterval(()=>pollLogs(false), 2000);
 }
 
-configForm.addEventListener('submit', async (e) => {
+document.getElementById("configForm").addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = new URLSearchParams();
-  f.append('photoBaseUrl',       photoBaseUrl.value);
-  f.append('photoFilename',      photoFilename.value);
-  f.append('httpUser',           httpUser.value);
-  f.append('mqttHost',           mqttHost.value);
-  f.append('mqttPort',           mqttPort.value);
-  f.append('mqttTopic',          mqttTopic.value);
-  f.append('mqttUser',           mqttUser.value);
-  f.append('updateUrl',          updateUrl.value);
-  f.append('updateIntervalMin',  updateIntervalMin.value);
-  if (webUser.value.length > 0)  f.append('webUser', webUser.value);
-  if (httpPass.value.length > 0) f.append('httpPass', httpPass.value);
-  if (mqttPass.value.length > 0) f.append('mqttPass', mqttPass.value);
-  if (webPass.value.length > 0)  f.append('webPass',  webPass.value);
+  f.append('photoBaseUrl',       document.getElementById("photoBaseUrl").value);
+  f.append('photoFilename',      document.getElementById("photoFilename").value);
+  f.append('httpUser',           document.getElementById("httpUser").value);
+  f.append('mqttHost',           document.getElementById("mqttHost").value);
+  f.append('mqttPort',           document.getElementById("mqttPort").value);
+  f.append('mqttTopic',          document.getElementById("mqttTopic").value);
+  f.append('mqttUser',           document.getElementById("mqttUser").value);
+  f.append('updateUrl',          document.getElementById("updateUrl").value);
+  f.append('updateIntervalMin',  document.getElementById("updateIntervalMin").value);
+  const webUserVal = document.getElementById("webUser").value;
+  const httpPassVal = document.getElementById("httpPass").value;
+  const mqttPassVal = document.getElementById("mqttPass").value;
+  const webPassVal  = document.getElementById("webPass").value;
+  if (webUserVal.length > 0)  f.append('webUser',  webUserVal);
+  if (httpPassVal.length > 0) f.append('httpPass', httpPassVal);
+  if (mqttPassVal.length > 0) f.append('mqttPass', mqttPassVal);
+  if (webPassVal.length > 0)  f.append('webPass',  webPassVal);
   if (document.getElementById('webPassClearCb').checked) f.append('webPassClear','1');
-  if (httpsInsecure.checked)     f.append('httpsInsecure',   '1');
-  if (mqttUseTLS.checked)        f.append('mqttUseTLS',      '1');
-  if (mqttTlsInsecure.checked)   f.append('mqttTlsInsecure', '1');
+  if (document.getElementById("httpsInsecure").checked)    f.append('httpsInsecure',   '1');
+  if (document.getElementById("mqttUseTLS").checked)       f.append('mqttUseTLS',      '1');
+  if (document.getElementById("mqttTlsInsecure").checked)  f.append('mqttTlsInsecure', '1');
   try {
-    const resp = await fetch('/api/config',{method:'POST',body:f});
+    const resp = await apiFetch('/api/config',{method:'POST',body:f});
     if (resp.ok) {
-      saveMsg.style.display = 'block';
-      setTimeout(()=>saveMsg.style.display='none', 3000);
+      document.getElementById("saveMsg").style.display = 'block';
+      setTimeout(()=>document.getElementById("saveMsg").style.display='none', 3000);
       setTimeout(loadCfg, 500);
       setTimeout(loadStatus, 500);
+      const logEnable = document.getElementById("logEnable");
       if (logEnable.checked) setTimeout(()=>pollLogs(false), 500);
     }
   } catch(e) { alert('Save failed: '+e); }
 });
 
-logEnable.addEventListener('change', ()=>{
-  if (!logEnable.checked) { if (logTimer){clearInterval(logTimer);logTimer=null;} return; }
+document.getElementById("logEnable").addEventListener('change', function() {
+  if (!this.checked) { if (logTimer){clearInterval(logTimer);logTimer=null;} return; }
   setLogPolling(true);
 });
-clearLogBtn.addEventListener('click', ()=>{logSince=0;pollLogs(true);});
+document.getElementById("clearLogBtn").addEventListener('click', ()=>{logSince=0;pollLogs(true);});
 document.addEventListener('visibilitychange', ()=>{
-  if (!document.hidden){loadStatus();if(logEnable.checked)pollLogs(false);}
+  if (!document.hidden){loadStatus();const le=document.getElementById("logEnable");if(le.checked)pollLogs(false);}
 });
 
 loadCfg();
