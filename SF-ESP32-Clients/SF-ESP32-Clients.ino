@@ -12,6 +12,7 @@
 #include <Update.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include <freertos/semphr.h>
 
 #define DEBUG_SERIAL 1
 #if DEBUG_SERIAL
@@ -39,6 +40,17 @@
 char HOSTNAME[32];
 char MAC_STR[18];
 static const char* HOST_PREFIX = "syncframe-";
+
+// ---------------------------------------------------------------------------
+// Display mutex - serialize all gfx calls across both cores.
+// Acquired before any board_draw_* call; OTA task holds it for the entire
+// flash cycle so the main-loop core can never interleave a draw.
+// ---------------------------------------------------------------------------
+static SemaphoreHandle_t displayMutex = nullptr;
+
+// Convenience macros - wait up to 200 ms then give up rather than deadlock.
+#define DISPLAY_LOCK()   (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(200)) == pdTRUE)
+#define DISPLAY_UNLOCK() xSemaphoreGive(displayMutex)
 
 // ---------------------------------------------------------------------------
 // Captive Portal DNS + Web portal state
@@ -110,12 +122,8 @@ size_t   lastJpgLen    = 0;
 bool showingLast        = false;
 bool wifiEverConnected  = false;
 
-static TaskHandle_t otaTaskHandle = nullptr;
+static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
-
-// Tracks whether the OTA splash has been drawn yet for this flash cycle
-// so we only fill the screen once and never overdraw it.
-static volatile bool otaSplashDrawn = false;
 
 static const uint8_t LOG_CAP = 48;
 static const size_t LOG_MSG_LEN = 96;
@@ -141,34 +149,29 @@ static bool requireWebAuth() {
 }
 
 // ============================================================
-// Display helpers
-// Safe wrappers that refuse to draw while OTA is in progress
-// so the flashing screen stays frozen on the OTA status message.
+// Display helpers - all gfx access goes through the mutex.
+// safeDrawJpeg / safeDrawStatus are for normal operation;
+// they bail out immediately if OTA holds the lock.
+// otaDrawStatus bypasses the "bail" and blocks briefly so the
+// OTA task can paint its own messages while it owns the mutex.
 // ============================================================
 static void safeDrawJpeg(const uint8_t* buf, size_t len) {
-  if (otaInProgress) return;   // never overdraw the OTA splash
+  if (otaInProgress) return;
+  if (!DISPLAY_LOCK()) return;
   board_draw_jpeg(buf, len);
+  DISPLAY_UNLOCK();
 }
 
 static void safeDrawStatus(const char* msg) {
   if (otaInProgress) return;
+  if (!DISPLAY_LOCK()) return;
   board_draw_boot_status(msg);
+  DISPLAY_UNLOCK();
 }
 
-// Called once when OTA begins - fills screen with a clean update notice.
-// Uses board_draw_boot_status directly (bypassing the safe wrapper)
-// because we intentionally WANT to draw at this point.
-static void drawOtaSplash(const char* binUrl) {
-  if (otaSplashDrawn) return;
-  // Fill screen black then overlay the status text.
-  // board_draw_boot_status already clears to its background colour;
-  // call it twice: first with a blank to clear any old image, then
-  // with the real message so it paints over fully.
-  board_draw_boot_status("");
-  char msg[128];
-  snprintf(msg, sizeof(msg), "Firmware update\nDownloading...\n%s", binUrl);
+// Called ONLY from the OTA task while it holds the mutex.
+static void otaDrawStatus(const char* msg) {
   board_draw_boot_status(msg);
-  otaSplashDrawn = true;
 }
 
 // ---------------------- Hardware Callbacks ----------------------
@@ -556,7 +559,6 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 }
 
 static bool downloadAndShowPhoto() {
-  // Don't disturb the display during OTA
   if (otaInProgress) return false;
 
   uint8_t* newBuf = nullptr;
@@ -600,6 +602,9 @@ static bool downloadAndShowPhoto() {
 
 // ============================================================
 // Background OTA update task (core 0, priority 1)
+// The task acquires the display mutex before painting anything
+// and holds it for the ENTIRE flash so the main-loop core on
+// core 1 cannot interleave any gfx calls.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
@@ -665,13 +670,15 @@ static void otaUpdateTask(void* pv) {
       }
 
       if (binUrl.length() > 0) {
-        // Set flag FIRST so main-loop draw calls stop immediately,
-        // THEN paint the OTA splash exactly once.
+        // Set flag first so safeDrawJpeg/safeDrawStatus bail immediately,
+        // then grab the mutex so we own the display for the full flash cycle.
         otaInProgress = true;
-        otaSplashDrawn = false;
-        drawOtaSplash(binUrl.c_str());
+        xSemaphoreTake(displayMutex, portMAX_DELAY); // wait as long as needed
 
         logEvent("OTA", "starting flash from %s", binUrl.c_str());
+        // Clear screen then show update message
+        gfx->fillScreen(0x0000);
+        otaDrawStatus("Firmware update\nDownloading...");
 
         HTTPClient*       fhttp  = new HTTPClient();
         WiFiClientSecure* fsec   = nullptr;
@@ -698,31 +705,33 @@ static void otaUpdateTask(void* pv) {
                 size_t written = Update.writeStream(*fs);
                 if (Update.end() && Update.isFinished()) {
                   logEvent("OTA", "flash ok bytes=%u rebooting", (unsigned)written);
-                  // Update the splash to show completion before reboot
-                  board_draw_boot_status("Update complete!\nRebooting...");
+                  otaDrawStatus("Update complete!\nRebooting...");
                   flashed = true;
                 } else {
                   logEvent("OTA", "Update.end error: %s", Update.errorString());
-                  board_draw_boot_status("OTA failed - see log");
+                  otaDrawStatus("OTA failed - see log");
                 }
               } else {
                 logEvent("OTA", "Update.begin error: %s", Update.errorString());
-                board_draw_boot_status("OTA failed - see log");
+                otaDrawStatus("OTA failed - see log");
               }
             } else {
               logEvent("OTA", "firmware fetch failed code=%d", code);
-              board_draw_boot_status("OTA fetch failed");
+              otaDrawStatus("OTA fetch failed");
             }
           }
           fhttp->end(); delete fhttp; delete fsec; delete fplain;
         }
+
+        // Release display mutex before reboot or before resuming normal ops
+        DISPLAY_UNLOCK();
+
         if (flashed) { delay(1500); ESP.restart(); }
-        // If flash failed, clear the flag so normal operation resumes
+
+        // Flash failed - clear flag and restore last good image
         otaInProgress = false;
-        otaSplashDrawn = false;
-        // Restore the display to the last good photo
-        if (currentJpg && currentJpgLen)  board_draw_jpeg(currentJpg, currentJpgLen);
-        else if (lastJpg && lastJpgLen)    board_draw_jpeg(lastJpg, lastJpgLen);
+        if (currentJpg && currentJpgLen)  safeDrawJpeg(currentJpg, currentJpgLen);
+        else if (lastJpg && lastJpgLen)    safeDrawJpeg(lastJpg, lastJpgLen);
       } else {
         logEvent("OTA", "no update for %s", HOSTNAME);
       }
@@ -754,7 +763,6 @@ static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   (void)payload;
   lastMqttMsgMs = millis();
   logEvent("MQTT", "message topic=%s bytes=%u", topic ? topic : "", length);
-  // Don't trigger a photo download/draw while OTA is flashing
   if (!otaInProgress) downloadAndShowPhoto();
 }
 
@@ -908,10 +916,14 @@ static void handleLogJson() {
   server.send(200, "application/json", j);
 }
 
+// Build the config JSON into a char buffer on the heap and send with
+// explicit Content-Length so WebServer never splits the response.
 static void handleGetConfigJson() {
   if (!requireWebAuth()) return;
+
+  // Build into a String first so we know the exact byte count.
   String j;
-  j.reserve(640);
+  j.reserve(800);
   j += "{";
   j += "\"hostname\":\"";      appendJsonEscaped(j, HOSTNAME);          j += "\",";
   j += "\"photoBaseUrl\":\"";   appendJsonEscaped(j, cfg.photoBaseUrl);  j += "\",";
@@ -929,8 +941,11 @@ static void handleGetConfigJson() {
   j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
   j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
-  j += "\"webPass\":\"";        j += (cfg.webPass.length()   ? "********" : "");
-  j += "}";
+  j += "\"webPass\":\"";        j += (cfg.webPass.length()   ? "********" : ""); j += "}";
+
+  // Send with explicit Content-Length header so the TCP stack never fragments.
+  server.sendHeader("Content-Length", String(j.length()));
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", j);
 }
 
@@ -1009,6 +1024,9 @@ void setup() {
   delay(50);
   buildHostAndClientId();
   logEvent("BOOT", "%s mac=%s reset=%s", HOSTNAME, MAC_STR, resetReasonToStr(esp_reset_reason()));
+
+  // Create display mutex before any drawing happens
+  displayMutex = xSemaphoreCreateMutex();
 
   loadConfig();
   board_init();
