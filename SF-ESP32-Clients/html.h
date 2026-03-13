@@ -129,6 +129,9 @@ setInterval(poll, 2000);
 </html>
 )HTML";
 
+// Config page template - the placeholder CFG_JSON_PLACEHOLDER is replaced at
+// serve time in handleConfigPage() with the actual config JSON so there is no
+// separate /api/config fetch and therefore no WebServer chunking truncation.
 static const char CONFIG_HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html lang="en">
@@ -208,7 +211,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
   </div>
 
   <div id="saveMsg" class="msg">Settings saved!</div>
-  <div id="errMsg"  class="err">Failed to load config &mdash; settings may not be current. Refresh to retry.</div>
+  <div id="errMsg"  class="err"></div>
 
   <form id="configForm">
     <h3>Photo</h3>
@@ -291,8 +294,8 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       <input type="checkbox" id="webPassClearCb"/> Clear password (disable authentication)
     </label>
 
-    <button type="submit" id="saveBtn" class="save" style="margin-top:20px;width:100%" disabled>
-      &#8987; Loading current settings&hellip;
+    <button type="submit" id="saveBtn" class="save" style="margin-top:20px;width:100%">
+      &#10003; Save Settings
     </button>
   </form>
 
@@ -317,7 +320,9 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
 </div>
 
 <script>
-// Shared fetch wrapper - always sends stored Basic Auth credentials
+// Config is injected server-side as window._cfg - no fetch needed, no truncation possible.
+var c = window._cfg || {};
+
 function apiFetch(url, opts) {
   return fetch(url, Object.assign({credentials:"include",cache:"no-store"}, opts||{}));
 }
@@ -325,52 +330,31 @@ function apiFetch(url, opts) {
 let logSince = 0;
 let logTimer = null;
 
-async function loadCfg() {
-  const saveBtn = document.getElementById("saveBtn");
-  const errMsg  = document.getElementById("errMsg");
-  try {
-    const r = await apiFetch("/api/config");
-    if (!r.ok) {
-      errMsg.style.display = 'block';
-      saveBtn.disabled = true;
-      saveBtn.textContent = '\u26A0 Could not load settings';
-      console.warn("loadCfg HTTP", r.status);
-      return;
-    }
-    const c = await r.json();
-    errMsg.style.display = 'none';
-
-    document.getElementById("photoBaseUrl").value      = c.photoBaseUrl      || "";
-    document.getElementById("photoFilename").value     = c.photoFilename     || "";
-    document.getElementById("httpsInsecure").checked   = !!c.httpsInsecure;
-    document.getElementById("httpUser").value          = c.httpUser          || "";
-    document.getElementById("httpPass").value          = "";
-    document.getElementById("httpPass").placeholder    = c.httpPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
-    document.getElementById("mqttHost").value          = c.mqttHost          || "";
-    document.getElementById("mqttPort").value          = c.mqttPort          || "";
-    document.getElementById("mqttTopic").value         = c.mqttTopic         || "";
-    document.getElementById("mqttUser").value          = c.mqttUser          || "";
-    document.getElementById("mqttPass").value          = "";
-    document.getElementById("mqttPass").placeholder    = c.mqttPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
-    document.getElementById("mqttUseTLS").checked      = !!c.mqttUseTLS;
-    document.getElementById("mqttTlsInsecure").checked = !!c.mqttTlsInsecure;
-    document.getElementById("updateUrl").value         = c.updateUrl         || "";
-    document.getElementById("updateIntervalMin").value = c.updateIntervalMin || 60;
-    document.getElementById("webUser").value           = c.webUser           || "admin";
-    document.getElementById("webPass").value           = "";
-    document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
-    if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;
-
-    // Enable save only after successful load
-    saveBtn.disabled = false;
-    saveBtn.textContent = '\u2713 Save Settings';
-  } catch(e) {
-    errMsg.style.display = 'block';
-    saveBtn.disabled = true;
-    saveBtn.textContent = '\u26A0 Could not load settings';
-    console.error("loadCfg error:", e);
-  }
+function applyCfg(c) {
+  document.getElementById("photoBaseUrl").value      = c.photoBaseUrl      || "";
+  document.getElementById("photoFilename").value     = c.photoFilename     || "";
+  document.getElementById("httpsInsecure").checked   = !!c.httpsInsecure;
+  document.getElementById("httpUser").value          = c.httpUser          || "";
+  document.getElementById("httpPass").value          = "";
+  document.getElementById("httpPass").placeholder    = c.httpPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
+  document.getElementById("mqttHost").value          = c.mqttHost          || "";
+  document.getElementById("mqttPort").value          = c.mqttPort          || "";
+  document.getElementById("mqttTopic").value         = c.mqttTopic         || "";
+  document.getElementById("mqttUser").value          = c.mqttUser          || "";
+  document.getElementById("mqttPass").value          = "";
+  document.getElementById("mqttPass").placeholder    = c.mqttPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
+  document.getElementById("mqttUseTLS").checked      = !!c.mqttUseTLS;
+  document.getElementById("mqttTlsInsecure").checked = !!c.mqttTlsInsecure;
+  document.getElementById("updateUrl").value         = c.updateUrl         || "";
+  document.getElementById("updateIntervalMin").value = c.updateIntervalMin || 60;
+  document.getElementById("webUser").value           = c.webUser           || "admin";
+  document.getElementById("webPass").value           = "";
+  document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
+  if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;
 }
+
+// Apply immediately from injected data - no async fetch required.
+applyCfg(c);
 
 function setPill(id, label, ok) {
   const el = document.getElementById(id);
@@ -477,10 +461,9 @@ document.getElementById("configForm").addEventListener('submit', async (e) => {
     if (resp.ok) {
       document.getElementById("saveMsg").style.display = 'block';
       setTimeout(()=>document.getElementById("saveMsg").style.display='none', 3000);
-      setTimeout(loadCfg, 500);
-      setTimeout(loadStatus, 500);
-      const logEnable = document.getElementById("logEnable");
-      if (logEnable.checked) setTimeout(()=>pollLogs(false), 500);
+      saveBtn.disabled = false;
+      saveBtn.textContent = '\u2713 Save Settings';
+      loadStatus();
     } else {
       saveBtn.disabled = false;
       saveBtn.textContent = '\u2713 Save Settings';
@@ -501,7 +484,6 @@ document.addEventListener('visibilitychange', ()=>{
   if (!document.hidden){loadStatus();const le=document.getElementById("logEnable");if(le.checked)pollLogs(false);}
 });
 
-loadCfg();
 loadStatus();
 setInterval(()=>{if(!document.hidden)loadStatus();}, 3000);
 </script>

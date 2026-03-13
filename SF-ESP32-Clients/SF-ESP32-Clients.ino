@@ -672,7 +672,6 @@ static void otaUpdateTask(void* pv) {
         }
 
         if (flashed) { delay(1500); ESP.restart(); }
-
         otaInProgress = false;
       } else {
         logEvent("OTA", "no update for %s", HOSTNAME);
@@ -790,9 +789,40 @@ static void handleRoot() {
   server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML));
 }
 
+// Build the config JSON and inject it as window._cfg directly into the HTML.
+// This avoids any separate /api/config fetch and bypasses all WebServer
+// chunking/buffer issues entirely.
 static void handleConfigPage() {
   if (!requireWebAuth()) return;
-  server.send(200, "text/html; charset=utf-8", FPSTR(CONFIG_HTML));
+
+  // Build config JSON
+  String j;
+  j.reserve(512);
+  j += "{";
+  j += "\"hostname\":\"";      appendJsonEscaped(j, HOSTNAME);          j += "\",";
+  j += "\"photoBaseUrl\":\"";   appendJsonEscaped(j, cfg.photoBaseUrl);  j += "\",";
+  j += "\"photoFilename\":\"";  appendJsonEscaped(j, cfg.photoFilename); j += "\",";
+  j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
+  j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
+  j += "\"httpPass\":\"";       j += (cfg.httpPass.length()  ? "********" : ""); j += "\",";
+  j += "\"mqttHost\":\"";       appendJsonEscaped(j, cfg.mqttHost);      j += "\",";
+  j += "\"mqttPort\":";         j += String(cfg.mqttPort);               j += ",";
+  j += "\"mqttTopic\":\"";      appendJsonEscaped(j, cfg.mqttTopic);     j += "\",";
+  j += "\"mqttUser\":\"";       appendJsonEscaped(j, cfg.mqttUser);      j += "\",";
+  j += "\"mqttPass\":\"";       j += (cfg.mqttPass.length()  ? "********" : ""); j += "\",";
+  j += "\"mqttUseTLS\":";       j += (cfg.mqttUseTLS ? "true" : "false");  j += ",";
+  j += "\"mqttTlsInsecure\":";  j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
+  j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
+  j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
+  j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
+  j += "\"webPass\":\"";        j += (cfg.webPass.length()   ? "********" : ""); j += "}";
+
+  // Inject into HTML as window._cfg before </body>
+  String html = FPSTR(CONFIG_HTML);
+  String script = "<script>window._cfg="+ j +";</script>";
+  html.replace("</body>", script + "\n</body>");
+
+  server.send(200, "text/html; charset=utf-8", html);
 }
 
 static void handleStatusJson() {
@@ -858,42 +888,6 @@ static void handleLogJson() {
   server.send(200, "application/json", j);
 }
 
-// ---------------------------------------------------------------------------
-// handleGetConfigJson
-// Uses setContentLength() + sendContent() to bypass the WebServer internal
-// ~460-byte String body buffer that silently truncates large responses when
-// server.send(code, type, String) is called directly.
-// ---------------------------------------------------------------------------
-static void handleGetConfigJson() {
-  if (!requireWebAuth()) return;
-
-  String j;
-  j.reserve(800);
-  j += "{";
-  j += "\"hostname\":\"";      appendJsonEscaped(j, HOSTNAME);          j += "\",";
-  j += "\"photoBaseUrl\":\"";   appendJsonEscaped(j, cfg.photoBaseUrl);  j += "\",";
-  j += "\"photoFilename\":\"";  appendJsonEscaped(j, cfg.photoFilename); j += "\",";
-  j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
-  j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
-  j += "\"httpPass\":\"";       j += (cfg.httpPass.length()  ? "********" : ""); j += "\",";
-  j += "\"mqttHost\":\"";       appendJsonEscaped(j, cfg.mqttHost);      j += "\",";
-  j += "\"mqttPort\":";         j += String(cfg.mqttPort);               j += ",";
-  j += "\"mqttTopic\":\"";      appendJsonEscaped(j, cfg.mqttTopic);     j += "\",";
-  j += "\"mqttUser\":\"";       appendJsonEscaped(j, cfg.mqttUser);      j += "\",";
-  j += "\"mqttPass\":\"";       j += (cfg.mqttPass.length()  ? "********" : ""); j += "\",";
-  j += "\"mqttUseTLS\":";       j += (cfg.mqttUseTLS ? "true" : "false");  j += ",";
-  j += "\"mqttTlsInsecure\":";  j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
-  j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
-  j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
-  j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
-  j += "\"webPass\":\"";        j += (cfg.webPass.length()   ? "********" : ""); j += "}";
-
-  // Stream directly to socket - no internal body buffer involved.
-  server.setContentLength(j.length());
-  server.send(200, "application/json", "");
-  server.sendContent(j);
-}
-
 static bool isRealPassword(const String& val) {
   return val.length() > 0 && val != "********";
 }
@@ -954,7 +948,6 @@ static void setupWeb() {
   server.on("/config",      HTTP_GET,  handleConfigPage);
   server.on("/api/status",  HTTP_GET,  handleStatusJson);
   server.on("/api/log",     HTTP_GET,  handleLogJson);
-  server.on("/api/config",  HTTP_GET,  handleGetConfigJson);
   server.on("/api/config",  HTTP_POST, handlePostConfig);
   server.on("/api/refresh", HTTP_POST, handleActionRefresh);
   server.on("/img/current", HTTP_GET,  handleImgCurrent);
