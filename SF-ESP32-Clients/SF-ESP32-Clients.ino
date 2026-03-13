@@ -30,6 +30,7 @@
   const char* MYSSID = "";
   const char* MYPSK = "";
   const char* test_http_password = "";
+  const char* ARDUINO_OTA_PASSWORD = "";  // set in Secrets.h to protect OTA uploads
 #endif
 
 #include "board_config.h"
@@ -751,6 +752,8 @@ static void startNetworkServicesOnce() {
   if (WiFi.status() != WL_CONNECTED) return;
   bool mdnsOk = MDNS.begin(HOSTNAME);
   ArduinoOTA.setHostname(HOSTNAME);
+  if (ARDUINO_OTA_PASSWORD && strlen(ARDUINO_OTA_PASSWORD) > 0)
+    ArduinoOTA.setPassword(ARDUINO_OTA_PASSWORD);
   ArduinoOTA.begin();
   networkServicesStarted = true;
   wifiEverConnected      = true;
@@ -789,13 +792,15 @@ static void handleRoot() {
   server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML));
 }
 
-// Build the config JSON and inject it as window._cfg directly into the HTML.
-// This avoids any separate /api/config fetch and bypasses all WebServer
-// chunking/buffer issues entirely.
+// Build config JSON, then stream the config page in three sendContent() calls:
+//   1. HTML up to the </body> tag
+//   2. <script>window._cfg={...};</script>
+//   3. </body></html>
+// This bypasses the WebServer String body buffer entirely - no truncation possible.
 static void handleConfigPage() {
   if (!requireWebAuth()) return;
 
-  // Build config JSON
+  // Build the config JSON
   String j;
   j.reserve(512);
   j += "{";
@@ -817,12 +822,23 @@ static void handleConfigPage() {
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
   j += "\"webPass\":\"";        j += (cfg.webPass.length()   ? "********" : ""); j += "}";
 
-  // Inject into HTML as window._cfg before </body>
+  // Split CONFIG_HTML at </body> and stream in pieces.
+  // sendContent() writes directly to the socket - no internal buffer size limit.
   String html = FPSTR(CONFIG_HTML);
-  String script = "<script>window._cfg="+ j +";</script>";
-  html.replace("</body>", script + "\n</body>");
+  int splitPos = html.lastIndexOf("</body>");
+  if (splitPos < 0) splitPos = html.length(); // fallback: append at end
 
-  server.send(200, "text/html; charset=utf-8", html);
+  String part1 = html.substring(0, splitPos);
+  String part3 = html.substring(splitPos);    // "</body></html>\n"
+  String part2 = "<script>window._cfg=" + j + ";</script>\n";
+
+  // Total length is known - send accurate Content-Length so browser doesn't hang
+  size_t totalLen = part1.length() + part2.length() + part3.length();
+  server.setContentLength(totalLen);
+  server.send(200, "text/html; charset=utf-8", "");  // headers only
+  server.sendContent(part1);
+  server.sendContent(part2);
+  server.sendContent(part3);
 }
 
 static void handleStatusJson() {
