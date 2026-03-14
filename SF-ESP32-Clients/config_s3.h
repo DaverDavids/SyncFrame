@@ -16,11 +16,15 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   8,  3,  46, 9,  1,
   0, 8, 4, 24,
   0, 8, 4, 16,
-  1, 16000000,           // Reverted pclk to 16MHz
-  true, 0, 0, 800*20    // Reverted bounce buffer to 0 (some ESP32 Arduino Core versions crash with non-zero bounce buffer)
+  1, 16000000,        // pclk = 16 MHz (stable, no line shimmer)
+  true, 0, 0, 800*20  // bounce buffer = 800*20 (required for stable DMA transfer)
 );
 
-Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true); // true = double buffered (auto_flush disabled)
+// Single-buffer mode: writes go directly to the panel DMA FIFO.
+// Double-buffer (true) was removed because it requires manual flush() calls;
+// a flush() arriving mid-JPEG-render caused partial frames (pixel-shift artifacts)
+// and reentrant GFX access from Core 0 caused watchdog reboots.
+Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, false);
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 20
@@ -38,9 +42,8 @@ void board_init() {
   digitalWrite(GFX_BL, HIGH);
 
   gfx->begin();
-  gfx->fillScreen(0x0000); 
-  gfx->flush();
-  
+  gfx->fillScreen(0x0000);
+
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();
   ts.setRotation(0);
@@ -49,7 +52,7 @@ void board_init() {
 void board_loop() {
   ts.read();
   bool pressed = ts.isTouched;
-  
+
   if (pressed && !showingLast && hasLastPhoto()) {
     showLastPhoto();
   } else if (!pressed && showingLast) {

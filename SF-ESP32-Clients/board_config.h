@@ -48,7 +48,8 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 // ---------------------------------------------------------------------------
 // board_draw_jpeg
 // Decodes a JPEG from a RAM buffer and draws it centred on the display.
-// Scaling is power-of-2 only (1x, 1/2, 1/4, 1/8) - same behaviour as before.
+// Scaling is power-of-2 only (1x, 1/2, 1/4, 1/8).
+// No flush() needed - single-buffer mode writes directly to panel DMA FIFO.
 // ---------------------------------------------------------------------------
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   if (!jpg || !len) return;
@@ -56,7 +57,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   // ---- Step 1: read image dimensions without full decode -----------------
   uint16_t imgW = 0, imgH = 0;
   TJpgDec.getJpgSize(&imgW, &imgH, jpg, (uint32_t)len);
-  if (imgW == 0 || imgH == 0) return;  // couldn't parse header
+  if (imgW == 0 || imgH == 0) return;
 
   // ---- Step 2: choose best power-of-2 downscale --------------------------
   float aspectSrc = (float)imgW / (float)imgH;
@@ -71,7 +72,6 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
     targetWidth  = (int)((float)SCREEN_H * aspectSrc);
   }
 
-  // TJpg_Decoder scale: 1=full, 2=half, 4=quarter, 8=eighth
   int scales[]  = {1, 2, 4, 8};
   int bestScale = 1;
   int bestDiff  = 99999;
@@ -95,22 +95,17 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
 
   // ---- Step 4: configure decoder and draw --------------------------------
   TJpgDec.setJpgScale((uint8_t)bestScale);
-  // setSwapBytes(true) makes TJpgD output little-endian RGB565, which is
-  // what Arduino_GFX's draw16bitRGBBitmap expects on ESP32.
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(jpegDrawCallback);
 
   gfx->fillScreen(0x0000);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
-
-#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
-  gfx->flush();
-#endif
 }
 
 // ---------------------------------------------------------------------------
 // board_draw_boot_status
 // Draws a status bar at the bottom of the screen.
+// No flush() needed - single-buffer mode.
 // ---------------------------------------------------------------------------
 void board_draw_boot_status(const char* text) {
   gfx->setTextSize(2);
@@ -127,8 +122,4 @@ void board_draw_boot_status(const char* text) {
   gfx->setTextColor(0xFFFF);
   gfx->setCursor(10, barY + padding);
   gfx->print(text);
-
-#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
-  gfx->flush();
-#endif
 }
