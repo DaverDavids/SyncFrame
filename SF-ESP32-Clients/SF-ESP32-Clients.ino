@@ -857,22 +857,29 @@ static void handleConfigPage() {
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
   j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\"}";
 
-  // Inject window._cfg BEFORE the main <script> block so the variable is
-  // defined when the script runs. Splitting at "</body>" placed it AFTER
-  // the script, causing window._cfg to be undefined at applyCfg() time.
+  // Inject window._cfg immediately before "var c = window._cfg" in the script.
+  // This marker is unique in the HTML and guaranteed to be in the real <script>
+  // body - unlike searching for "<script>" which also appears in the comment
+  // above the script tag and caused the injection to land mid-comment.
   String html = FPSTR(CONFIG_HTML);
-  int splitPos = html.lastIndexOf("<script>");
-  if (splitPos < 0) splitPos = html.length();
+  String marker = String("var c = window._cfg");
+  int splitPos = html.indexOf(marker);
+  if (splitPos < 0) {
+    // Fallback: append before </body> if marker somehow missing
+    splitPos = html.lastIndexOf("</body>");
+    if (splitPos < 0) splitPos = html.length();
+  }
+
+  String injection = String("<script>window._cfg=") + j + String(";</script>\n");
 
   String part1 = html.substring(0, splitPos);
-  String part2 = "<script>window._cfg=" + j + ";</script>\n";
   String part3 = html.substring(splitPos);
 
-  size_t totalLen = part1.length() + part2.length() + part3.length();
+  size_t totalLen = part1.length() + injection.length() + part3.length();
   server.setContentLength(totalLen);
   server.send(200, "text/html; charset=utf-8", "");
   server.sendContent(part1);
-  server.sendContent(part2);
+  server.sendContent(injection);
   server.sendContent(part3);
 }
 
