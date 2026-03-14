@@ -129,9 +129,8 @@ setInterval(poll, 2000);
 </html>
 )HTML";
 
-// Config page template. window._cfg is injected by handleConfigPage() in the
-// .ino as a separate <script> block immediately before this <script> tag, so
-// window._cfg is guaranteed to be defined when applyCfg(c) runs.
+// Config page. The token CFG_INJECT_PLACEHOLDER is replaced at runtime by
+// handleConfigPage() with <script>window._cfg={...};</script> before serving.
 static const char CONFIG_HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html lang="en">
@@ -319,9 +318,8 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
   <pre id="logBox" class="console">Console is idle. Enable polling to load recent events.</pre>
 </div>
 
+CFG_INJECT_PLACEHOLDER
 <script>
-// window._cfg is injected as a preceding <script> block by handleConfigPage().
-// It is guaranteed to be defined before this script runs.
 var c = window._cfg || {};
 
 function apiFetch(url, opts) {
@@ -354,7 +352,6 @@ function applyCfg(c) {
   if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;
 }
 
-// Apply immediately from injected data - no async fetch required.
 applyCfg(c);
 
 function setPill(id, label, ok) {
