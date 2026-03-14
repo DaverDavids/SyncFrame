@@ -129,9 +129,9 @@ setInterval(poll, 2000);
 </html>
 )HTML";
 
-// Config page template - the placeholder CFG_JSON_PLACEHOLDER is replaced at
-// serve time in handleConfigPage() with the actual config JSON so there is no
-// separate /api/config fetch and therefore no WebServer chunking truncation.
+// Config page template. window._cfg is injected by handleConfigPage() in the
+// .ino as a separate <script> block immediately before this <script> tag, so
+// window._cfg is guaranteed to be defined when applyCfg(c) runs.
 static const char CONFIG_HTML[] PROGMEM = R"HTML(
 <!DOCTYPE html>
 <html lang="en">
@@ -320,7 +320,8 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
 </div>
 
 <script>
-// Config is injected server-side as window._cfg - no fetch needed, no truncation possible.
+// window._cfg is injected as a preceding <script> block by handleConfigPage().
+// It is guaranteed to be defined before this script runs.
 var c = window._cfg || {};
 
 function apiFetch(url, opts) {
@@ -346,8 +347,8 @@ function applyCfg(c) {
   document.getElementById("mqttUseTLS").checked      = !!c.mqttUseTLS;
   document.getElementById("mqttTlsInsecure").checked = !!c.mqttTlsInsecure;
   document.getElementById("updateUrl").value         = c.updateUrl         || "";
-  document.getElementById("updateIntervalMin").value = c.updateIntervalMin || 60;
-  document.getElementById("webUser").value           = c.webUser           || "admin";
+  document.getElementById("updateIntervalMin").value = (c.updateIntervalMin != null) ? c.updateIntervalMin : "";
+  document.getElementById("webUser").value           = c.webUser           || "";
   document.getElementById("webPass").value           = "";
   document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
   if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;

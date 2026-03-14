@@ -857,9 +857,11 @@ static void handleConfigPage() {
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
   j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\"}";
 
-  // Stream in three sendContent() calls to avoid WebServer buffer truncation.
+  // Inject window._cfg BEFORE the main <script> block so the variable is
+  // defined when the script runs. Splitting at "</body>" placed it AFTER
+  // the script, causing window._cfg to be undefined at applyCfg() time.
   String html = FPSTR(CONFIG_HTML);
-  int splitPos = html.lastIndexOf("</body>");
+  int splitPos = html.lastIndexOf("<script>");
   if (splitPos < 0) splitPos = html.length();
 
   String part1 = html.substring(0, splitPos);
