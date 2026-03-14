@@ -855,7 +855,7 @@ static void handleConfigPage() {
   j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
   j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
-  j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "}";
+  j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\"}";
 
   // Stream in three sendContent() calls to avoid WebServer buffer truncation.
   String html = FPSTR(CONFIG_HTML);
