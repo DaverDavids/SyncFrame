@@ -12,6 +12,7 @@
 #include <Update.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include <Secrets.h>
 
 #define DEBUG_SERIAL 0
 #if DEBUG_SERIAL
