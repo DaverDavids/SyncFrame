@@ -12,7 +12,6 @@
 #include <Update.h>
 #include <stdarg.h>
 #include <esp_system.h>
-#include <Secrets.h>
 
 #define DEBUG_SERIAL 0
 #if DEBUG_SERIAL
@@ -226,6 +225,15 @@ static void appendJsonEscaped(String& out, const String& s) {
   appendJsonEscaped(out, s.c_str());
 }
 
+// Append a password field: output masked sentinel if set, empty string if not.
+// Always routed through appendJsonEscaped so special chars can never break JSON.
+static void appendJsonPassword(String& out, const String& pass) {
+  if (pass.length() > 0) {
+    appendJsonEscaped(out, String("********"));
+  }
+  // empty string - nothing appended (field value will be "")
+}
+
 static void freeBuf(uint8_t*& p, size_t& n) {
   if (p) { free(p); p = nullptr; }
   n = 0;
@@ -237,6 +245,19 @@ static void applyWifiDefaults() {
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
   WiFi.setSleep(false);
+}
+
+// Strip any characters that would break JSON string literals.
+// Used to sanitize passwords loaded from NVS that may be corrupt.
+static void sanitizeStoredString(String& s) {
+  String out;
+  out.reserve(s.length());
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    // Keep printable ASCII except control chars; JSON escaper will handle the rest.
+    if ((uint8_t)c >= 0x20) out += c;
+  }
+  s = out;
 }
 
 static void loadConfig() {
@@ -260,6 +281,22 @@ static void loadConfig() {
   cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
   cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
   prefs.end();
+
+  // Sanitize: if webPass contains only garbage/non-printable chars, clear it.
+  // A single '"' or other broken value would poison the injected config JSON.
+  bool webPassValid = true;
+  for (size_t i = 0; i < cfg.webPass.length(); i++) {
+    char c = cfg.webPass[i];
+    if ((uint8_t)c < 0x20 || c == '"' || c == '\\') { webPassValid = false; break; }
+  }
+  if (!webPassValid) {
+    logEvent("CFG", "webPass contained invalid chars, clearing");
+    cfg.webPass = "";
+    // Persist the cleared value so it doesn't recur after next boot
+    prefs.begin(PREF_NS, false);
+    prefs.putString("wbpass", "");
+    prefs.end();
+  }
 
   if (cfg.wifiSsid.length() == 0 && MYSSID && strlen(MYSSID)) {
     cfg.wifiSsid = String(MYSSID);
@@ -793,50 +830,45 @@ static void handleRoot() {
   server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML));
 }
 
-// Build config JSON, then stream the config page in three sendContent() calls:
-//   1. HTML up to the </body> tag
-//   2. <script>window._cfg={...};</script>
-//   3. </body></html>
-// This bypasses the WebServer String body buffer entirely - no truncation possible.
 static void handleConfigPage() {
   if (!requireWebAuth()) return;
 
-  // Build the config JSON
+  // Build config JSON - ALL string values go through appendJsonEscaped,
+  // including password sentinel "********", so no stored value can ever
+  // break the JSON regardless of what characters it contains.
   String j;
   j.reserve(512);
   j += "{";
-  j += "\"hostname\":\"";      appendJsonEscaped(j, HOSTNAME);          j += "\",";
+  j += "\"hostname\":\"";       appendJsonEscaped(j, HOSTNAME);          j += "\",";
   j += "\"photoBaseUrl\":\"";   appendJsonEscaped(j, cfg.photoBaseUrl);  j += "\",";
   j += "\"photoFilename\":\"";  appendJsonEscaped(j, cfg.photoFilename); j += "\",";
   j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
   j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
-  j += "\"httpPass\":\"";       j += (cfg.httpPass.length()  ? "********" : ""); j += "\",";
+  j += "\"httpPass\":\"";       appendJsonPassword(j, cfg.httpPass);     j += "\",";
   j += "\"mqttHost\":\"";       appendJsonEscaped(j, cfg.mqttHost);      j += "\",";
   j += "\"mqttPort\":";         j += String(cfg.mqttPort);               j += ",";
   j += "\"mqttTopic\":\"";      appendJsonEscaped(j, cfg.mqttTopic);     j += "\",";
   j += "\"mqttUser\":\"";       appendJsonEscaped(j, cfg.mqttUser);      j += "\",";
-  j += "\"mqttPass\":\"";       j += (cfg.mqttPass.length()  ? "********" : ""); j += "\",";
+  j += "\"mqttPass\":\"";       appendJsonPassword(j, cfg.mqttPass);     j += "\",";
   j += "\"mqttUseTLS\":";       j += (cfg.mqttUseTLS ? "true" : "false");  j += ",";
   j += "\"mqttTlsInsecure\":";  j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
   j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
   j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
-  j += "\"webPass\":\"";        j += (cfg.webPass.length()   ? "********" : ""); j += "}";
+  j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "}";
 
-  // Split CONFIG_HTML at </body> and stream in pieces.
-  // sendContent() writes directly to the socket - no internal buffer size limit.
+  // Stream in three sendContent() calls to avoid WebServer buffer truncation.
   String html = FPSTR(CONFIG_HTML);
   int splitPos = html.lastIndexOf("</body>");
-  if (splitPos < 0) splitPos = html.length(); // fallback: append at end
+  if (splitPos < 0) splitPos = html.length();
 
   String part1 = html.substring(0, splitPos);
-  String part3 = html.substring(splitPos);    // "</body></html>\n"
   String part2 = "<script>window._cfg=" + j + ";</script>\n";
+  String part3 = html.substring(splitPos);
 
-  // Total length is known - send accurate Content-Length so browser doesn't hang
   size_t totalLen = part1.length() + part2.length() + part3.length();
   server.setContentLength(totalLen);
-  server.send(200, "text/html; charset=utf-8", "");  // headers only
+  server.send(200, "text/html; charset=utf-8", "");
   server.sendContent(part1);
   server.sendContent(part2);
   server.sendContent(part3);
