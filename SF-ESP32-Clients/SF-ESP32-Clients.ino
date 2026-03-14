@@ -30,7 +30,7 @@
   const char* MYSSID = "";
   const char* MYPSK = "";
   const char* test_http_password = "";
-  const char* ARDUINO_OTA_PASSWORD = "";  // set in Secrets.h to protect OTA uploads
+  const char* ARDUINO_OTA_PASSWORD = "";
 #endif
 
 #include "board_config.h"
@@ -40,6 +40,18 @@
 char HOSTNAME[32];
 char MAC_STR[18];
 static const char* HOST_PREFIX = "syncframe-";
+
+// ---------------------------------------------------------------------------
+// Deferred draw flags - set from any context, consumed only in loop()
+// All board_draw_* calls must happen on Core 1 (loop task) only.
+// ---------------------------------------------------------------------------
+static volatile bool mqttRefreshPending = false;
+static volatile bool webRefreshPending  = false;
+
+// ---------------------------------------------------------------------------
+// Log buffer spinlock - shared between Core 0 (OTA task) and Core 1 (loop)
+// ---------------------------------------------------------------------------
+static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ---------------------------------------------------------------------------
 // Captive Portal DNS + Web portal state
@@ -192,6 +204,8 @@ static const char* resetReasonToStr(esp_reset_reason_t reason) {
 }
 
 static void logEvent(const char* tag, const char* fmt, ...) {
+  // Spinlock: safe to call from any core/task
+  portENTER_CRITICAL(&logMux);
   LogEntry& e = logBuf[logHead];
   e.seq = ++logSeq;
   e.ms  = millis();
@@ -203,6 +217,7 @@ static void logEvent(const char* tag, const char* fmt, ...) {
   va_end(ap);
   logHead = (logHead + 1) % LOG_CAP;
   if (logCount < LOG_CAP) logCount++;
+  portEXIT_CRITICAL(&logMux);
   DBG("[%s] %s\n", e.tag, e.msg);
 }
 
@@ -550,6 +565,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   return true;
 }
 
+// Must only be called from loop() on Core 1.
 static bool downloadAndShowPhoto() {
   if (otaInProgress) return false;
 
@@ -734,7 +750,9 @@ static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   (void)payload;
   lastMqttMsgMs = millis();
   logEvent("MQTT", "message topic=%s bytes=%u", topic ? topic : "", length);
-  if (!otaInProgress) downloadAndShowPhoto();
+  // Do NOT call downloadAndShowPhoto() here - we are inside mqtt.loop() which
+  // is inside server.handleClient(). Set a flag; loop() will act on it safely.
+  mqttRefreshPending = true;
 }
 
 static void mqttSetupClient() {
@@ -824,7 +842,6 @@ static void handleRoot() {
 static void handleConfigPage() {
   if (!requireWebAuth()) return;
 
-  // Build the config JSON
   String j;
   j.reserve(512);
   j += "{";
@@ -846,8 +863,6 @@ static void handleConfigPage() {
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
   j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\"}";
 
-  // Replace the unique placeholder token in the HTML with the inline script.
-  // This is simpler and safer than splitting/searching the HTML string.
   String html = FPSTR(CONFIG_HTML);
   html.replace("CFG_INJECT_PLACEHOLDER",
                String("<script>window._cfg=") + j + String(";</script>"));
@@ -887,18 +902,29 @@ static void handleLogJson() {
   if (server.hasArg("since")) since = strtoul(server.arg("since").c_str(), nullptr, 10);
 
   const uint8_t maxItems = 20;
-  uint8_t start = (logHead + LOG_CAP - logCount) % LOG_CAP;
+
+  // Snapshot the ring buffer under spinlock so OTA task on Core 0 can't
+  // corrupt it while we iterate.
+  portENTER_CRITICAL(&logMux);
+  uint8_t  snapHead  = logHead;
+  uint8_t  snapCount = logCount;
+  uint32_t snapSeq   = logSeq;
+  LogEntry snapBuf[LOG_CAP];
+  memcpy(snapBuf, logBuf, sizeof(logBuf));
+  portEXIT_CRITICAL(&logMux);
+
+  uint8_t start = (snapHead + LOG_CAP - snapCount) % LOG_CAP;
   uint8_t skip  = 0;
-  if (since == 0 && logCount > maxItems) skip = logCount - maxItems;
+  if (since == 0 && snapCount > maxItems) skip = snapCount - maxItems;
 
   String j;
   j.reserve(2048);
   j += "{\"items\":[";
   bool first = true;
   uint8_t sent = 0;
-  for (uint8_t i = 0; i < logCount; i++) {
+  for (uint8_t i = 0; i < snapCount; i++) {
     uint8_t idx = (start + i) % LOG_CAP;
-    const LogEntry& e = logBuf[idx];
+    const LogEntry& e = snapBuf[idx];
     if (skip) { skip--; continue; }
     if (e.seq <= since) continue;
     if (sent >= maxItems) break;
@@ -913,7 +939,7 @@ static void handleLogJson() {
     sent++;
   }
   j += "],\"nextSince\":";
-  j += String(logSeq);
+  j += String(snapSeq);
   j += "}";
   server.send(200, "application/json", j);
 }
@@ -967,10 +993,15 @@ static void handleImgLast() {
 
 static void handleActionRefresh() {
   if (!requireWebAuth()) return;
-  if (otaInProgress) { server.send(503, "application/json", "{\"ok\":false,\"err\":\"ota in progress\"}"); return; }
-  logEvent("WEB", "manual refresh");
-  bool ok = downloadAndShowPhoto();
-  server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+  if (otaInProgress) {
+    server.send(503, "application/json", "{\"ok\":false,\"err\":\"ota in progress\"}");
+    return;
+  }
+  // Do NOT download here - we are inside server.handleClient().
+  // Set the flag; loop() will do the actual download+draw on the next iteration.
+  logEvent("WEB", "manual refresh requested");
+  webRefreshPending = true;
+  server.send(200, "application/json", "{\"ok\":true}");
 }
 
 static void setupWeb() {
@@ -1033,10 +1064,19 @@ void loop() {
       startOtaTask();
     }
     if (networkServicesStarted) ArduinoOTA.handle();
+
     server.handleClient();
+
     if (!otaInProgress) {
       mqttMaybeReconnect();
       if (mqtt.connected()) mqtt.loop();
+    }
+
+    // Process deferred draw requests - always done here, never inside a callback.
+    if (!otaInProgress && (mqttRefreshPending || webRefreshPending)) {
+      mqttRefreshPending = false;
+      webRefreshPending  = false;
+      downloadAndShowPhoto();
     }
   }
 
