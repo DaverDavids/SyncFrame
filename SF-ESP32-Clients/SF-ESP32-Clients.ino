@@ -668,38 +668,48 @@ static void otaUpdateTask(void* pv) {
           plain = new WiFiClient();
           if (plain) ok = http->begin(*plain, cfg.updateUrl);
         }
-        if (ok && http->GET() == HTTP_CODE_OK) {
-          WiFiClient* s = http->getStreamPtr();
-          String line;
-          unsigned long t = millis();
-          while ((http->connected() || s->available()) && millis() - t < 8000) {
-            if (s->available()) {
-              char c = (char)s->read();
-              if (c == '\n' || c == '\r') {
-                line.trim();
-                if (line.length() > 0 && line.indexOf(HOSTNAME) >= 0) {
-                  if (line.startsWith("http")) {
-                    binUrl = line;
-                  } else {
-                    String base = cfg.updateUrl;
-                    int lastSlash = base.lastIndexOf('/');
-                    if (lastSlash > 7) base = base.substring(0, lastSlash + 1);
-                    binUrl = base + line;
+
+        if (ok) {
+          // Send check-in headers so the server records this device's last_seen
+          http->addHeader("X-SF-Hostname", HOSTNAME);
+          http->addHeader("X-SF-Compiled", String(__DATE__) + " " + String(__TIME__));
+          http->addHeader("X-SF-Uptime",   String((millis() - bootTimeMs) / 1000));
+
+          if (http->GET() == HTTP_CODE_OK) {
+            WiFiClient* s = http->getStreamPtr();
+            String line;
+            unsigned long t = millis();
+            while ((http->connected() || s->available()) && millis() - t < 8000) {
+              if (s->available()) {
+                char c = (char)s->read();
+                if (c == '\n' || c == '\r') {
+                  line.trim();
+                  if (line.length() > 0 && line.indexOf(HOSTNAME) >= 0) {
+                    if (line.startsWith("http")) {
+                      binUrl = line;
+                    } else {
+                      // line is just the filename (e.g. "syncframe-05D.bin")
+                      // firmware is served at <base>/firmware/<filename>
+                      String base = cfg.updateUrl;
+                      int lastSlash = base.lastIndexOf('/');
+                      if (lastSlash > 7) base = base.substring(0, lastSlash + 1);
+                      binUrl = base + "firmware/" + line;
+                    }
+                    logEvent("OTA", "found bin %s", binUrl.c_str());
+                    break;
                   }
-                  logEvent("OTA", "found bin %s", binUrl.c_str());
-                  break;
+                  line = "";
+                  t = millis();
+                } else {
+                  if (line.length() < 256) line += c;
                 }
-                line = "";
-                t = millis();
               } else {
-                if (line.length() < 256) line += c;
+                vTaskDelay(1);
               }
-            } else {
-              vTaskDelay(1);
             }
+          } else {
+            logEvent("OTA", "manifest fetch failed");
           }
-        } else {
-          logEvent("OTA", "manifest fetch failed");
         }
         http->end(); delete http; delete sec; delete plain;
       }
