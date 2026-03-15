@@ -146,7 +146,8 @@ RESOLUTIONS = [
 # OTA / Admin state
 # Stored in ota_clients.json alongside the server config.
 # Schema: { "hostname": { "mac": str, "label": str, "last_seen": iso8601|null,
-#                         "firmware": filename|null } }
+#                         "firmware": filename|null, "compiled": str|null,
+#                         "uptime": str|null } }
 # ---------------------------------------------------------------------------
 OTA_CLIENTS_PATH = os.path.join(os.getcwd(), "ota_clients.json")
 OTA_FIRMWARE_DIR = os.path.join(os.getcwd(), "ota_firmware")
@@ -171,13 +172,20 @@ def _save_clients(clients):
 
 
 def _rebuild_manifest():
-    """Write ota_firmware/manifest.txt based on current client->firmware mappings."""
+    """Write ota_firmware/manifest.txt based on current client->firmware mappings.
+
+    Each line contains ONLY the firmware filename (named <hostname>.bin).
+    The ESP32 scans for lines containing its hostname, then uses that line
+    as the filename to fetch from /syncframe/firmware/<filename>.
+    """
     clients = _load_clients()
     lines = []
     for hostname, info in clients.items():
         fw = info.get("firmware")
         if fw:
-            lines.append(f"{hostname} {fw}")
+            # fw is already named "<hostname>.bin" so the ESP32 hostname scan
+            # on the line will match, and the full line IS the filename to fetch.
+            lines.append(fw)
     manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
     with open(manifest_path, "w") as f:
         f.write("\n".join(lines) + ("\n" if lines else ""))
@@ -778,23 +786,6 @@ def index():
             background: rgba(255, 255, 255, 0.25);
         }
 
-        .admin-link {
-            display: inline-block;
-            margin-top: 20px;
-            color: rgba(255,255,255,0.6);
-            text-decoration: none;
-            font-size: 0.85em;
-            border: 1px solid rgba(255,255,255,0.2);
-            padding: 6px 16px;
-            border-radius: 4px;
-            transition: all 0.2s;
-        }
-        .admin-link:hover {
-            color: #fff;
-            border-color: rgba(255,255,255,0.5);
-            background: rgba(255,255,255,0.1);
-        }
-
         @media (max-width: 768px) {
             .container {
                 flex-direction: column;
@@ -870,7 +861,6 @@ def index():
             <p id="last-updated">
                 {% if last_updated %}Last updated: <span id='update-time'></span>{% else %}No photo uploaded yet{% endif %}
             </p>
-            <a class="admin-link" href="{{ url_for('syncframe.admin_page') }}">⚙ OTA Admin</a>
         </footer>
         <script>
             const lastUpdated = {{ last_updated if last_updated else 'null' }};
@@ -1020,10 +1010,48 @@ def allowed_firmware(filename):
 
 @bp.route("/manifest.txt")
 def serve_manifest():
-    """Serve the OTA manifest. Public - no auth - ESP32 polls this."""
+    """Serve the OTA manifest and record a client check-in in one request.
+
+    The ESP32 sends device info as HTTP headers:
+        X-SF-Hostname : cfg.hostname  (e.g. "syncframe-4A2")
+        X-SF-Compiled : __DATE__ " " __TIME__  (e.g. "Mar 15 2026 11:42:07")
+        X-SF-Uptime   : millis()/1000 as decimal string
+
+    Query-param fallbacks (?hostname=&compiled=&uptime=) are also accepted
+    so the URL alone can carry the info if headers are not convenient.
+
+    Manifest format: one firmware filename per line, named <hostname>.bin.
+    The ESP32 scans each line for a substring matching its own hostname,
+    then fetches /syncframe/firmware/<that line> to perform OTA.
+    """
+    hostname = (request.headers.get("X-SF-Hostname") or
+                request.args.get("hostname", "")).strip()
+    compiled = (request.headers.get("X-SF-Compiled") or
+                request.args.get("compiled", "")).strip()
+    uptime   = (request.headers.get("X-SF-Uptime")   or
+                request.args.get("uptime", "")).strip()
+
+    if hostname:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with _ota_lock:
+            clients = _load_clients()
+            if hostname not in clients:
+                clients[hostname] = {
+                    "mac": "", "label": hostname,
+                    "last_seen": now_iso, "firmware": None,
+                    "compiled": compiled or None, "uptime": uptime or None,
+                }
+                logging.info("OTA: auto-registered client %s via manifest fetch", hostname)
+            else:
+                clients[hostname]["last_seen"] = now_iso
+                if compiled:
+                    clients[hostname]["compiled"] = compiled
+                if uptime:
+                    clients[hostname]["uptime"] = uptime
+            _save_clients(clients)
+
     manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
     if not os.path.exists(manifest_path):
-        # Return empty manifest if none exists yet
         return Response("", mimetype="text/plain")
     return send_from_directory(OTA_FIRMWARE_DIR, "manifest.txt", mimetype="text/plain")
 
@@ -1037,43 +1065,6 @@ def serve_firmware(filename):
         return "Firmware not found", 404
     return send_from_directory(OTA_FIRMWARE_DIR, safe_name,
                                 mimetype="application/octet-stream")
-
-
-@bp.route("/checkin", methods=["POST"])
-def ota_checkin():
-    """
-    ESP32 clients POST here to record their presence.
-    Expected JSON body: { "hostname": "syncframe-4A2", "mac": "AA:BB:CC:DD:EE:FF" }
-    Or form fields with the same keys.
-    Returns 200 JSON with { "firmware": "<filename or null>" }
-    """
-    if request.is_json:
-        data = request.get_json(silent=True) or {}
-    else:
-        data = request.form
-
-    hostname = (data.get("hostname") or "").strip()
-    mac = (data.get("mac") or "").strip()
-
-    if not hostname:
-        return jsonify({"error": "hostname required"}), 400
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    with _ota_lock:
-        clients = _load_clients()
-        if hostname not in clients:
-            # Auto-register unknown clients so they appear in the admin UI
-            clients[hostname] = {"mac": mac, "label": hostname, "last_seen": now_iso, "firmware": None}
-            logging.info("OTA: auto-registered new client %s (%s)", hostname, mac)
-        else:
-            clients[hostname]["last_seen"] = now_iso
-            if mac:
-                clients[hostname]["mac"] = mac
-        firmware = clients[hostname].get("firmware")
-        _save_clients(clients)
-
-    return jsonify({"firmware": firmware}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -1114,6 +1105,7 @@ ADMIN_HTML = """
   .badge-green { background: rgba(63,185,80,0.15); color: var(--accent2); border: 1px solid rgba(63,185,80,0.3); }
   .badge-gray  { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 1px solid rgba(139,148,158,0.2); }
   .badge-blue  { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+  .badge-yellow{ background: rgba(210,153,34,0.15); color: #e3b341; border: 1px solid rgba(210,153,34,0.3); }
   input[type=text], input[type=file] {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 7px 12px; font-size: 0.9em; width: 100%;
@@ -1142,6 +1134,7 @@ ADMIN_HTML = """
   .stale { color: var(--warn); }
   details summary { cursor: pointer; color: var(--text-dim); font-size: 0.85em; margin-top: 10px; }
   details[open] summary { margin-bottom: 10px; }
+  .uptime-dim { color: var(--text-dim); font-size: 0.8em; }
 </style>
 </head>
 <body>
@@ -1189,6 +1182,8 @@ ADMIN_HTML = """
         <th>MAC</th>
         <th>Label</th>
         <th>Last Check-In</th>
+        <th>Compiled</th>
+        <th>Uptime</th>
         <th>Pending Firmware</th>
         <th>Actions</th>
       </tr>
@@ -1206,6 +1201,20 @@ ADMIN_HTML = """
             </span>
           {% else %}
             <span class="badge badge-gray">Never</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if info.compiled %}
+            <span class="badge badge-yellow mono">{{ info.compiled }}</span>
+          {% else %}
+            <span class="badge badge-gray">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if info.uptime %}
+            <span class="uptime-dim mono">{{ info.uptime_human }}</span>
+          {% else %}
+            <span class="badge badge-gray">—</span>
           {% endif %}
         </td>
         <td>
@@ -1257,10 +1266,15 @@ ADMIN_HTML = """
   <p style="margin-top:10px;font-size:0.8em;color:var(--text-dim);">
     Served at <span class="mono">{{ manifest_url }}</span>
   </p>
+  <p style="margin-top:8px;font-size:0.8em;color:var(--text-dim);">
+    ESP32 headers to send with manifest fetch:<br>
+    <span class="mono" style="color:var(--accent);">X-SF-Hostname</span> &nbsp;
+    <span class="mono" style="color:var(--accent);">X-SF-Compiled</span> &nbsp;
+    <span class="mono" style="color:var(--accent);">X-SF-Uptime</span>
+  </p>
 </div>
 
 <script>
-  // Auto-refresh last-seen timestamps
   setInterval(() => { location.reload(); }, 60000);
 </script>
 </body>
@@ -1290,6 +1304,24 @@ def _humanize(iso_str):
         return iso_str
 
 
+def _humanize_uptime(seconds_str):
+    """Convert a seconds string into a human-readable uptime like 2d 3h 4m."""
+    try:
+        s = int(seconds_str)
+        days = s // 86400
+        hours = (s % 86400) // 3600
+        minutes = (s % 3600) // 60
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        parts.append(f"{minutes}m")
+        return " ".join(parts)
+    except Exception:
+        return seconds_str
+
+
 @bp.route("/admin")
 @requires_auth
 def admin_page():
@@ -1299,12 +1331,11 @@ def admin_page():
     with _ota_lock:
         raw_clients = _load_clients()
 
-    # Annotate clients with human-readable / freshness info
     clients = {}
     for hostname, info in raw_clients.items():
         entry = dict(info)
         entry["last_seen_human"] = _humanize(info.get("last_seen"))
-        # "fresh" = checked in within the last 24 hours
+        entry["uptime_human"] = _humanize_uptime(info.get("uptime", "")) if info.get("uptime") else None
         try:
             dt = datetime.fromisoformat(info["last_seen"])
             if dt.tzinfo is None:
@@ -1320,7 +1351,6 @@ def admin_page():
         with open(manifest_path) as f:
             manifest_content = f.read().strip()
 
-    # Build the public manifest URL hint (best-effort)
     manifest_url = (URL_PREFIX or "") + "/manifest.txt"
 
     return render_template_string(
@@ -1352,7 +1382,11 @@ def admin_add_client():
         clients = _load_clients()
         if hostname in clients:
             return redirect(url_for("syncframe.admin_page") + "?err=Client+already+exists")
-        clients[hostname] = {"mac": mac, "label": label or hostname, "last_seen": None, "firmware": None}
+        clients[hostname] = {
+            "mac": mac, "label": label or hostname,
+            "last_seen": None, "firmware": None,
+            "compiled": None, "uptime": None,
+        }
         _save_clients(clients)
         _rebuild_manifest()
 
@@ -1369,12 +1403,10 @@ def admin_remove_client():
     with _ota_lock:
         clients = _load_clients()
         if hostname in clients:
-            # Optionally remove firmware file if no other client uses it
             fw = clients[hostname].get("firmware")
             del clients[hostname]
             _save_clients(clients)
             _rebuild_manifest()
-            # Clean up orphaned firmware
             if fw and not any(c.get("firmware") == fw for c in clients.values()):
                 fw_path = os.path.join(OTA_FIRMWARE_DIR, fw)
                 try:
@@ -1399,7 +1431,6 @@ def admin_upload_firmware():
     if not fw_file or not allowed_firmware(fw_file.filename):
         return redirect(url_for("syncframe.admin_page") + "?err=Only+.bin+files+allowed")
 
-    # Name the file after the hostname for clarity
     safe_hostname = hostname.replace("/", "_").replace("..", "_")
     filename = f"{safe_hostname}.bin"
     dest = os.path.join(OTA_FIRMWARE_DIR, filename)
@@ -1409,7 +1440,11 @@ def admin_upload_firmware():
     with _ota_lock:
         clients = _load_clients()
         if hostname not in clients:
-            clients[hostname] = {"mac": "", "label": hostname, "last_seen": None, "firmware": None}
+            clients[hostname] = {
+                "mac": "", "label": hostname,
+                "last_seen": None, "firmware": None,
+                "compiled": None, "uptime": None,
+            }
         clients[hostname]["firmware"] = filename
         _save_clients(clients)
         _rebuild_manifest()
