@@ -42,8 +42,19 @@ char MAC_STR[18];
 static const char* HOST_PREFIX = "syncframe-";
 
 // ---------------------------------------------------------------------------
+// Draw mutex - taken before ANY board_draw_* call, given back immediately after.
+// Prevents display writes from overlapping each other or with OTA flash writes.
+// Use a binary semaphore (not mutex) so it can be given from a different task.
+// ---------------------------------------------------------------------------
+static SemaphoreHandle_t drawMutex = nullptr;
+
+// ---------------------------------------------------------------------------
+// Boot timestamp for uptime reporting
+// ---------------------------------------------------------------------------
+static unsigned long bootTimeMs = 0;
+
+// ---------------------------------------------------------------------------
 // Deferred draw flags - set from any context, consumed only in loop()
-// All board_draw_* calls must happen on Core 1 (loop task) only.
 // ---------------------------------------------------------------------------
 static volatile bool mqttRefreshPending = false;
 static volatile bool webRefreshPending  = false;
@@ -152,17 +163,25 @@ static bool requireWebAuth() {
 // ---------------------- Hardware Callbacks ----------------------
 bool hasLastPhoto() { return (lastJpg != nullptr && lastJpgLen > 0); }
 
+// Safe wrappers: always take drawMutex before touching the display.
+// Timeout 1000ms - if the mutex isn't free within 1s something is wrong.
 void showCurrentPhoto() {
   if (currentJpg && currentJpgLen) {
     showingLast = false;
-    board_draw_jpeg(currentJpg, currentJpgLen);
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      board_draw_jpeg(currentJpg, currentJpgLen);
+      xSemaphoreGive(drawMutex);
+    }
   }
 }
 
 void showLastPhoto() {
   if (lastJpg && lastJpgLen) {
     showingLast = true;
-    board_draw_jpeg(lastJpg, lastJpgLen);
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      board_draw_jpeg(lastJpg, lastJpgLen);
+      xSemaphoreGive(drawMutex);
+    }
   }
 }
 
@@ -204,7 +223,6 @@ static const char* resetReasonToStr(esp_reset_reason_t reason) {
 }
 
 static void logEvent(const char* tag, const char* fmt, ...) {
-  // Spinlock: safe to call from any core/task
   portENTER_CRITICAL(&logMux);
   LogEntry& e = logBuf[logHead];
   e.seq = ++logSeq;
@@ -565,7 +583,9 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   return true;
 }
 
-// Must only be called from loop() on Core 1.
+// Must only be called from loop() on Core 0.
+// Takes drawMutex so the display write is never interrupted by another draw
+// request or by the OTA task starting a flash write.
 static bool downloadAndShowPhoto() {
   if (otaInProgress) return false;
 
@@ -580,6 +600,8 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
+  // Draw boot status without mutex - this is a simple text draw before any
+  // JPEG is present, and loop() is the only caller at this point.
   if (!currentJpg && !lastJpg) board_draw_boot_status("Downloading Photo...");
 
   bool ok = httpDownloadToBuffer(&newBuf, &newLen, &err);
@@ -589,9 +611,13 @@ static bool downloadAndShowPhoto() {
     lastDownloadOk  = false;
     lastDownloadErr = err;
     logEvent("PHOTO", "download failed %s", err.c_str());
-    if (currentJpg && currentJpgLen)        showCurrentPhoto();
-    else if (lastJpg && lastJpgLen)          showLastPhoto();
-    else board_draw_boot_status((String("Download failed: ") + err).c_str());
+    // Show best available image under mutex
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      if (currentJpg && currentJpgLen)        board_draw_jpeg(currentJpg, currentJpgLen);
+      else if (lastJpg && lastJpgLen)          board_draw_jpeg(lastJpg, lastJpgLen);
+      else board_draw_boot_status((String("Download failed: ") + err).c_str());
+      xSemaphoreGive(drawMutex);
+    }
     return false;
   }
 
@@ -603,13 +629,20 @@ static bool downloadAndShowPhoto() {
   lastDownloadOk  = true;
   lastDownloadErr = "";
   showingLast = false;
-  board_draw_jpeg(currentJpg, currentJpgLen);
+
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    board_draw_jpeg(currentJpg, currentJpgLen);
+    xSemaphoreGive(drawMutex);
+  }
   logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)currentJpgLen);
   return true;
 }
 
 // ============================================================
-// Background OTA update task (core 0, priority 1)
+// Background OTA update task
+// Pinned to Core 1 (loop/display runs on Core 0).
+// Stack 16384 bytes - Update.writeStream() + TLS needs headroom.
+// Takes drawMutex before flashing so it can never race a live draw.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
@@ -675,50 +708,57 @@ static void otaUpdateTask(void* pv) {
       }
 
       if (binUrl.length() > 0) {
-        otaInProgress = true;
-        logEvent("OTA", "starting flash from %s", binUrl.c_str());
+        // Wait for any in-progress display draw to finish before touching flash.
+        // portMAX_DELAY: we must not skip this - a concurrent flash+draw = panic.
+        logEvent("OTA", "waiting for draw mutex before flash");
+        if (xSemaphoreTake(drawMutex, portMAX_DELAY) == pdTRUE) {
+          otaInProgress = true;
+          logEvent("OTA", "starting flash from %s", binUrl.c_str());
 
-        HTTPClient*       fhttp  = new HTTPClient();
-        WiFiClientSecure* fsec   = nullptr;
-        WiFiClient*       fplain = nullptr;
-        bool flashed = false;
+          HTTPClient*       fhttp  = new HTTPClient();
+          WiFiClientSecure* fsec   = nullptr;
+          WiFiClient*       fplain = nullptr;
+          bool flashed = false;
 
-        if (fhttp) {
-          fhttp->setConnectTimeout(10000);
-          fhttp->setTimeout(60000);
-          bool fok = false;
-          if (binUrl.startsWith("https://")) {
-            fsec = new WiFiClientSecure();
-            if (fsec) { fsec->setInsecure(); fok = fhttp->begin(*fsec, binUrl); }
-          } else {
-            fplain = new WiFiClient();
-            if (fplain) fok = fhttp->begin(*fplain, binUrl);
-          }
-          if (fok) {
-            int code = fhttp->GET();
-            if (code == HTTP_CODE_OK) {
-              int32_t fwSize = fhttp->getSize();
-              WiFiClient* fs = fhttp->getStreamPtr();
-              if (Update.begin(fwSize > 0 ? (size_t)fwSize : UPDATE_SIZE_UNKNOWN)) {
-                size_t written = Update.writeStream(*fs);
-                if (Update.end() && Update.isFinished()) {
-                  logEvent("OTA", "flash ok bytes=%u rebooting", (unsigned)written);
-                  flashed = true;
+          if (fhttp) {
+            fhttp->setConnectTimeout(10000);
+            fhttp->setTimeout(60000);
+            bool fok = false;
+            if (binUrl.startsWith("https://")) {
+              fsec = new WiFiClientSecure();
+              if (fsec) { fsec->setInsecure(); fok = fhttp->begin(*fsec, binUrl); }
+            } else {
+              fplain = new WiFiClient();
+              if (fplain) fok = fhttp->begin(*fplain, binUrl);
+            }
+            if (fok) {
+              int code = fhttp->GET();
+              if (code == HTTP_CODE_OK) {
+                int32_t fwSize = fhttp->getSize();
+                WiFiClient* fs = fhttp->getStreamPtr();
+                if (Update.begin(fwSize > 0 ? (size_t)fwSize : UPDATE_SIZE_UNKNOWN)) {
+                  size_t written = Update.writeStream(*fs);
+                  if (Update.end() && Update.isFinished()) {
+                    logEvent("OTA", "flash ok bytes=%u rebooting", (unsigned)written);
+                    flashed = true;
+                  } else {
+                    logEvent("OTA", "Update.end error: %s", Update.errorString());
+                  }
                 } else {
-                  logEvent("OTA", "Update.end error: %s", Update.errorString());
+                  logEvent("OTA", "Update.begin error: %s", Update.errorString());
                 }
               } else {
-                logEvent("OTA", "Update.begin error: %s", Update.errorString());
+                logEvent("OTA", "firmware fetch failed code=%d", code);
               }
-            } else {
-              logEvent("OTA", "firmware fetch failed code=%d", code);
             }
+            fhttp->end(); delete fhttp; delete fsec; delete fplain;
           }
-          fhttp->end(); delete fhttp; delete fsec; delete fplain;
-        }
 
-        if (flashed) { delay(1500); ESP.restart(); }
-        otaInProgress = false;
+          xSemaphoreGive(drawMutex);
+          otaInProgress = false;
+
+          if (flashed) { delay(1500); ESP.restart(); }
+        }
       } else {
         logEvent("OTA", "no update for %s", HOSTNAME);
       }
@@ -737,9 +777,11 @@ static void otaUpdateTask(void* pv) {
 static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
   if (otaTaskHandle != nullptr) return;
+  // Stack 16384: Update.writeStream() + WiFiClientSecure TLS needs headroom.
+  // Pinned to Core 1: loop()/display runs on Core 0, keep flash write separate.
   xTaskCreatePinnedToCore(
-    otaUpdateTask, "ota_check", 8192, nullptr,
-    1, &otaTaskHandle, 0
+    otaUpdateTask, "ota_check", 16384, nullptr,
+    1, &otaTaskHandle, 1
   );
   logEvent("OTA", "task started interval=%umin url=%s",
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str());
@@ -750,8 +792,6 @@ static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   (void)payload;
   lastMqttMsgMs = millis();
   logEvent("MQTT", "message topic=%s bytes=%u", topic ? topic : "", length);
-  // Do NOT call downloadAndShowPhoto() here - we are inside mqtt.loop() which
-  // is inside server.handleClient(). Set a flag; loop() will act on it safely.
   mqttRefreshPending = true;
 }
 
@@ -873,8 +913,9 @@ static void handleConfigPage() {
 static void handleStatusJson() {
   if (!requireWebAuth()) return;
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
+  unsigned long uptimeMs = millis() - bootTimeMs;
   String j;
-  j.reserve(512);
+  j.reserve(560);
   j += "{";
   j += "\"hostname\":\""; appendJsonEscaped(j, HOSTNAME); j += "\",";
   j += "\"mac\":\"";      appendJsonEscaped(j, MAC_STR);  j += "\",";
@@ -890,6 +931,7 @@ static void handleStatusJson() {
   j += "\"lastMqttMsgMs\":";  j += String(lastMqttMsgMs);  j += ",";
   j += "\"lastLogSeq\":";     j += String(logSeq);          j += ",";
   j += "\"otaInProgress\":";  j += (otaInProgress ? "true" : "false"); j += ",";
+  j += "\"uptimeMs\":";       j += String(uptimeMs);        j += ",";
   j += "\"screenW\":"; j += String(SCREEN_W); j += ",";
   j += "\"screenH\":"; j += String(SCREEN_H);
   j += "}";
@@ -903,8 +945,6 @@ static void handleLogJson() {
 
   const uint8_t maxItems = 20;
 
-  // Snapshot the ring buffer under spinlock so OTA task on Core 0 can't
-  // corrupt it while we iterate.
   portENTER_CRITICAL(&logMux);
   uint8_t  snapHead  = logHead;
   uint8_t  snapCount = logCount;
@@ -997,8 +1037,6 @@ static void handleActionRefresh() {
     server.send(503, "application/json", "{\"ok\":false,\"err\":\"ota in progress\"}");
     return;
   }
-  // Do NOT download here - we are inside server.handleClient().
-  // Set the flag; loop() will do the actual download+draw on the next iteration.
   logEvent("WEB", "manual refresh requested");
   webRefreshPending = true;
   server.send(200, "application/json", "{\"ok\":true}");
@@ -1021,8 +1059,13 @@ static void setupWeb() {
 void setup() {
   DBG_BEGIN(115200);
   delay(50);
+  bootTimeMs = millis();
   buildHostAndClientId();
   logEvent("BOOT", "%s mac=%s reset=%s", HOSTNAME, MAC_STR, resetReasonToStr(esp_reset_reason()));
+
+  // Create draw mutex before board_init() so it exists before any draw call.
+  drawMutex = xSemaphoreCreateBinary();
+  xSemaphoreGive(drawMutex); // start in 'available' state
 
   loadConfig();
   board_init();
@@ -1072,7 +1115,6 @@ void loop() {
       if (mqtt.connected()) mqtt.loop();
     }
 
-    // Process deferred draw requests - always done here, never inside a callback.
     if (!otaInProgress && (mqttRefreshPending || webRefreshPending)) {
       mqttRefreshPending = false;
       webRefreshPending  = false;

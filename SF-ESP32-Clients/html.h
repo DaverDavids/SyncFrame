@@ -191,6 +191,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     .small{font-size:0.82em;opacity:0.7}
     .section-divider{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:20px 0 4px}
     .warn{background:rgba(255,180,0,0.12);border:1px solid rgba(255,180,0,0.35);color:#ffd54f;padding:8px 12px;border-radius:8px;font-size:0.82em;margin-top:6px}
+    .uptime-badge{display:inline-block;background:rgba(55,214,122,0.12);border:1px solid rgba(55,214,122,0.3);border-radius:20px;padding:3px 12px;font-size:0.82em;color:#37d67a;font-weight:600;margin-left:8px;vertical-align:middle}
   </style>
 </head>
 <body>
@@ -207,6 +208,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span id="s_mqtt">MQTT: &hellip;</span>
     <span id="s_dl">Photo: &hellip;</span>
     <span id="s_ota">OTA: &hellip;</span>
+    <span id="s_uptime">Up: &hellip;</span>
   </div>
 
   <div id="saveMsg" class="msg">Settings saved!</div>
@@ -307,6 +309,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span id="ds_mqtt">MQTT: &hellip;</span>
     <span id="ds_photo">Photo: &hellip;</span>
     <span id="ds_ota">OTA: idle</span>
+    <span id="ds_uptime">Uptime: &hellip;</span>
   </div>
 
   <h3 style="margin-top:20px">Live Console</h3>
@@ -354,6 +357,17 @@ function applyCfg(c) {
 
 applyCfg(c);
 
+function formatUptime(ms) {
+  if (!ms && ms !== 0) return "?";
+  var s = Math.floor(ms / 1000);
+  var d = Math.floor(s / 86400); s %= 86400;
+  var h = Math.floor(s / 3600);  s %= 3600;
+  var m = Math.floor(s / 60);    s %= 60;
+  if (d > 0) return d+"d "+h+"h "+m+"m";
+  if (h > 0) return h+"h "+m+"m "+s+"s";
+  return m+"m "+s+"s";
+}
+
 function setPill(id, label, ok) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -378,6 +392,11 @@ async function loadStatus() {
     setPill("s_mqtt", "MQTT",  !!s.mqtt);
     setPill("s_dl",   "Photo", !!s.lastDownloadOk);
     setPill("s_ota",  "OTA",   !s.otaInProgress);
+    // Uptime pill
+    if (s.uptimeMs !== undefined) {
+      const el = document.getElementById("s_uptime");
+      if (el) el.textContent = "Up: " + formatUptime(s.uptimeMs);
+    }
     setSpan("ds_host",  "Host: "+(s.hostname||"-"),       null);
     setSpan("ds_mac",   "MAC: " +(s.mac     ||"-"),       null);
     setSpan("ds_ip",    "IP: "  +(s.ip      ||"offline"), null);
@@ -389,6 +408,8 @@ async function loadStatus() {
       !!s.lastDownloadOk);
     setSpan("ds_ota", s.otaInProgress?"OTA: flashing...":"OTA: idle",
       s.otaInProgress?null:true);
+    if (s.uptimeMs !== undefined)
+      setSpan("ds_uptime", "Uptime: "+formatUptime(s.uptimeMs), null);
     if (s.hostname) document.getElementById("hostnameHint").textContent = s.hostname;
   } catch(e) { setSpan("ds_host","Status unavailable",false); }
 }
