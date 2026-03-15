@@ -43,8 +43,6 @@ static const char* HOST_PREFIX = "syncframe-";
 
 // ---------------------------------------------------------------------------
 // Draw mutex - taken before ANY board_draw_* call, given back immediately after.
-// Prevents display writes from overlapping each other or with OTA flash writes.
-// Use a binary semaphore (not mutex) so it can be given from a different task.
 // ---------------------------------------------------------------------------
 static SemaphoreHandle_t drawMutex = nullptr;
 
@@ -54,13 +52,13 @@ static SemaphoreHandle_t drawMutex = nullptr;
 static unsigned long bootTimeMs = 0;
 
 // ---------------------------------------------------------------------------
-// Deferred draw flags - set from any context, consumed only in loop()
+// Deferred draw flags
 // ---------------------------------------------------------------------------
 static volatile bool mqttRefreshPending = false;
 static volatile bool webRefreshPending  = false;
 
 // ---------------------------------------------------------------------------
-// Log buffer spinlock - shared between Core 0 (OTA task) and Core 1 (loop)
+// Log buffer spinlock
 // ---------------------------------------------------------------------------
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -97,6 +95,13 @@ struct Config {
   String webUser;
   String webPass;
 } cfg;
+
+// ---------------------------------------------------------------------------
+// Installed firmware filename - persisted in NVS.
+// Set after a successful OTA flash; compared against manifest on every check.
+// If the manifest line matches this value, the flash is skipped.
+// ---------------------------------------------------------------------------
+static String installedFwFilename = "";
 
 static const char* PREF_NS = "syncframe";
 static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
@@ -305,6 +310,7 @@ static void loadConfig() {
   cfg.updateIntervalMin = prefs.getUInt("updint",    DEFAULT_UPDATE_INTERVAL_MIN);
   cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
   cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
+  installedFwFilename   = prefs.getString("fwfile",  "");
   prefs.end();
 
   bool webPassValid = true;
@@ -347,6 +353,14 @@ static void saveConfig() {
   prefs.putString("wbuser", cfg.webUser);
   prefs.putString("wbpass", cfg.webPass);
   prefs.end();
+}
+
+static void saveInstalledFw(const String& filename) {
+  installedFwFilename = filename;
+  prefs.begin(PREF_NS, false);
+  prefs.putString("fwfile", filename);
+  prefs.end();
+  logEvent("OTA", "installed fw recorded: %s", filename.c_str());
 }
 
 static String makePhotoUrl() {
@@ -633,13 +647,6 @@ static bool downloadAndShowPhoto() {
 // ============================================================
 // Background OTA update task
 // Pinned to Core 1. Stack 16384 bytes.
-//
-// IMPORTANT: drawMutex is taken ONLY around the actual flash write
-// (Update.begin -> writeStream -> Update.end). The manifest fetch and
-// firmware HTTP download happen WITHOUT the mutex so that board_loop()
-// and the display task on Core 0 are never starved. Holding the mutex
-// for the duration of a multi-second HTTP download was the cause of
-// consistent TWDT panics.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
@@ -655,7 +662,8 @@ static void otaUpdateTask(void* pv) {
       HTTPClient*       http  = new HTTPClient();
       WiFiClientSecure* sec   = nullptr;
       WiFiClient*       plain = nullptr;
-      String binUrl = "";
+      String fwFilename = "";   // just the bare filename from the manifest line
+      String binUrl     = "";
 
       if (http) {
         http->setConnectTimeout(5000);
@@ -670,7 +678,6 @@ static void otaUpdateTask(void* pv) {
         }
 
         if (ok) {
-          // Send check-in headers so the server records this device's last_seen
           http->addHeader("X-SF-Hostname", HOSTNAME);
           http->addHeader("X-SF-Compiled", String(__DATE__) + " " + String(__TIME__));
           http->addHeader("X-SF-Uptime",   String((millis() - bootTimeMs) / 1000));
@@ -686,10 +693,13 @@ static void otaUpdateTask(void* pv) {
                   line.trim();
                   if (line.length() > 0 && line.indexOf(HOSTNAME) >= 0) {
                     if (line.startsWith("http")) {
+                      // Full URL in manifest - extract filename from end of URL
+                      int lastSlash = line.lastIndexOf('/');
+                      fwFilename = (lastSlash >= 0) ? line.substring(lastSlash + 1) : line;
                       binUrl = line;
                     } else {
-                      // line is just the filename (e.g. "syncframe-05D.bin")
-                      // firmware is served at <base>/firmware/<filename>
+                      // Bare filename in manifest
+                      fwFilename = line;
                       String base = cfg.updateUrl;
                       int lastSlash = base.lastIndexOf('/');
                       if (lastSlash > 7) base = base.substring(0, lastSlash + 1);
@@ -715,71 +725,73 @@ static void otaUpdateTask(void* pv) {
       }
 
       if (binUrl.length() > 0) {
-        otaInProgress = true;
-        logEvent("OTA", "downloading firmware %s", binUrl.c_str());
+        // Skip flash if this exact firmware file is already installed
+        if (fwFilename.length() > 0 && fwFilename == installedFwFilename) {
+          logEvent("OTA", "already current (%s), skipping", fwFilename.c_str());
+        } else {
+          otaInProgress = true;
+          logEvent("OTA", "downloading firmware %s", binUrl.c_str());
 
-        // Download the firmware into a buffer first, entirely outside the
-        // draw mutex so the display task is not starved during the fetch.
-        HTTPClient*       fhttp  = new HTTPClient();
-        WiFiClientSecure* fsec   = nullptr;
-        WiFiClient*       fplain = nullptr;
-        int32_t fwSize = -1;
-        WiFiClient* fwStream = nullptr;
-        bool fetchOk = false;
+          HTTPClient*       fhttp  = new HTTPClient();
+          WiFiClientSecure* fsec   = nullptr;
+          WiFiClient*       fplain = nullptr;
+          int32_t fwSize = -1;
+          WiFiClient* fwStream = nullptr;
+          bool fetchOk = false;
 
-        if (fhttp) {
-          fhttp->setConnectTimeout(10000);
-          fhttp->setTimeout(60000);
-          bool fok = false;
-          if (binUrl.startsWith("https://")) {
-            fsec = new WiFiClientSecure();
-            if (fsec) { fsec->setInsecure(); fok = fhttp->begin(*fsec, binUrl); }
-          } else {
-            fplain = new WiFiClient();
-            if (fplain) fok = fhttp->begin(*fplain, binUrl);
-          }
-          if (fok) {
-            int code = fhttp->GET();
-            if (code == HTTP_CODE_OK) {
-              fwSize   = fhttp->getSize();
-              fwStream = fhttp->getStreamPtr();
-              fetchOk  = true;
+          if (fhttp) {
+            fhttp->setConnectTimeout(10000);
+            fhttp->setTimeout(60000);
+            bool fok = false;
+            if (binUrl.startsWith("https://")) {
+              fsec = new WiFiClientSecure();
+              if (fsec) { fsec->setInsecure(); fok = fhttp->begin(*fsec, binUrl); }
             } else {
-              logEvent("OTA", "firmware fetch failed code=%d", code);
+              fplain = new WiFiClient();
+              if (fplain) fok = fhttp->begin(*fplain, binUrl);
             }
-          }
-        }
-
-        if (fetchOk && fwStream) {
-          // Take drawMutex only for the actual flash write.
-          // portMAX_DELAY is fine here - the write is fast (flash speed),
-          // not network speed, so we won't hold it long.
-          logEvent("OTA", "waiting for draw mutex before flash");
-          if (xSemaphoreTake(drawMutex, portMAX_DELAY) == pdTRUE) {
-            logEvent("OTA", "starting flash size=%d", fwSize);
-            bool flashed = false;
-            if (Update.begin(fwSize > 0 ? (size_t)fwSize : UPDATE_SIZE_UNKNOWN)) {
-              size_t written = Update.writeStream(*fwStream);
-              if (Update.end() && Update.isFinished()) {
-                logEvent("OTA", "flash ok bytes=%u rebooting", (unsigned)written);
-                flashed = true;
+            if (fok) {
+              int code = fhttp->GET();
+              if (code == HTTP_CODE_OK) {
+                fwSize   = fhttp->getSize();
+                fwStream = fhttp->getStreamPtr();
+                fetchOk  = true;
               } else {
-                logEvent("OTA", "Update.end error: %s", Update.errorString());
+                logEvent("OTA", "firmware fetch failed code=%d", code);
               }
-            } else {
-              logEvent("OTA", "Update.begin error: %s", Update.errorString());
-            }
-            xSemaphoreGive(drawMutex);
-            if (flashed) {
-              fhttp->end(); delete fhttp; delete fsec; delete fplain;
-              delay(1500);
-              ESP.restart();
             }
           }
-        }
 
-        if (fhttp) { fhttp->end(); delete fhttp; delete fsec; delete fplain; }
-        otaInProgress = false;
+          if (fetchOk && fwStream) {
+            logEvent("OTA", "waiting for draw mutex before flash");
+            if (xSemaphoreTake(drawMutex, portMAX_DELAY) == pdTRUE) {
+              logEvent("OTA", "starting flash size=%d", fwSize);
+              bool flashed = false;
+              if (Update.begin(fwSize > 0 ? (size_t)fwSize : UPDATE_SIZE_UNKNOWN)) {
+                size_t written = Update.writeStream(*fwStream);
+                if (Update.end() && Update.isFinished()) {
+                  logEvent("OTA", "flash ok bytes=%u", (unsigned)written);
+                  flashed = true;
+                } else {
+                  logEvent("OTA", "Update.end error: %s", Update.errorString());
+                }
+              } else {
+                logEvent("OTA", "Update.begin error: %s", Update.errorString());
+              }
+              xSemaphoreGive(drawMutex);
+              if (flashed) {
+                // Record the filename BEFORE reboot so we skip it next time
+                saveInstalledFw(fwFilename);
+                fhttp->end(); delete fhttp; delete fsec; delete fplain;
+                delay(1500);
+                ESP.restart();
+              }
+            }
+          }
+
+          if (fhttp) { fhttp->end(); delete fhttp; delete fsec; delete fplain; }
+          otaInProgress = false;
+        }
       } else {
         logEvent("OTA", "no update for %s", HOSTNAME);
       }
@@ -802,8 +814,9 @@ static void startOtaTask() {
     otaUpdateTask, "ota_check", 16384, nullptr,
     1, &otaTaskHandle, 1
   );
-  logEvent("OTA", "task started interval=%umin url=%s",
-           (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str());
+  logEvent("OTA", "task started interval=%umin url=%s fw=%s",
+           (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(),
+           installedFwFilename.length() ? installedFwFilename.c_str() : "none");
 }
 
 // ---------------------- MQTT ----------------------
@@ -934,7 +947,7 @@ static void handleStatusJson() {
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
   unsigned long uptimeMs = millis() - bootTimeMs;
   String j;
-  j.reserve(560);
+  j.reserve(600);
   j += "{";
   j += "\"hostname\":\""; appendJsonEscaped(j, HOSTNAME); j += "\",";
   j += "\"mac\":\"";      appendJsonEscaped(j, MAC_STR);  j += "\",";
@@ -950,6 +963,7 @@ static void handleStatusJson() {
   j += "\"lastMqttMsgMs\":";  j += String(lastMqttMsgMs);  j += ",";
   j += "\"lastLogSeq\":";     j += String(logSeq);          j += ",";
   j += "\"otaInProgress\":";  j += (otaInProgress ? "true" : "false"); j += ",";
+  j += "\"installedFw\":\"";  appendJsonEscaped(j, installedFwFilename); j += "\",";
   j += "\"uptimeMs\":";       j += String(uptimeMs);        j += ",";
   j += "\"screenW\":"; j += String(SCREEN_W); j += ",";
   j += "\"screenH\":"; j += String(SCREEN_H);
