@@ -163,8 +163,6 @@ static bool requireWebAuth() {
 // ---------------------- Hardware Callbacks ----------------------
 bool hasLastPhoto() { return (lastJpg != nullptr && lastJpgLen > 0); }
 
-// Safe wrappers: always take drawMutex before touching the display.
-// Timeout 1000ms - if the mutex isn't free within 1s something is wrong.
 void showCurrentPhoto() {
   if (currentJpg && currentJpgLen) {
     showingLast = false;
@@ -583,9 +581,6 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   return true;
 }
 
-// Must only be called from loop() on Core 0.
-// Takes drawMutex so the display write is never interrupted by another draw
-// request or by the OTA task starting a flash write.
 static bool downloadAndShowPhoto() {
   if (otaInProgress) return false;
 
@@ -600,8 +595,6 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
-  // Draw boot status without mutex - this is a simple text draw before any
-  // JPEG is present, and loop() is the only caller at this point.
   if (!currentJpg && !lastJpg) board_draw_boot_status("Downloading Photo...");
 
   bool ok = httpDownloadToBuffer(&newBuf, &newLen, &err);
@@ -611,7 +604,6 @@ static bool downloadAndShowPhoto() {
     lastDownloadOk  = false;
     lastDownloadErr = err;
     logEvent("PHOTO", "download failed %s", err.c_str());
-    // Show best available image under mutex
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       if (currentJpg && currentJpgLen)        board_draw_jpeg(currentJpg, currentJpgLen);
       else if (lastJpg && lastJpgLen)          board_draw_jpeg(lastJpg, lastJpgLen);
@@ -640,9 +632,14 @@ static bool downloadAndShowPhoto() {
 
 // ============================================================
 // Background OTA update task
-// Pinned to Core 1 (loop/display runs on Core 0).
-// Stack 16384 bytes - Update.writeStream() + TLS needs headroom.
-// Takes drawMutex before flashing so it can never race a live draw.
+// Pinned to Core 1. Stack 16384 bytes.
+//
+// IMPORTANT: drawMutex is taken ONLY around the actual flash write
+// (Update.begin -> writeStream -> Update.end). The manifest fetch and
+// firmware HTTP download happen WITHOUT the mutex so that board_loop()
+// and the display task on Core 0 are never starved. Holding the mutex
+// for the duration of a multi-second HTTP download was the cause of
+// consistent TWDT panics.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
@@ -708,57 +705,71 @@ static void otaUpdateTask(void* pv) {
       }
 
       if (binUrl.length() > 0) {
-        // Wait for any in-progress display draw to finish before touching flash.
-        // portMAX_DELAY: we must not skip this - a concurrent flash+draw = panic.
-        logEvent("OTA", "waiting for draw mutex before flash");
-        if (xSemaphoreTake(drawMutex, portMAX_DELAY) == pdTRUE) {
-          otaInProgress = true;
-          logEvent("OTA", "starting flash from %s", binUrl.c_str());
+        otaInProgress = true;
+        logEvent("OTA", "downloading firmware %s", binUrl.c_str());
 
-          HTTPClient*       fhttp  = new HTTPClient();
-          WiFiClientSecure* fsec   = nullptr;
-          WiFiClient*       fplain = nullptr;
-          bool flashed = false;
+        // Download the firmware into a buffer first, entirely outside the
+        // draw mutex so the display task is not starved during the fetch.
+        HTTPClient*       fhttp  = new HTTPClient();
+        WiFiClientSecure* fsec   = nullptr;
+        WiFiClient*       fplain = nullptr;
+        int32_t fwSize = -1;
+        WiFiClient* fwStream = nullptr;
+        bool fetchOk = false;
 
-          if (fhttp) {
-            fhttp->setConnectTimeout(10000);
-            fhttp->setTimeout(60000);
-            bool fok = false;
-            if (binUrl.startsWith("https://")) {
-              fsec = new WiFiClientSecure();
-              if (fsec) { fsec->setInsecure(); fok = fhttp->begin(*fsec, binUrl); }
-            } else {
-              fplain = new WiFiClient();
-              if (fplain) fok = fhttp->begin(*fplain, binUrl);
-            }
-            if (fok) {
-              int code = fhttp->GET();
-              if (code == HTTP_CODE_OK) {
-                int32_t fwSize = fhttp->getSize();
-                WiFiClient* fs = fhttp->getStreamPtr();
-                if (Update.begin(fwSize > 0 ? (size_t)fwSize : UPDATE_SIZE_UNKNOWN)) {
-                  size_t written = Update.writeStream(*fs);
-                  if (Update.end() && Update.isFinished()) {
-                    logEvent("OTA", "flash ok bytes=%u rebooting", (unsigned)written);
-                    flashed = true;
-                  } else {
-                    logEvent("OTA", "Update.end error: %s", Update.errorString());
-                  }
-                } else {
-                  logEvent("OTA", "Update.begin error: %s", Update.errorString());
-                }
-              } else {
-                logEvent("OTA", "firmware fetch failed code=%d", code);
-              }
-            }
-            fhttp->end(); delete fhttp; delete fsec; delete fplain;
+        if (fhttp) {
+          fhttp->setConnectTimeout(10000);
+          fhttp->setTimeout(60000);
+          bool fok = false;
+          if (binUrl.startsWith("https://")) {
+            fsec = new WiFiClientSecure();
+            if (fsec) { fsec->setInsecure(); fok = fhttp->begin(*fsec, binUrl); }
+          } else {
+            fplain = new WiFiClient();
+            if (fplain) fok = fhttp->begin(*fplain, binUrl);
           }
-
-          xSemaphoreGive(drawMutex);
-          otaInProgress = false;
-
-          if (flashed) { delay(1500); ESP.restart(); }
+          if (fok) {
+            int code = fhttp->GET();
+            if (code == HTTP_CODE_OK) {
+              fwSize   = fhttp->getSize();
+              fwStream = fhttp->getStreamPtr();
+              fetchOk  = true;
+            } else {
+              logEvent("OTA", "firmware fetch failed code=%d", code);
+            }
+          }
         }
+
+        if (fetchOk && fwStream) {
+          // Take drawMutex only for the actual flash write.
+          // portMAX_DELAY is fine here - the write is fast (flash speed),
+          // not network speed, so we won't hold it long.
+          logEvent("OTA", "waiting for draw mutex before flash");
+          if (xSemaphoreTake(drawMutex, portMAX_DELAY) == pdTRUE) {
+            logEvent("OTA", "starting flash size=%d", fwSize);
+            bool flashed = false;
+            if (Update.begin(fwSize > 0 ? (size_t)fwSize : UPDATE_SIZE_UNKNOWN)) {
+              size_t written = Update.writeStream(*fwStream);
+              if (Update.end() && Update.isFinished()) {
+                logEvent("OTA", "flash ok bytes=%u rebooting", (unsigned)written);
+                flashed = true;
+              } else {
+                logEvent("OTA", "Update.end error: %s", Update.errorString());
+              }
+            } else {
+              logEvent("OTA", "Update.begin error: %s", Update.errorString());
+            }
+            xSemaphoreGive(drawMutex);
+            if (flashed) {
+              fhttp->end(); delete fhttp; delete fsec; delete fplain;
+              delay(1500);
+              ESP.restart();
+            }
+          }
+        }
+
+        if (fhttp) { fhttp->end(); delete fhttp; delete fsec; delete fplain; }
+        otaInProgress = false;
       } else {
         logEvent("OTA", "no update for %s", HOSTNAME);
       }
@@ -777,8 +788,6 @@ static void otaUpdateTask(void* pv) {
 static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
   if (otaTaskHandle != nullptr) return;
-  // Stack 16384: Update.writeStream() + WiFiClientSecure TLS needs headroom.
-  // Pinned to Core 1: loop()/display runs on Core 0, keep flash write separate.
   xTaskCreatePinnedToCore(
     otaUpdateTask, "ota_check", 16384, nullptr,
     1, &otaTaskHandle, 1
@@ -1063,9 +1072,8 @@ void setup() {
   buildHostAndClientId();
   logEvent("BOOT", "%s mac=%s reset=%s", HOSTNAME, MAC_STR, resetReasonToStr(esp_reset_reason()));
 
-  // Create draw mutex before board_init() so it exists before any draw call.
   drawMutex = xSemaphoreCreateBinary();
-  xSemaphoreGive(drawMutex); // start in 'available' state
+  xSemaphoreGive(drawMutex);
 
   loadConfig();
   board_init();
