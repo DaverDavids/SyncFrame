@@ -650,6 +650,9 @@ static bool downloadAndShowPhoto() {
 // RULES: zero Arduino String usage inside this task.
 // All string work uses fixed char[] buffers and C stdlib only.
 // getStreamPtr() is null-checked before any stream access.
+// http->end() is NOT called when stream is null - the connection
+// is already broken and end() may block in ROM TLS close_notify
+// long enough to trigger the Core 1 internal task watchdog.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
@@ -702,9 +705,15 @@ static void otaUpdateTask(void* pv) {
           if (http->GET() == HTTP_CODE_OK) {
             // --- NULL-GUARD: getStreamPtr() can return null if connection
             //     dropped between GET() success and stream access.
+            //     Do NOT call http->end() in this case - the connection is
+            //     already broken and end() blocks in ROM TLS close_notify,
+            //     which starves the Core 1 watchdog (TG1WDT_SYS_RST).
             WiFiClient* s = http->getStreamPtr();
             if (!s) {
               logEvent("OTA", "null stream after GET");
+              // Skip http->end() - delete objects directly to avoid WDT
+              delete http; delete sec; delete plain;
+              http = nullptr; sec = nullptr; plain = nullptr;
             } else {
               // --- char[] line accumulator - zero heap allocation ---
               char line[256]  = {};
@@ -770,7 +779,8 @@ static void otaUpdateTask(void* pv) {
             logEvent("OTA", "manifest fetch failed");
           }
         }
-        http->end(); delete http; delete sec; delete plain;
+        // Only call http->end() if http was not already deleted in the null-stream path
+        if (http) { http->end(); delete http; delete sec; delete plain; }
       }
 
       if (binUrl[0] != '\0') {
