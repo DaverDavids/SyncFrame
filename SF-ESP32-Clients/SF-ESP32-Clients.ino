@@ -98,8 +98,6 @@ struct Config {
 
 // ---------------------------------------------------------------------------
 // Installed firmware filename - persisted in NVS.
-// Set after a successful OTA flash; compared against manifest on every check.
-// If the manifest line matches this value, the flash is skipped.
 // ---------------------------------------------------------------------------
 static String installedFwFilename = "";
 
@@ -647,34 +645,58 @@ static bool downloadAndShowPhoto() {
 // ============================================================
 // Background OTA update task
 // Pinned to Core 1. Stack 16384 bytes.
+//
+// CRITICAL: never access cfg.updateUrl or any other cfg String member
+// directly from this task. Arduino String uses a heap-allocated char*;
+// concurrent malloc/free on Core 0 (photo download, web handlers) can
+// corrupt that pointer, causing a LoadProhibited null-deref on Core 1.
+//
+// Instead, snapshot the two values we need into plain local char[]/uint32_t
+// at the top of each loop iteration and use only those locals.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
   vTaskDelay(pdMS_TO_TICKS(30000));
 
   for (;;) {
-    uint32_t intervalMs = cfg.updateIntervalMin * 60UL * 1000UL;
+    // --- Snapshot cfg values we need this iteration into plain POD locals.
+    //     Do this once, quickly, before any heap activity on this core.
+    char     updateUrlSnap[256] = {};
+    uint32_t intervalMinSnap    = DEFAULT_UPDATE_INTERVAL_MIN;
+    char     installedFwSnap[128] = {};
+    {
+      // cfg.updateUrl / installedFwFilename are String objects owned by Core 0.
+      // We copy their content into fixed char[] buffers here so this task
+      // never touches the String heap pointer again during this iteration.
+      strncpy(updateUrlSnap,   cfg.updateUrl.c_str(),         sizeof(updateUrlSnap)   - 1);
+      strncpy(installedFwSnap, installedFwFilename.c_str(),   sizeof(installedFwSnap) - 1);
+      intervalMinSnap = cfg.updateIntervalMin;
+    }
+
+    uint32_t intervalMs = intervalMinSnap * 60UL * 1000UL;
     if (intervalMs == 0) intervalMs = 3600000UL;
 
-    if (cfg.updateUrl.length() > 0 && WiFi.status() == WL_CONNECTED && !otaInProgress) {
-      logEvent("OTA", "checking manifest %s", cfg.updateUrl.c_str());
+    if (updateUrlSnap[0] != '\0' && WiFi.status() == WL_CONNECTED && !otaInProgress) {
+      logEvent("OTA", "checking manifest %s", updateUrlSnap);
 
       HTTPClient*       http  = new HTTPClient();
       WiFiClientSecure* sec   = nullptr;
       WiFiClient*       plain = nullptr;
-      String fwFilename = "";   // just the bare filename from the manifest line
-      String binUrl     = "";
+      char fwFilename[128] = {};
+      char binUrl[256]     = {};
 
       if (http) {
         http->setConnectTimeout(5000);
         http->setTimeout(6000);
         bool ok = false;
-        if (cfg.updateUrl.startsWith("https://")) {
+        // Use local snap - never touch cfg.updateUrl again
+        bool isHttps = (strncmp(updateUrlSnap, "https://", 8) == 0);
+        if (isHttps) {
           sec = new WiFiClientSecure();
-          if (sec) { sec->setInsecure(); ok = http->begin(*sec, cfg.updateUrl); }
+          if (sec) { sec->setInsecure(); ok = http->begin(*sec, updateUrlSnap); }
         } else {
           plain = new WiFiClient();
-          if (plain) ok = http->begin(*plain, cfg.updateUrl);
+          if (plain) ok = http->begin(*plain, updateUrlSnap);
         }
 
         if (ok) {
@@ -693,19 +715,20 @@ static void otaUpdateTask(void* pv) {
                   line.trim();
                   if (line.length() > 0 && line.indexOf(HOSTNAME) >= 0) {
                     if (line.startsWith("http")) {
-                      // Full URL in manifest - extract filename from end of URL
                       int lastSlash = line.lastIndexOf('/');
-                      fwFilename = (lastSlash >= 0) ? line.substring(lastSlash + 1) : line;
-                      binUrl = line;
+                      String fn = (lastSlash >= 0) ? line.substring(lastSlash + 1) : line;
+                      strncpy(fwFilename, fn.c_str(), sizeof(fwFilename) - 1);
+                      strncpy(binUrl, line.c_str(), sizeof(binUrl) - 1);
                     } else {
-                      // Bare filename in manifest
-                      fwFilename = line;
-                      String base = cfg.updateUrl;
+                      strncpy(fwFilename, line.c_str(), sizeof(fwFilename) - 1);
+                      // Build base URL from snap - no cfg access
+                      String base = String(updateUrlSnap);
                       int lastSlash = base.lastIndexOf('/');
                       if (lastSlash > 7) base = base.substring(0, lastSlash + 1);
-                      binUrl = base + "firmware/" + line;
+                      String bu = base + "firmware/" + line;
+                      strncpy(binUrl, bu.c_str(), sizeof(binUrl) - 1);
                     }
-                    logEvent("OTA", "found bin %s", binUrl.c_str());
+                    logEvent("OTA", "found bin %s", binUrl);
                     break;
                   }
                   line = "";
@@ -724,18 +747,18 @@ static void otaUpdateTask(void* pv) {
         http->end(); delete http; delete sec; delete plain;
       }
 
-      if (binUrl.length() > 0) {
-        // Skip flash if this exact firmware file is already installed
-        if (fwFilename.length() > 0 && fwFilename == installedFwFilename) {
-          logEvent("OTA", "already current (%s), skipping", fwFilename.c_str());
+      if (binUrl[0] != '\0') {
+        // Skip if already installed - compare plain char[] to char[]
+        if (fwFilename[0] != '\0' && strcmp(fwFilename, installedFwSnap) == 0) {
+          logEvent("OTA", "already current (%s), skipping", fwFilename);
         } else {
           otaInProgress = true;
-          logEvent("OTA", "downloading firmware %s", binUrl.c_str());
+          logEvent("OTA", "downloading firmware %s", binUrl);
 
           HTTPClient*       fhttp  = new HTTPClient();
           WiFiClientSecure* fsec   = nullptr;
           WiFiClient*       fplain = nullptr;
-          int32_t fwSize = -1;
+          int32_t fwSize   = -1;
           WiFiClient* fwStream = nullptr;
           bool fetchOk = false;
 
@@ -743,7 +766,8 @@ static void otaUpdateTask(void* pv) {
             fhttp->setConnectTimeout(10000);
             fhttp->setTimeout(60000);
             bool fok = false;
-            if (binUrl.startsWith("https://")) {
+            bool binIsHttps = (strncmp(binUrl, "https://", 8) == 0);
+            if (binIsHttps) {
               fsec = new WiFiClientSecure();
               if (fsec) { fsec->setInsecure(); fok = fhttp->begin(*fsec, binUrl); }
             } else {
@@ -780,8 +804,7 @@ static void otaUpdateTask(void* pv) {
               }
               xSemaphoreGive(drawMutex);
               if (flashed) {
-                // Record the filename BEFORE reboot so we skip it next time
-                saveInstalledFw(fwFilename);
+                saveInstalledFw(String(fwFilename));
                 fhttp->end(); delete fhttp; delete fsec; delete fplain;
                 delay(1500);
                 ESP.restart();
@@ -797,10 +820,13 @@ static void otaUpdateTask(void* pv) {
       }
     }
 
+    // Sleep until next interval, but re-snapshot interval each second in case
+    // it changed via web config. Uses only the local snap for this sleep.
     uint32_t elapsed = 0;
     while (elapsed < intervalMs) {
       vTaskDelay(pdMS_TO_TICKS(1000));
       elapsed += 1000;
+      // Re-read interval as a plain integer (safe - uint32_t is atomic on ESP32)
       uint32_t newInterval = cfg.updateIntervalMin * 60UL * 1000UL;
       if (newInterval != intervalMs) break;
     }
