@@ -643,35 +643,24 @@ static bool downloadAndShowPhoto() {
 }
 
 // ============================================================
-// Background OTA update task
-// Pinned to Core 1. Stack 16384 bytes.
+// Background OTA update task  (pinned Core 1, stack 16384)
 //
-// CRITICAL: never access cfg.updateUrl or any other cfg String member
-// directly from this task. Arduino String uses a heap-allocated char*;
-// concurrent malloc/free on Core 0 (photo download, web handlers) can
-// corrupt that pointer, causing a LoadProhibited null-deref on Core 1.
-//
-// Instead, snapshot the two values we need into plain local char[]/uint32_t
-// at the top of each loop iteration and use only those locals.
+// RULES: zero Arduino String usage inside this task.
+// All string work uses fixed char[] buffers and C stdlib only.
+// getStreamPtr() is null-checked before any stream access.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
   vTaskDelay(pdMS_TO_TICKS(30000));
 
   for (;;) {
-    // --- Snapshot cfg values we need this iteration into plain POD locals.
-    //     Do this once, quickly, before any heap activity on this core.
-    char     updateUrlSnap[256] = {};
-    uint32_t intervalMinSnap    = DEFAULT_UPDATE_INTERVAL_MIN;
+    // Snapshot cfg POD fields into plain locals before any heap activity.
+    char     updateUrlSnap[256]   = {};
     char     installedFwSnap[128] = {};
-    {
-      // cfg.updateUrl / installedFwFilename are String objects owned by Core 0.
-      // We copy their content into fixed char[] buffers here so this task
-      // never touches the String heap pointer again during this iteration.
-      strncpy(updateUrlSnap,   cfg.updateUrl.c_str(),         sizeof(updateUrlSnap)   - 1);
-      strncpy(installedFwSnap, installedFwFilename.c_str(),   sizeof(installedFwSnap) - 1);
-      intervalMinSnap = cfg.updateIntervalMin;
-    }
+    uint32_t intervalMinSnap      = DEFAULT_UPDATE_INTERVAL_MIN;
+    strncpy(updateUrlSnap,   cfg.updateUrl.c_str(),       sizeof(updateUrlSnap)   - 1);
+    strncpy(installedFwSnap, installedFwFilename.c_str(), sizeof(installedFwSnap) - 1);
+    intervalMinSnap = cfg.updateIntervalMin;
 
     uint32_t intervalMs = intervalMinSnap * 60UL * 1000UL;
     if (intervalMs == 0) intervalMs = 3600000UL;
@@ -689,7 +678,6 @@ static void otaUpdateTask(void* pv) {
         http->setConnectTimeout(5000);
         http->setTimeout(6000);
         bool ok = false;
-        // Use local snap - never touch cfg.updateUrl again
         bool isHttps = (strncmp(updateUrlSnap, "https://", 8) == 0);
         if (isHttps) {
           sec = new WiFiClientSecure();
@@ -700,44 +688,80 @@ static void otaUpdateTask(void* pv) {
         }
 
         if (ok) {
+          // Build X-SF-Compiled header from literals only - no String heap
+          char compiledBuf[32];
+          snprintf(compiledBuf, sizeof(compiledBuf), "%s %s", __DATE__, __TIME__);
+          char uptimeBuf[16];
+          snprintf(uptimeBuf, sizeof(uptimeBuf), "%lu", (unsigned long)((millis() - bootTimeMs) / 1000));
           http->addHeader("X-SF-Hostname", HOSTNAME);
-          http->addHeader("X-SF-Compiled", String(__DATE__) + " " + String(__TIME__));
-          http->addHeader("X-SF-Uptime",   String((millis() - bootTimeMs) / 1000));
+          http->addHeader("X-SF-Compiled", compiledBuf);
+          http->addHeader("X-SF-Uptime",   uptimeBuf);
 
           if (http->GET() == HTTP_CODE_OK) {
+            // --- NULL-GUARD: getStreamPtr() can return null if connection
+            //     dropped between GET() success and stream access.
             WiFiClient* s = http->getStreamPtr();
-            String line;
-            unsigned long t = millis();
-            while ((http->connected() || s->available()) && millis() - t < 8000) {
-              if (s->available()) {
-                char c = (char)s->read();
-                if (c == '\n' || c == '\r') {
-                  line.trim();
-                  if (line.length() > 0 && line.indexOf(HOSTNAME) >= 0) {
-                    if (line.startsWith("http")) {
-                      int lastSlash = line.lastIndexOf('/');
-                      String fn = (lastSlash >= 0) ? line.substring(lastSlash + 1) : line;
-                      strncpy(fwFilename, fn.c_str(), sizeof(fwFilename) - 1);
-                      strncpy(binUrl, line.c_str(), sizeof(binUrl) - 1);
-                    } else {
-                      strncpy(fwFilename, line.c_str(), sizeof(fwFilename) - 1);
-                      // Build base URL from snap - no cfg access
-                      String base = String(updateUrlSnap);
-                      int lastSlash = base.lastIndexOf('/');
-                      if (lastSlash > 7) base = base.substring(0, lastSlash + 1);
-                      String bu = base + "firmware/" + line;
-                      strncpy(binUrl, bu.c_str(), sizeof(binUrl) - 1);
+            if (!s) {
+              logEvent("OTA", "null stream after GET");
+            } else {
+              // --- char[] line accumulator - zero heap allocation ---
+              char line[256]  = {};
+              size_t lineLen  = 0;
+              unsigned long t = millis();
+
+              while ((http->connected() || s->available()) && millis() - t < 8000) {
+                if (s->available()) {
+                  char c = (char)s->read();
+                  if (c == '\n' || c == '\r') {
+                    // trim trailing whitespace in-place
+                    while (lineLen > 0 && (line[lineLen-1] == ' ' || line[lineLen-1] == '\t'))
+                      lineLen--;
+                    line[lineLen] = '\0';
+
+                    // trim leading whitespace
+                    const char* trimmed = line;
+                    while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
+
+                    if (lineLen > 0 && strstr(trimmed, HOSTNAME) != nullptr) {
+                      if (strncmp(trimmed, "http", 4) == 0) {
+                        // full URL on the line
+                        strncpy(binUrl, trimmed, sizeof(binUrl) - 1);
+                        const char* lastSlash = strrchr(trimmed, '/');
+                        if (lastSlash) {
+                          strncpy(fwFilename, lastSlash + 1, sizeof(fwFilename) - 1);
+                        } else {
+                          strncpy(fwFilename, trimmed, sizeof(fwFilename) - 1);
+                        }
+                      } else {
+                        // bare filename - build URL from manifest base
+                        strncpy(fwFilename, trimmed, sizeof(fwFilename) - 1);
+                        // find last '/' in updateUrlSnap to get base dir
+                        char baseDir[256] = {};
+                        const char* lastSlash = strrchr(updateUrlSnap, '/');
+                        if (lastSlash && (lastSlash - updateUrlSnap) > 7) {
+                          size_t baseLen = (size_t)(lastSlash - updateUrlSnap) + 1;
+                          if (baseLen < sizeof(baseDir)) {
+                            memcpy(baseDir, updateUrlSnap, baseLen);
+                            baseDir[baseLen] = '\0';
+                          }
+                        } else {
+                          strncpy(baseDir, updateUrlSnap, sizeof(baseDir) - 1);
+                        }
+                        snprintf(binUrl, sizeof(binUrl), "%sfirmware/%s", baseDir, trimmed);
+                      }
+                      logEvent("OTA", "found bin %s", binUrl);
+                      break;
                     }
-                    logEvent("OTA", "found bin %s", binUrl);
-                    break;
+                    // reset for next line
+                    lineLen = 0;
+                    line[0] = '\0';
+                    t = millis();
+                  } else {
+                    if (lineLen < sizeof(line) - 1) line[lineLen++] = c;
                   }
-                  line = "";
-                  t = millis();
                 } else {
-                  if (line.length() < 256) line += c;
+                  vTaskDelay(1);
                 }
-              } else {
-                vTaskDelay(1);
               }
             }
           } else {
@@ -748,7 +772,6 @@ static void otaUpdateTask(void* pv) {
       }
 
       if (binUrl[0] != '\0') {
-        // Skip if already installed - compare plain char[] to char[]
         if (fwFilename[0] != '\0' && strcmp(fwFilename, installedFwSnap) == 0) {
           logEvent("OTA", "already current (%s), skipping", fwFilename);
         } else {
@@ -779,7 +802,8 @@ static void otaUpdateTask(void* pv) {
               if (code == HTTP_CODE_OK) {
                 fwSize   = fhttp->getSize();
                 fwStream = fhttp->getStreamPtr();
-                fetchOk  = true;
+                if (!fwStream) logEvent("OTA", "null fw stream");
+                else fetchOk = true;
               } else {
                 logEvent("OTA", "firmware fetch failed code=%d", code);
               }
@@ -820,13 +844,10 @@ static void otaUpdateTask(void* pv) {
       }
     }
 
-    // Sleep until next interval, but re-snapshot interval each second in case
-    // it changed via web config. Uses only the local snap for this sleep.
     uint32_t elapsed = 0;
     while (elapsed < intervalMs) {
       vTaskDelay(pdMS_TO_TICKS(1000));
       elapsed += 1000;
-      // Re-read interval as a plain integer (safe - uint32_t is atomic on ESP32)
       uint32_t newInterval = cfg.updateIntervalMin * 60UL * 1000UL;
       if (newInterval != intervalMs) break;
     }
