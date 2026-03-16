@@ -42,7 +42,7 @@ char MAC_STR[18];
 static const char* HOST_PREFIX = "syncframe-";
 
 // ---------------------------------------------------------------------------
-// Draw mutex - taken before ANY board_draw_* call, given back immediately after.
+// Draw mutex
 // ---------------------------------------------------------------------------
 static SemaphoreHandle_t drawMutex = nullptr;
 
@@ -97,9 +97,20 @@ struct Config {
 } cfg;
 
 // ---------------------------------------------------------------------------
-// Installed firmware filename - persisted in NVS.
+// OTA build token - persisted in NVS as "fwtoken".
+//
+// The manifest line format is:
+//   <hostname> <filename_or_url> <token>
+//
+// <token> is any opaque string the server writes when it drops a new binary
+// (e.g. a Unix timestamp: $(date +%s), a git short-SHA, an MD5, etc.).
+// The device stores the token it last successfully flashed. On every manifest
+// check it compares the manifest token against the stored one. If they match
+// the binary is already current and the flash is skipped entirely.
+// This works correctly even when the filename never changes.
 // ---------------------------------------------------------------------------
-static String installedFwFilename = "";
+static String installedFwToken    = "";
+static String installedFwFilename = "";  // kept for /api/status display only
 
 static const char* PREF_NS = "syncframe";
 static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
@@ -308,6 +319,7 @@ static void loadConfig() {
   cfg.updateIntervalMin = prefs.getUInt("updint",    DEFAULT_UPDATE_INTERVAL_MIN);
   cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
   cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
+  installedFwToken      = prefs.getString("fwtoken", "");
   installedFwFilename   = prefs.getString("fwfile",  "");
   prefs.end();
 
@@ -353,12 +365,15 @@ static void saveConfig() {
   prefs.end();
 }
 
-static void saveInstalledFw(const String& filename) {
+// Save both the token (for change detection) and filename (for display)
+static void saveInstalledFw(const char* filename, const char* token) {
   installedFwFilename = filename;
+  installedFwToken    = token;
   prefs.begin(PREF_NS, false);
-  prefs.putString("fwfile", filename);
+  prefs.putString("fwfile",  filename);
+  prefs.putString("fwtoken", token);
   prefs.end();
-  logEvent("OTA", "installed fw recorded: %s", filename.c_str());
+  logEvent("OTA", "installed fw: file=%s token=%s", filename, token);
 }
 
 static String makePhotoUrl() {
@@ -577,7 +592,6 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     if (n <= 0) break;
     readTotal += (size_t)n;
     lastProgressMs = millis();
-    // Exit as soon as we have all declared bytes - don't wait for connection close
     if (total > 0 && readTotal >= (size_t)total) break;
   }
 
@@ -627,16 +641,12 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
-  // If the new image is identical to current, don't rotate buffers.
-  // Rotating would destroy the real previous photo, making touch-toggle
-  // show the same image both ways.
   if (currentJpg && newLen == currentJpgLen &&
       memcmp(newBuf, currentJpg, newLen) == 0) {
     free(newBuf);
     lastDownloadOk  = true;
     lastDownloadErr = "";
     logEvent("PHOTO", "same image, no rotation bytes=%u", (unsigned)newLen);
-    // Redraw current in case screen was showing last
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
@@ -665,24 +675,26 @@ static bool downloadAndShowPhoto() {
 // ============================================================
 // Background OTA update task  (pinned Core 1, stack 16384)
 //
-// RULES: zero Arduino String usage inside this task.
-// All string work uses fixed char[] buffers and C stdlib only.
-// getStreamPtr() is null-checked before any stream access.
-// http->end() is NOT called when stream is null - the connection
-// is already broken and end() may block in ROM TLS close_notify
-// long enough to trigger the Core 1 internal task watchdog.
+// Manifest line format (space-separated):
+//   <hostname>  <filename_or_url>  <token>
+//
+// <token> is an opaque string the server writes each time it drops
+// a new binary - e.g. a Unix timestamp or git short-SHA.
+// The device stores the last flashed token in NVS ("fwtoken").
+// If manifest token == stored token  ->  skip (already current).
+// If manifest token != stored token  ->  flash, then store new token.
+// This is correct even when the filename never changes.
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
   vTaskDelay(pdMS_TO_TICKS(30000));
 
   for (;;) {
-    // Snapshot cfg POD fields into plain locals before any heap activity.
-    char     updateUrlSnap[256]   = {};
-    char     installedFwSnap[128] = {};
-    uint32_t intervalMinSnap      = DEFAULT_UPDATE_INTERVAL_MIN;
-    strncpy(updateUrlSnap,   cfg.updateUrl.c_str(),       sizeof(updateUrlSnap)   - 1);
-    strncpy(installedFwSnap, installedFwFilename.c_str(), sizeof(installedFwSnap) - 1);
+    char     updateUrlSnap[256]    = {};
+    char     installedTokenSnap[64] = {};
+    uint32_t intervalMinSnap       = DEFAULT_UPDATE_INTERVAL_MIN;
+    strncpy(updateUrlSnap,      cfg.updateUrl.c_str(),        sizeof(updateUrlSnap)    - 1);
+    strncpy(installedTokenSnap, installedFwToken.c_str(),     sizeof(installedTokenSnap) - 1);
     intervalMinSnap = cfg.updateIntervalMin;
 
     uint32_t intervalMs = intervalMinSnap * 60UL * 1000UL;
@@ -695,6 +707,7 @@ static void otaUpdateTask(void* pv) {
       WiFiClientSecure* sec   = nullptr;
       WiFiClient*       plain = nullptr;
       char fwFilename[128] = {};
+      char fwToken[64]     = {};
       char binUrl[256]     = {};
 
       if (http) {
@@ -720,58 +733,75 @@ static void otaUpdateTask(void* pv) {
           http->addHeader("X-SF-Uptime",   uptimeBuf);
 
           if (http->GET() == HTTP_CODE_OK) {
-            // --- NULL-GUARD: getStreamPtr() can return null if connection
-            //     dropped between GET() success and stream access.
-            //     Do NOT call http->end() in this case - the connection is
-            //     already broken and end() blocks in ROM TLS close_notify,
-            //     which starves the Core 1 watchdog (TG1WDT_SYS_RST).
             WiFiClient* s = http->getStreamPtr();
             if (!s) {
               logEvent("OTA", "null stream after GET");
-              // Skip http->end() - delete objects directly to avoid WDT
               delete http; delete sec; delete plain;
               http = nullptr; sec = nullptr; plain = nullptr;
             } else {
-              char line[256]  = {};
-              size_t lineLen  = 0;
+              char line[320] = {};
+              size_t lineLen = 0;
               unsigned long t = millis();
 
               while ((http->connected() || s->available()) && millis() - t < 8000) {
                 if (s->available()) {
                   char c = (char)s->read();
                   if (c == '\n' || c == '\r') {
+                    // Trim trailing whitespace
                     while (lineLen > 0 && (line[lineLen-1] == ' ' || line[lineLen-1] == '\t'))
                       lineLen--;
                     line[lineLen] = '\0';
 
+                    // Trim leading whitespace
                     const char* trimmed = line;
                     while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
 
                     if (lineLen > 0 && strstr(trimmed, HOSTNAME) != nullptr) {
-                      if (strncmp(trimmed, "http", 4) == 0) {
-                        strncpy(binUrl, trimmed, sizeof(binUrl) - 1);
-                        const char* lastSlash = strrchr(trimmed, '/');
-                        if (lastSlash) {
-                          strncpy(fwFilename, lastSlash + 1, sizeof(fwFilename) - 1);
-                        } else {
-                          strncpy(fwFilename, trimmed, sizeof(fwFilename) - 1);
-                        }
-                      } else {
-                        strncpy(fwFilename, trimmed, sizeof(fwFilename) - 1);
-                        char baseDir[256] = {};
-                        const char* lastSlash = strrchr(updateUrlSnap, '/');
-                        if (lastSlash && (lastSlash - updateUrlSnap) > 7) {
-                          size_t baseLen = (size_t)(lastSlash - updateUrlSnap) + 1;
-                          if (baseLen < sizeof(baseDir)) {
-                            memcpy(baseDir, updateUrlSnap, baseLen);
-                            baseDir[baseLen] = '\0';
-                          }
-                        } else {
-                          strncpy(baseDir, updateUrlSnap, sizeof(baseDir) - 1);
-                        }
-                        snprintf(binUrl, sizeof(binUrl), "%sfirmware/%s", baseDir, trimmed);
+                      // Parse up to 3 space-separated fields:
+                      // field[0] = hostname (already matched)
+                      // field[1] = filename or full URL
+                      // field[2] = token (optional but required for skip logic)
+                      char fields[3][256] = {};
+                      int  fieldCount = 0;
+                      const char* p = trimmed;
+                      while (*p && fieldCount < 3) {
+                        while (*p == ' ' || *p == '\t') p++;
+                        if (!*p) break;
+                        size_t fi = 0;
+                        while (*p && *p != ' ' && *p != '\t' && fi < 255)
+                          fields[fieldCount][fi++] = *p++;
+                        fields[fieldCount][fi] = '\0';
+                        fieldCount++;
                       }
-                      logEvent("OTA", "found bin %s", binUrl);
+
+                      // field[1] = filename or URL, field[2] = token
+                      if (fieldCount >= 2) {
+                        const char* fileOrUrl = fields[1];
+                        if (strncmp(fileOrUrl, "http", 4) == 0) {
+                          strncpy(binUrl, fileOrUrl, sizeof(binUrl) - 1);
+                          const char* lastSlash = strrchr(fileOrUrl, '/');
+                          strncpy(fwFilename,
+                                  lastSlash ? lastSlash + 1 : fileOrUrl,
+                                  sizeof(fwFilename) - 1);
+                        } else {
+                          strncpy(fwFilename, fileOrUrl, sizeof(fwFilename) - 1);
+                          char baseDir[256] = {};
+                          const char* lastSlash = strrchr(updateUrlSnap, '/');
+                          if (lastSlash && (lastSlash - updateUrlSnap) > 7) {
+                            size_t baseLen = (size_t)(lastSlash - updateUrlSnap) + 1;
+                            if (baseLen < sizeof(baseDir)) {
+                              memcpy(baseDir, updateUrlSnap, baseLen);
+                              baseDir[baseLen] = '\0';
+                            }
+                          } else {
+                            strncpy(baseDir, updateUrlSnap, sizeof(baseDir) - 1);
+                          }
+                          snprintf(binUrl, sizeof(binUrl), "%sfirmware/%s", baseDir, fileOrUrl);
+                        }
+                        if (fieldCount >= 3)
+                          strncpy(fwToken, fields[2], sizeof(fwToken) - 1);
+                        logEvent("OTA", "manifest: file=%s token=%s", fwFilename, fwToken[0] ? fwToken : "(none)");
+                      }
                       break;
                     }
                     lineLen = 0;
@@ -789,21 +819,35 @@ static void otaUpdateTask(void* pv) {
             logEvent("OTA", "manifest fetch failed");
           }
         }
-        // Only call http->end() if not already deleted in the null-stream path
         if (http) { http->end(); delete http; delete sec; delete plain; }
       }
 
       if (binUrl[0] != '\0') {
-        if (fwFilename[0] != '\0' && strcmp(fwFilename, installedFwSnap) == 0) {
-          logEvent("OTA", "already current (%s), skipping", fwFilename);
+        // Skip if token matches - this is the primary update gate.
+        // If no token in manifest, fall back to filename comparison.
+        bool alreadyCurrent = false;
+        if (fwToken[0] != '\0' && installedTokenSnap[0] != '\0') {
+          alreadyCurrent = (strcmp(fwToken, installedTokenSnap) == 0);
+        } else if (fwToken[0] == '\0') {
+          // Old-style manifest (no token) - compare filename as before
+          char installedFileSnap[128] = {};
+          strncpy(installedFileSnap, installedFwFilename.c_str(), sizeof(installedFileSnap) - 1);
+          alreadyCurrent = (fwFilename[0] != '\0' && strcmp(fwFilename, installedFileSnap) == 0);
+        }
+
+        if (alreadyCurrent) {
+          logEvent("OTA", "already current (token=%s), skipping", fwToken[0] ? fwToken : fwFilename);
         } else {
           otaInProgress = true;
-          logEvent("OTA", "downloading firmware %s", binUrl);
+          logEvent("OTA", "update needed token=%s->%s, downloading %s",
+                   installedTokenSnap[0] ? installedTokenSnap : "(none)",
+                   fwToken[0]            ? fwToken            : "(none)",
+                   binUrl);
 
           HTTPClient*       fhttp  = new HTTPClient();
           WiFiClientSecure* fsec   = nullptr;
           WiFiClient*       fplain = nullptr;
-          int32_t fwSize   = -1;
+          int32_t     fwSize   = -1;
           WiFiClient* fwStream = nullptr;
           bool fetchOk = false;
 
@@ -850,7 +894,7 @@ static void otaUpdateTask(void* pv) {
               }
               xSemaphoreGive(drawMutex);
               if (flashed) {
-                saveInstalledFw(String(fwFilename));
+                saveInstalledFw(fwFilename, fwToken[0] ? fwToken : fwFilename);
                 fhttp->end(); delete fhttp; delete fsec; delete fplain;
                 delay(1500);
                 ESP.restart();
@@ -883,9 +927,9 @@ static void startOtaTask() {
     otaUpdateTask, "ota_check", 16384, nullptr,
     1, &otaTaskHandle, 1
   );
-  logEvent("OTA", "task started interval=%umin url=%s fw=%s",
+  logEvent("OTA", "task started interval=%umin url=%s token=%s",
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(),
-           installedFwFilename.length() ? installedFwFilename.c_str() : "none");
+           installedFwToken.length() ? installedFwToken.c_str() : "none");
 }
 
 // ---------------------- MQTT ----------------------
@@ -1016,7 +1060,7 @@ static void handleStatusJson() {
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
   unsigned long uptimeMs = millis() - bootTimeMs;
   String j;
-  j.reserve(600);
+  j.reserve(640);
   j += "{";
   j += "\"hostname\":\""; appendJsonEscaped(j, HOSTNAME); j += "\",";
   j += "\"mac\":\"";      appendJsonEscaped(j, MAC_STR);  j += "\",";
@@ -1033,6 +1077,7 @@ static void handleStatusJson() {
   j += "\"lastLogSeq\":";     j += String(logSeq);          j += ",";
   j += "\"otaInProgress\":";  j += (otaInProgress ? "true" : "false"); j += ",";
   j += "\"installedFw\":\"";  appendJsonEscaped(j, installedFwFilename); j += "\",";
+  j += "\"installedFwToken\":\""; appendJsonEscaped(j, installedFwToken); j += "\",";
   j += "\"uptimeMs\":";       j += String(uptimeMs);        j += ",";
   j += "\"screenW\":"; j += String(SCREEN_W); j += ",";
   j += "\"screenH\":"; j += String(SCREEN_H);
