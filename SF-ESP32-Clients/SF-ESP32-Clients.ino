@@ -577,6 +577,8 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     if (n <= 0) break;
     readTotal += (size_t)n;
     lastProgressMs = millis();
+    // Exit as soon as we have all declared bytes - don't wait for connection close
+    if (total > 0 && readTotal >= (size_t)total) break;
   }
 
   http->end(); delete http; delete secureClient; delete plainClient;

@@ -97,9 +97,12 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   </footer>
 <script>
 let lastImgStamp = 0;
-function formatTimestamp(ms) {
-  if (!ms) return null;
-  return new Date(ms).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
+function formatTimestamp(deviceUptimeMs, lastDownloadMs) {
+  // lastDownloadMs is millis() since boot on the device, NOT a Unix timestamp.
+  // Reconstruct wall-clock time: browser now minus device uptime plus device-relative stamp.
+  if (!lastDownloadMs) return null;
+  var wallMs = Date.now() - deviceUptimeMs + lastDownloadMs;
+  return new Date(wallMs).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
 }
 async function poll() {
   try {
@@ -109,7 +112,7 @@ async function poll() {
     if (s.mac)      document.getElementById("f_mac").textContent  = "MAC: " +s.mac;
     if (s.hostname) document.getElementById("f_host").textContent = "Host: "+s.hostname;
     if (s.lastDownloadMs) {
-      const ts = formatTimestamp(s.lastDownloadMs);
+      const ts = formatTimestamp(s.uptimeMs, s.lastDownloadMs);
       if (ts) document.getElementById("last-updated").textContent = "Last updated: "+ts;
       if (s.lastDownloadMs !== lastImgStamp) {
         lastImgStamp = s.lastDownloadMs;
