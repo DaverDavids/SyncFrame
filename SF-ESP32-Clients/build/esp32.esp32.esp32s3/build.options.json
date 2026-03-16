@@ -3,7 +3,7 @@
   "builtInLibrariesFolders": "C:\\Users\\rawdr\\AppData\\Local\\Arduino15\\libraries",
   "compiler.optimization_flags": "-Os",
   "customBuildProperties": "",
-  "fqbn": "esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=4M,PartitionScheme=min_spiffs,DebugLevel=none,PSRAM=opi,LoopCore=0,EventsCore=1,EraseFlash=all,JTAGAdapter=default,ZigbeeMode=default",
+  "fqbn": "esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=4M,PartitionScheme=min_spiffs,DebugLevel=none,PSRAM=opi,LoopCore=0,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default",
   "hardwareFolders": "C:\\Users\\rawdr\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.7,C:\\Users\\rawdr\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.7",
   "otherLibrariesFolders": "c:\\Users\\rawdr\\Documents\\Arduino\\libraries",
   "sketchLocation": "C:\\Users\\rawdr\\Documents\\GitHub\\SyncFrame\\SF-ESP32-Clients"
