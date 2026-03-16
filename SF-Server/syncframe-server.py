@@ -174,18 +174,26 @@ def _save_clients(clients):
 def _rebuild_manifest():
     """Write ota_firmware/manifest.txt based on current client->firmware mappings.
 
-    Each line contains ONLY the firmware filename (named <hostname>.bin).
-    The ESP32 scans for lines containing its hostname, then uses that line
-    as the filename to fetch from /syncframe/firmware/<filename>.
+    Each line is three space-separated fields:
+        <hostname>  <filename>  <token>
+
+    <token> is a Unix timestamp (seconds) generated when the firmware is
+    uploaded.  The ESP32 stores the last token it flashed in NVS ("fwtoken")
+    and skips the download if the manifest token matches, even when the
+    filename is unchanged.  If a client entry has no token yet (legacy data)
+    the filename alone is written so old firmware still works.
     """
     clients = _load_clients()
     lines = []
     for hostname, info in clients.items():
         fw = info.get("firmware")
         if fw:
-            # fw is already named "<hostname>.bin" so the ESP32 hostname scan
-            # on the line will match, and the full line IS the filename to fetch.
-            lines.append(fw)
+            token = info.get("fw_token", "")
+            if token:
+                lines.append(f"{hostname} {fw} {token}")
+            else:
+                # Legacy fallback: filename only (2-field format the ESP32 understands)
+                lines.append(fw)
     manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
     with open(manifest_path, "w") as f:
         f.write("\n".join(lines) + ("\n" if lines else ""))
@@ -845,7 +853,7 @@ def index():
                     uploadButton.style.border = '2px solid rgba(0, 255, 100, 1)';
                     uploadButton.style.transform = 'scale(1.1)';
                     uploadButton.style.boxShadow = '0 0 20px rgba(0, 255, 100, 0.6)';
-                    uploadButton.textContent = '✓ Click to Upload!';
+                    uploadButton.textContent = '\u2713 Click to Upload!';
                 } else {
                     uploadedPhoto.src = '';
                     uploadedPhoto.style.display = 'none';
@@ -1017,12 +1025,10 @@ def serve_manifest():
         X-SF-Compiled : __DATE__ " " __TIME__  (e.g. "Mar 15 2026 11:42:07")
         X-SF-Uptime   : millis()/1000 as decimal string
 
-    Query-param fallbacks (?hostname=&compiled=&uptime=) are also accepted
-    so the URL alone can carry the info if headers are not convenient.
-
-    Manifest format: one firmware filename per line, named <hostname>.bin.
+    Manifest format: "<hostname> <filename> <token>" per line.
     The ESP32 scans each line for a substring matching its own hostname,
-    then fetches /syncframe/firmware/<that line> to perform OTA.
+    parses the filename and token, and flashes if the token differs from
+    the one stored in NVS.
     """
     hostname = (request.headers.get("X-SF-Hostname") or
                 request.args.get("hostname", "")).strip()
@@ -1135,13 +1141,59 @@ ADMIN_HTML = """
   details summary { cursor: pointer; color: var(--text-dim); font-size: 0.85em; margin-top: 10px; }
   details[open] summary { margin-bottom: 10px; }
   .uptime-dim { color: var(--text-dim); font-size: 0.8em; }
+
+  /* Drag-and-drop firmware drop zone */
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 6px;
+    padding: 16px 12px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.85em;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: var(--accent);
+    background: rgba(88,166,255,0.06);
+    color: var(--text);
+  }
+  .drop-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .drop-zone .drop-icon { font-size: 1.4em; display: block; margin-bottom: 4px; }
+  .drop-zone .drop-filename {
+    display: inline-block; margin-top: 6px;
+    color: var(--accent2); font-weight: 600; font-size: 0.9em;
+  }
+
+  /* Device remove button — lives in its own cell, separated from firmware actions */
+  .remove-cell {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .btn-remove {
+    color: var(--text-dim);
+    border-color: transparent;
+    font-size: 0.78em;
+    padding: 3px 8px;
+    opacity: 0.55;
+    transition: opacity 0.15s, color 0.15s;
+  }
+  .btn-remove:hover {
+    opacity: 1;
+    color: var(--warn);
+    border-color: rgba(248,81,73,0.3);
+    background: rgba(248,81,73,0.06);
+  }
 </style>
 </head>
 <body>
 <h1>SyncFrame <span>OTA Admin</span></h1>
 <p class="subtitle">
-  Manage remote firmware updates &nbsp;·&nbsp;
-  <a href="{{ home_url }}">← Back to Photo Viewer</a>
+  Manage remote firmware updates &nbsp;&middot;&nbsp;
+  <a href="{{ home_url }}">&#8592; Back to Photo Viewer</a>
 </p>
 
 {% if flash_ok %}<div class="flash flash-ok">{{ flash_ok }}</div>{% endif %}
@@ -1185,15 +1237,16 @@ ADMIN_HTML = """
         <th>Compiled</th>
         <th>Uptime</th>
         <th>Pending Firmware</th>
-        <th>Actions</th>
+        <th>Firmware</th>
+        <th></th>
       </tr>
     </thead>
     <tbody>
     {% for hostname, info in clients.items() %}
       <tr>
         <td class="mono">{{ hostname }}</td>
-        <td class="mono">{{ info.mac or '—' }}</td>
-        <td>{{ info.label or '—' }}</td>
+        <td class="mono">{{ info.mac or '&mdash;' }}</td>
+        <td>{{ info.label or '&mdash;' }}</td>
         <td>
           {% if info.last_seen %}
             <span class="badge {{ 'badge-green' if info.fresh else 'badge-gray' }}">
@@ -1207,14 +1260,14 @@ ADMIN_HTML = """
           {% if info.compiled %}
             <span class="badge badge-yellow mono">{{ info.compiled }}</span>
           {% else %}
-            <span class="badge badge-gray">—</span>
+            <span class="badge badge-gray">&mdash;</span>
           {% endif %}
         </td>
         <td>
           {% if info.uptime %}
             <span class="uptime-dim mono">{{ info.uptime_human }}</span>
           {% else %}
-            <span class="badge badge-gray">—</span>
+            <span class="badge badge-gray">&mdash;</span>
           {% endif %}
         </td>
         <td>
@@ -1224,30 +1277,44 @@ ADMIN_HTML = """
             <span class="badge badge-gray">None</span>
           {% endif %}
         </td>
-        <td>
-          <!-- Upload firmware for this client -->
-          <details>
-            <summary>Upload firmware</summary>
-            <form method="POST" action="{{ upload_fw_url }}" enctype="multipart/form-data"
-                  style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px;">
-              <input type="hidden" name="hostname" value="{{ hostname }}">
-              <input type="file" name="firmware" accept=".bin" required style="flex:1;min-width:180px;">
-              <button class="btn btn-primary btn-sm" type="submit">Upload .bin</button>
-            </form>
-          </details>
+
+        <!-- Firmware actions: upload drop zone + optional clear -->
+        <td style="min-width:200px">
+          <form method="POST" action="{{ upload_fw_url }}" enctype="multipart/form-data"
+                id="fw-form-{{ loop.index }}">
+            <input type="hidden" name="hostname" value="{{ hostname }}">
+            <div class="drop-zone" id="dz-{{ loop.index }}"
+                 ondragover="dzOver(event,'dz-{{ loop.index }}')"
+                 ondragleave="dzLeave('dz-{{ loop.index }}')"
+                 ondrop="dzDrop(event,'dz-{{ loop.index }}','fw-form-{{ loop.index }}','fn-{{ loop.index }}')"
+                 onclick="this.querySelector('input[type=file]').click()">
+              <span class="drop-icon">&#128229;</span>
+              Drop .bin or click to browse
+              <span class="drop-filename" id="fn-{{ loop.index }}"></span>
+              <input type="file" name="firmware" accept=".bin" required
+                     onchange="dzPicked(this,'dz-{{ loop.index }}','fn-{{ loop.index }}','fw-form-{{ loop.index }}')">
+            </div>
+          </form>
           {% if info.firmware %}
-          &nbsp;
-          <form method="POST" action="{{ clear_fw_url }}" style="display:inline;">
+          <form method="POST" action="{{ clear_fw_url }}" style="margin-top:6px;">
             <input type="hidden" name="hostname" value="{{ hostname }}">
             <button class="btn btn-sm btn-danger" type="submit"
-                    onclick="return confirm('Clear firmware for {{ hostname }}?')">Clear fw</button>
+                    onclick="return confirm('Clear pending firmware for {{ hostname }}?')">
+              &#10007; Clear pending fw
+            </button>
           </form>
           {% endif %}
-          &nbsp;
-          <form method="POST" action="{{ remove_url }}" style="display:inline;">
+        </td>
+
+        <!-- Remove device row — visually separated in its own column -->
+        <td class="remove-cell">
+          <form method="POST" action="{{ remove_url }}">
             <input type="hidden" name="hostname" value="{{ hostname }}">
-            <button class="btn btn-sm btn-danger" type="submit"
-                    onclick="return confirm('Remove {{ hostname }}?')">Remove</button>
+            <button class="btn btn-sm btn-remove" type="submit"
+                    title="Remove this device entry"
+                    onclick="return confirm('Remove device entry for {{ hostname }}? This only deletes the record here.')">
+              &#128465; Remove device
+            </button>
           </form>
         </td>
       </tr>
@@ -1275,6 +1342,41 @@ ADMIN_HTML = """
 </div>
 
 <script>
+  // Drop zone helpers
+  function dzOver(e, id) {
+    e.preventDefault();
+    document.getElementById(id).classList.add('dragover');
+  }
+  function dzLeave(id) {
+    document.getElementById(id).classList.remove('dragover');
+  }
+  function dzDrop(e, dzId, formId, fnId) {
+    e.preventDefault();
+    dzLeave(dzId);
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.bin')) {
+      alert('Only .bin firmware files are accepted.');
+      return;
+    }
+    // Inject the dropped file into the hidden input via DataTransfer
+    const form = document.getElementById(formId);
+    const input = form.querySelector('input[type=file]');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    document.getElementById(fnId).textContent = file.name;
+    // Auto-submit after a brief moment so user sees the filename flash
+    setTimeout(() => form.submit(), 300);
+  }
+  function dzPicked(input, dzId, fnId, formId) {
+    if (!input.files.length) return;
+    const name = input.files[0].name;
+    document.getElementById(fnId).textContent = name;
+    // Auto-submit once a file is picked via the file dialog too
+    setTimeout(() => document.getElementById(formId).submit(), 300);
+  }
+
   setInterval(() => { location.reload(); }, 60000);
 </script>
 </body>
@@ -1437,6 +1539,10 @@ def admin_upload_firmware():
     fw_file.save(dest)
     logging.info("Firmware saved for %s -> %s", hostname, dest)
 
+    # Generate a Unix-timestamp token so the ESP32 can detect this is a new
+    # binary even if the filename hasn't changed.
+    token = str(int(time.time()))
+
     with _ota_lock:
         clients = _load_clients()
         if hostname not in clients:
@@ -1446,6 +1552,7 @@ def admin_upload_firmware():
                 "compiled": None, "uptime": None,
             }
         clients[hostname]["firmware"] = filename
+        clients[hostname]["fw_token"] = token
         _save_clients(clients)
         _rebuild_manifest()
 
@@ -1463,6 +1570,7 @@ def admin_clear_firmware():
         clients = _load_clients()
         if hostname in clients:
             clients[hostname]["firmware"] = None
+            clients[hostname]["fw_token"] = None
             _save_clients(clients)
             _rebuild_manifest()
 
