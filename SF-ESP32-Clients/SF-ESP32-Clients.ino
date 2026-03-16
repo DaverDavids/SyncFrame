@@ -627,6 +627,24 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
+  // If the new image is identical to current, don't rotate buffers.
+  // Rotating would destroy the real previous photo, making touch-toggle
+  // show the same image both ways.
+  if (currentJpg && newLen == currentJpgLen &&
+      memcmp(newBuf, currentJpg, newLen) == 0) {
+    free(newBuf);
+    lastDownloadOk  = true;
+    lastDownloadErr = "";
+    logEvent("PHOTO", "same image, no rotation bytes=%u", (unsigned)newLen);
+    // Redraw current in case screen was showing last
+    showingLast = false;
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      board_draw_jpeg(currentJpg, currentJpgLen);
+      xSemaphoreGive(drawMutex);
+    }
+    return true;
+  }
+
   freeBuf(lastJpg, lastJpgLen);
   lastJpg       = currentJpg;
   lastJpgLen    = currentJpgLen;
@@ -693,7 +711,6 @@ static void otaUpdateTask(void* pv) {
         }
 
         if (ok) {
-          // Build X-SF-Compiled header from literals only - no String heap
           char compiledBuf[32];
           snprintf(compiledBuf, sizeof(compiledBuf), "%s %s", __DATE__, __TIME__);
           char uptimeBuf[16];
@@ -715,7 +732,6 @@ static void otaUpdateTask(void* pv) {
               delete http; delete sec; delete plain;
               http = nullptr; sec = nullptr; plain = nullptr;
             } else {
-              // --- char[] line accumulator - zero heap allocation ---
               char line[256]  = {};
               size_t lineLen  = 0;
               unsigned long t = millis();
@@ -724,18 +740,15 @@ static void otaUpdateTask(void* pv) {
                 if (s->available()) {
                   char c = (char)s->read();
                   if (c == '\n' || c == '\r') {
-                    // trim trailing whitespace in-place
                     while (lineLen > 0 && (line[lineLen-1] == ' ' || line[lineLen-1] == '\t'))
                       lineLen--;
                     line[lineLen] = '\0';
 
-                    // trim leading whitespace
                     const char* trimmed = line;
                     while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
 
                     if (lineLen > 0 && strstr(trimmed, HOSTNAME) != nullptr) {
                       if (strncmp(trimmed, "http", 4) == 0) {
-                        // full URL on the line
                         strncpy(binUrl, trimmed, sizeof(binUrl) - 1);
                         const char* lastSlash = strrchr(trimmed, '/');
                         if (lastSlash) {
@@ -744,9 +757,7 @@ static void otaUpdateTask(void* pv) {
                           strncpy(fwFilename, trimmed, sizeof(fwFilename) - 1);
                         }
                       } else {
-                        // bare filename - build URL from manifest base
                         strncpy(fwFilename, trimmed, sizeof(fwFilename) - 1);
-                        // find last '/' in updateUrlSnap to get base dir
                         char baseDir[256] = {};
                         const char* lastSlash = strrchr(updateUrlSnap, '/');
                         if (lastSlash && (lastSlash - updateUrlSnap) > 7) {
@@ -763,7 +774,6 @@ static void otaUpdateTask(void* pv) {
                       logEvent("OTA", "found bin %s", binUrl);
                       break;
                     }
-                    // reset for next line
                     lineLen = 0;
                     line[0] = '\0';
                     t = millis();
@@ -779,7 +789,7 @@ static void otaUpdateTask(void* pv) {
             logEvent("OTA", "manifest fetch failed");
           }
         }
-        // Only call http->end() if http was not already deleted in the null-stream path
+        // Only call http->end() if not already deleted in the null-stream path
         if (http) { http->end(); delete http; delete sec; delete plain; }
       }
 
