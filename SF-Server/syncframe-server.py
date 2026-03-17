@@ -354,10 +354,10 @@ def generate_self_signed_cert_py(
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(
-            x509.datetime.datetime.utcnow() - x509.datetime.timedelta(days=1)
+            datetime.utcnow() - timedelta(days=1)
         )
         .not_valid_after(
-            x509.datetime.datetime.utcnow() + x509.datetime.timedelta(days=days_valid)
+            datetime.utcnow() + timedelta(days=days_valid)
         )
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
@@ -940,7 +940,7 @@ def index():
                     uploadButton.style.border = '2px solid rgba(0, 255, 100, 1)';
                     uploadButton.style.transform = 'scale(1.1)';
                     uploadButton.style.boxShadow = '0 0 20px rgba(0, 255, 100, 0.6)';
-                    uploadButton.textContent = '\u2713 Click to Upload!';
+                    uploadButton.textContent = '\\u2713 Click to Upload!';
                 } else {
                     uploadedPhoto.src = '';
                     uploadedPhoto.style.display = 'none';
