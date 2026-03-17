@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 import ssl
 import subprocess
@@ -18,6 +19,8 @@ import schedule
 from flask import (Blueprint, Flask, Response, redirect,
                    render_template_string, request, send_from_directory,
                    session, url_for, jsonify)
+from flask.sessions import SecureCookieSessionInterface
+from itsdangerous import URLSafeTimedSerializer, BadSignature
 from PIL import Image, ImageEnhance, ImageSequence
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -35,21 +38,37 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
+# ---------------------------------------------------------------------------
+# Data directory - all runtime-generated files live here so they can be
+# mapped to a persistent host volume when running in Docker.
+# ---------------------------------------------------------------------------
+DATA_DIR = os.path.join(os.getcwd(), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Mosquitto sub-directory (certs, pwfile, pid, log, and mosquitto.conf)
+MOSQ_DIR = os.path.join(DATA_DIR, "mosq")
+os.makedirs(MOSQ_DIR, exist_ok=True)
+
+# OTA sub-directory (ota_clients.json + firmware bins + manifest.txt)
+OTA_DIR = os.path.join(DATA_DIR, "ota")
+os.makedirs(OTA_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------------------
 # Load or create configuration
-CONFIG_PATH = os.path.join(os.getcwd(), "syncframe-server.conf")
+# ---------------------------------------------------------------------------
+CONFIG_PATH = os.path.join(DATA_DIR, "syncframe-server.conf")
 config = configparser.ConfigParser()
 default_config = {
     "server": {
         "host": "0.0.0.0",
         "port": "9369",
-        # default to true as requested
         "use_https": "true",
-        "certfile": "./cert.pem",
-        "keyfile": "./key.pem",
-        # default prefix where the app is exposed (reverse tunnel subdirectory)
+        "certfile": "./data/cert.pem",
+        "keyfile": "./data/key.pem",
         "url_prefix": "/syncframe",
         "username": "admin",
         "password": "changeme",
+        "secret_key": "",  # empty = auto-generated on first run
     },
     "mqtt": {
         "host": "127.0.0.1",
@@ -59,7 +78,7 @@ default_config = {
         "password": "mqttpass",
     },
     "watcher": {
-        "file_to_watch": "./photo.jpg",
+        "file_to_watch": "./data/photo.jpg",
     },
     "image": {
         "max_width": "1920",
@@ -89,7 +108,24 @@ else:
             config.write(cfgfile)
         logging.info(f"Configuration file {CONFIG_PATH} updated with missing defaults.")
 
+# ---------------------------------------------------------------------------
+# Secret key - generate once and persist in config
+# ---------------------------------------------------------------------------
+# The old hardcoded key is kept so existing browser sessions are accepted and
+# transparently re-signed with the new key on the user's next request.
+OLD_SECRET_KEY = "syncframe-secret-key-change-me-in-production"
+
+secret_key_value = config.get("server", "secret_key", fallback="").strip()
+if not secret_key_value:
+    secret_key_value = secrets.token_hex(32)
+    config.set("server", "secret_key", secret_key_value)
+    with open(CONFIG_PATH, "w") as cfgfile:
+        config.write(cfgfile)
+    logging.info("Generated new SECRET_KEY and saved to config.")
+
+# ---------------------------------------------------------------------------
 # Read configuration values
+# ---------------------------------------------------------------------------
 SERVER_HOST = config.get("server", "host", fallback=default_config["server"]["host"])
 SERVER_PORT = config.getint(
     "server", "port", fallback=int(default_config["server"]["port"])
@@ -144,14 +180,10 @@ RESOLUTIONS = [
 
 # ---------------------------------------------------------------------------
 # OTA / Admin state
-# Stored in ota_clients.json alongside the server config.
-# Schema: { "hostname": { "mac": str, "label": str, "last_seen": iso8601|null,
-#                         "firmware": filename|null, "compiled": str|null,
-#                         "uptime": str|null } }
+# ota_clients.json and firmware bins live together in OTA_DIR.
 # ---------------------------------------------------------------------------
-OTA_CLIENTS_PATH = os.path.join(os.getcwd(), "ota_clients.json")
-OTA_FIRMWARE_DIR = os.path.join(os.getcwd(), "ota_firmware")
-os.makedirs(OTA_FIRMWARE_DIR, exist_ok=True)
+OTA_CLIENTS_PATH = os.path.join(OTA_DIR, "ota_clients.json")
+OTA_FIRMWARE_DIR = OTA_DIR  # bins and manifest.txt share the same directory
 
 _ota_lock = threading.Lock()
 
@@ -172,7 +204,7 @@ def _save_clients(clients):
 
 
 def _rebuild_manifest():
-    """Write ota_firmware/manifest.txt based on current client->firmware mappings.
+    """Write ota/manifest.txt based on current client->firmware mappings.
 
     Each line is three space-separated fields:
         <hostname>  <filename>  <token>
@@ -192,7 +224,6 @@ def _rebuild_manifest():
             if token:
                 lines.append(f"{hostname} {fw} {token}")
             else:
-                # Legacy fallback: filename only (2-field format the ESP32 understands)
                 lines.append(fw)
     manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
     with open(manifest_path, "w") as f:
@@ -200,15 +231,43 @@ def _rebuild_manifest():
     logging.info("manifest.txt rebuilt with %d entries", len(lines))
 
 
-# Flask web app setup
+# ---------------------------------------------------------------------------
+# Flask app setup
+# ---------------------------------------------------------------------------
 app = Flask(__name__)
-app.secret_key = os.environ.get(
-    "SECRET_KEY", "syncframe-secret-key-change-me-in-production"
-)
+app.secret_key = secret_key_value
 bp = Blueprint("syncframe", __name__)
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "heic", "webp", "gif"}
 ALLOWED_FIRMWARE_EXTENSIONS = {"bin"}
-UPLOAD_FOLDER = os.getcwd()
+UPLOAD_FOLDER = DATA_DIR
+
+
+# ---------------------------------------------------------------------------
+# Dual-key session interface
+# Accepts sessions signed with OLD_SECRET_KEY and re-signs them with the
+# current key transparently so existing users are not logged out.
+# ---------------------------------------------------------------------------
+class DualKeySessionInterface(SecureCookieSessionInterface):
+    def open_session(self, app, request):
+        # Try primary (new) key first via the normal path
+        sess = super().open_session(app, request)
+        # SecureCookieSessionInterface returns an empty (but non-None) session
+        # when decoding fails, so we check if 'authenticated' is missing AND
+        # a cookie was actually present before trying the fallback.
+        cookie_name = self.get_cookie_name(app)
+        raw_cookie = request.cookies.get(cookie_name)
+        if raw_cookie and not sess.get("authenticated"):
+            try:
+                s = URLSafeTimedSerializer(OLD_SECRET_KEY, salt="cookie-session")
+                data = s.loads(raw_cookie)
+                logging.info("Session migrated from old secret key to new key.")
+                return self.session_class(data)
+            except BadSignature:
+                pass
+        return sess
+
+
+app.session_interface = DualKeySessionInterface()
 
 
 def check_auth(username, password):
@@ -216,9 +275,8 @@ def check_auth(username, password):
 
 
 def create_mqtt_password_file():
-    """Create MQTT password file."""
-    mosq_dir = os.path.join(os.getcwd(), "mosq")
-    pwfile = os.path.join(mosq_dir, "pwfile")
+    """Create MQTT password file inside MOSQ_DIR."""
+    pwfile = os.path.join(MOSQ_DIR, "pwfile")
 
     file_is_empty = os.path.exists(pwfile) and os.path.getsize(pwfile) == 0
 
@@ -399,25 +457,24 @@ def fix_image_orientation(image):
 
 
 def generate_mqtt_certificates():
-    """Generate CA and server certificates for MQTT broker in ./mosq/ directory."""
-    mosq_dir = os.path.join(os.getcwd(), "mosq")
-    os.makedirs(mosq_dir, exist_ok=True)
+    """Generate CA and server certificates for MQTT broker in MOSQ_DIR."""
+    os.makedirs(MOSQ_DIR, exist_ok=True)
 
-    ca_key = os.path.join(mosq_dir, "ca.key")
-    ca_crt = os.path.join(mosq_dir, "ca.crt")
-    server_key = os.path.join(mosq_dir, "server.key")
-    server_crt = os.path.join(mosq_dir, "server.crt")
-    server_csr = os.path.join(mosq_dir, "server.csr")
+    ca_key = os.path.join(MOSQ_DIR, "ca.key")
+    ca_crt = os.path.join(MOSQ_DIR, "ca.crt")
+    server_key = os.path.join(MOSQ_DIR, "server.key")
+    server_crt = os.path.join(MOSQ_DIR, "server.crt")
+    server_csr = os.path.join(MOSQ_DIR, "server.csr")
 
     if (
         os.path.exists(ca_crt)
         and os.path.exists(server_crt)
         and os.path.exists(server_key)
     ):
-        logging.info("MQTT certificates already exist in ./mosq/")
+        logging.info("MQTT certificates already exist in %s", MOSQ_DIR)
         return
 
-    logging.info("Generating MQTT certificates in ./mosq/...")
+    logging.info("Generating MQTT certificates in %s...", MOSQ_DIR)
 
     try:
         subprocess.check_call(
@@ -478,7 +535,7 @@ def generate_mqtt_certificates():
         if os.path.exists(server_csr):
             os.remove(server_csr)
 
-        logging.info("MQTT certificates generated successfully in ./mosq/")
+        logging.info("MQTT certificates generated successfully in %s", MOSQ_DIR)
 
     except Exception as e:
         logging.error(f"Failed to generate MQTT certificates: {e}")
@@ -570,7 +627,7 @@ def send_mqtt_message(message):
     logging.info("Sending MQTT message: %s", message)
     client = mqtt.Client()
 
-    ca_crt = os.path.join(os.getcwd(), "mosq", "ca.crt")
+    ca_crt = os.path.join(MOSQ_DIR, "ca.crt")
 
     if os.path.exists(ca_crt):
         try:
@@ -600,9 +657,10 @@ def desaturate_image():
         img = Image.open(WATCH_FILE)
         converter = ImageEnhance.Color(img)
         img = converter.enhance(0.66)
-        img.save("photo-changed.jpg")
+        changed_path = os.path.join(DATA_DIR, "photo-changed.jpg")
+        img.save(changed_path)
         logging.info(
-            "Desaturated %s by 34%% and saved to photo-changed.jpg", WATCH_FILE
+            "Desaturated %s by 34%% and saved to %s", WATCH_FILE, changed_path
         )
         finalize_changes(img)
     except Exception as e:
@@ -611,8 +669,9 @@ def desaturate_image():
 
 def finalize_changes(img=None):
     try:
-        shutil.copy("photo-changed.jpg", WATCH_FILE)
-        logging.info("Copied photo-changed.jpg to %s", WATCH_FILE)
+        changed_path = os.path.join(DATA_DIR, "photo-changed.jpg")
+        shutil.copy(changed_path, WATCH_FILE)
+        logging.info("Copied %s to %s", changed_path, WATCH_FILE)
         generate_thumbnails(source_img=img)
     except Exception as e:
         logging.error(f"Error in finalize_changes: {e}")
@@ -623,6 +682,34 @@ def schedule_desaturation():
     while True:
         schedule.run_pending()
         time.sleep(1)
+
+
+def write_mosquitto_conf():
+    """Write mosquitto.conf into MOSQ_DIR with absolute paths so Mosquitto
+    can be launched from any working directory."""
+    conf_path = os.path.join(MOSQ_DIR, "mosquitto.conf")
+    if os.path.exists(conf_path):
+        return  # already written; don't overwrite customisations
+    content = f"""# Auto-generated by syncframe-server.py
+# Edit this file to customise Mosquitto. It will not be overwritten once created.
+
+per_listener_settings true
+pid_file {os.path.join(MOSQ_DIR, 'mosquitto.pid')}
+persistence false
+log_dest file {os.path.join(MOSQ_DIR, 'mosquitto.log')}
+
+listener 9368
+allow_anonymous false
+password_file {os.path.join(MOSQ_DIR, 'pwfile')}
+
+cafile {os.path.join(MOSQ_DIR, 'ca.crt')}
+certfile {os.path.join(MOSQ_DIR, 'server.crt')}
+keyfile {os.path.join(MOSQ_DIR, 'server.key')}
+tls_version tlsv1.2
+"""
+    with open(conf_path, "w") as f:
+        f.write(content)
+    logging.info("Generated mosquitto.conf at %s", conf_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1018,18 +1105,6 @@ def allowed_firmware(filename):
 
 @bp.route("/manifest.txt")
 def serve_manifest():
-    """Serve the OTA manifest and record a client check-in in one request.
-
-    The ESP32 sends device info as HTTP headers:
-        X-SF-Hostname : cfg.hostname  (e.g. "syncframe-4A2")
-        X-SF-Compiled : __DATE__ " " __TIME__  (e.g. "Mar 15 2026 11:42:07")
-        X-SF-Uptime   : millis()/1000 as decimal string
-
-    Manifest format: "<hostname> <filename> <token>" per line.
-    The ESP32 scans each line for a substring matching its own hostname,
-    parses the filename and token, and flashes if the token differs from
-    the one stored in NVS.
-    """
     hostname = (request.headers.get("X-SF-Hostname") or
                 request.args.get("hostname", "")).strip()
     compiled = (request.headers.get("X-SF-Compiled") or
@@ -1142,7 +1217,6 @@ ADMIN_HTML = """
   details[open] summary { margin-bottom: 10px; }
   .uptime-dim { color: var(--text-dim); font-size: 0.8em; }
 
-  /* Drag-and-drop firmware drop zone */
   .drop-zone {
     border: 2px dashed var(--border);
     border-radius: 6px;
@@ -1168,7 +1242,6 @@ ADMIN_HTML = """
     color: var(--accent2); font-weight: 600; font-size: 0.9em;
   }
 
-  /* Device remove button — lives in its own cell, separated from firmware actions */
   .remove-cell {
     text-align: right;
     white-space: nowrap;
@@ -1199,7 +1272,6 @@ ADMIN_HTML = """
 {% if flash_ok %}<div class="flash flash-ok">{{ flash_ok }}</div>{% endif %}
 {% if flash_err %}<div class="flash flash-err">{{ flash_err }}</div>{% endif %}
 
-<!-- Add client -->
 <div class="card">
   <h2>Register Client</h2>
   <form method="POST" action="{{ add_url }}">
@@ -1223,7 +1295,6 @@ ADMIN_HTML = """
   </form>
 </div>
 
-<!-- Client table -->
 <div class="card">
   <h2>Registered Clients</h2>
   {% if clients %}
@@ -1278,7 +1349,6 @@ ADMIN_HTML = """
           {% endif %}
         </td>
 
-        <!-- Firmware actions: upload drop zone + optional clear -->
         <td style="min-width:200px">
           <form method="POST" action="{{ upload_fw_url }}" enctype="multipart/form-data"
                 id="fw-form-{{ loop.index }}">
@@ -1306,7 +1376,6 @@ ADMIN_HTML = """
           {% endif %}
         </td>
 
-        <!-- Remove device row — visually separated in its own column -->
         <td class="remove-cell">
           <form method="POST" action="{{ remove_url }}">
             <input type="hidden" name="hostname" value="{{ hostname }}">
@@ -1326,7 +1395,6 @@ ADMIN_HTML = """
   {% endif %}
 </div>
 
-<!-- Manifest preview -->
 <div class="card">
   <h2>Current manifest.txt</h2>
   <pre class="mono" style="white-space:pre-wrap;color:var(--accent2);font-size:0.85em;">{{ manifest_content or '(empty)' }}</pre>
@@ -1342,7 +1410,6 @@ ADMIN_HTML = """
 </div>
 
 <script>
-  // Drop zone helpers
   function dzOver(e, id) {
     e.preventDefault();
     document.getElementById(id).classList.add('dragover');
@@ -1359,21 +1426,18 @@ ADMIN_HTML = """
       alert('Only .bin firmware files are accepted.');
       return;
     }
-    // Inject the dropped file into the hidden input via DataTransfer
     const form = document.getElementById(formId);
     const input = form.querySelector('input[type=file]');
     const dt = new DataTransfer();
     dt.items.add(file);
     input.files = dt.files;
     document.getElementById(fnId).textContent = file.name;
-    // Auto-submit after a brief moment so user sees the filename flash
     setTimeout(() => form.submit(), 300);
   }
   function dzPicked(input, dzId, fnId, formId) {
     if (!input.files.length) return;
     const name = input.files[0].name;
     document.getElementById(fnId).textContent = name;
-    // Auto-submit once a file is picked via the file dialog too
     setTimeout(() => document.getElementById(formId).submit(), 300);
   }
 
@@ -1385,7 +1449,6 @@ ADMIN_HTML = """
 
 
 def _humanize(iso_str):
-    """Return a human-readable relative time string from an ISO8601 UTC string."""
     if not iso_str:
         return None
     try:
@@ -1407,7 +1470,6 @@ def _humanize(iso_str):
 
 
 def _humanize_uptime(seconds_str):
-    """Convert a seconds string into a human-readable uptime like 2d 3h 4m."""
     try:
         s = int(seconds_str)
         days = s // 86400
@@ -1539,8 +1601,6 @@ def admin_upload_firmware():
     fw_file.save(dest)
     logging.info("Firmware saved for %s -> %s", hostname, dest)
 
-    # Generate a Unix-timestamp token so the ESP32 can detect this is a new
-    # binary even if the filename hasn't changed.
     token = str(int(time.time()))
 
     with _ota_lock:
@@ -1577,7 +1637,7 @@ def admin_clear_firmware():
     return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+cleared+for+{hostname}")
 
 
-# Register blueprint with or without prefix
+# Register blueprint
 if URL_PREFIX:
     app.register_blueprint(bp, url_prefix=URL_PREFIX)
 else:
@@ -1590,7 +1650,6 @@ def start_web_server():
             ensure_certificates(CERTFILE, KEYFILE)
         except Exception as e:
             logging.error("Could not ensure certificates: %s. Falling back to HTTP.", e)
-            logging.info("Starting HTTP Flask server on %s:%s", SERVER_HOST, SERVER_PORT)
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
             return
 
@@ -1607,10 +1666,8 @@ def start_web_server():
             )
         else:
             logging.error(
-                "CERTFILE or KEYFILE not found after generation. Falling back to HTTP. Cert: %s Key: %s",
-                CERTFILE, KEYFILE,
+                "CERTFILE or KEYFILE not found after generation. Falling back to HTTP."
             )
-            logging.info("Starting HTTP Flask server on %s:%s", SERVER_HOST, SERVER_PORT)
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
     else:
         logging.info(
@@ -1621,13 +1678,15 @@ def start_web_server():
 
 
 if __name__ == "__main__":
+    write_mosquitto_conf()
     generate_mqtt_certificates()
     create_mqtt_password_file()
 
+    mosq_conf = os.path.join(MOSQ_DIR, "mosquitto.conf")
     logging.info("Starting Mosquitto MQTT broker...")
     try:
         broker_process = subprocess.Popen(
-            ["/usr/sbin/mosquitto", "-c", "./mosquitto.conf", "-p", str(MQTT_PORT)],
+            ["/usr/sbin/mosquitto", "-c", mosq_conf, "-p", str(MQTT_PORT)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
