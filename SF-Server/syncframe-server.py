@@ -54,6 +54,21 @@ OTA_DIR = os.path.join(DATA_DIR, "ota")
 os.makedirs(OTA_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
+# Seed default JPGs from the script directory into data/ on first run.
+# Any .jpg sitting next to this script is copied into data/ if not already
+# present. This way the repo carries placeholder images that are never
+# overwritten once the user has their own photos in place.
+# ---------------------------------------------------------------------------
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+for _fname in os.listdir(_SCRIPT_DIR):
+    if _fname.lower().endswith(".jpg"):
+        _src = os.path.join(_SCRIPT_DIR, _fname)
+        _dst = os.path.join(DATA_DIR, _fname)
+        if not os.path.exists(_dst):
+            shutil.copy2(_src, _dst)
+            logging.info("Seeded default image: %s -> %s", _src, _dst)
+
+# ---------------------------------------------------------------------------
 # Load or create configuration
 # ---------------------------------------------------------------------------
 CONFIG_PATH = os.path.join(DATA_DIR, "syncframe-server.conf")
