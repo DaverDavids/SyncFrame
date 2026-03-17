@@ -252,26 +252,27 @@ def check_auth(username, password):
 
 
 def create_mqtt_password_file():
+    """Always regenerate the pwfile from current config so credential changes take effect."""
     pwfile = os.path.join(MOSQ_DIR, "pwfile")
-    file_is_empty = os.path.exists(pwfile) and os.path.getsize(pwfile) == 0
-    if (not os.path.exists(pwfile) or file_is_empty) and MQTT_USERNAME and MQTT_PASSWORD:
+    if not MQTT_USERNAME or not MQTT_PASSWORD:
+        logging.warning("MQTT username or password not set - skipping pwfile generation")
+        return
+    try:
+        subprocess.check_call(
+            ["mosquitto_passwd", "-c", "-b", pwfile, MQTT_USERNAME, MQTT_PASSWORD],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        os.chmod(pwfile, 0o600)
         try:
-            subprocess.check_call(
-                ["mosquitto_passwd", "-c", "-b", pwfile, MQTT_USERNAME, MQTT_PASSWORD],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            os.chmod(pwfile, 0o600)
-            try:
-                import pwd
-                mosq = pwd.getpwnam("mosquitto")
-                os.chown(pwfile, mosq.pw_uid, mosq.pw_gid)
-                logging.info(f"Created MQTT password file for user {MQTT_USERNAME}")
-            except Exception as e:
-                logging.warning(f"Could not change pwfile ownership: {e}")
-                os.chmod(pwfile, 0o644)
-                logging.info(f"Created MQTT password file for user {MQTT_USERNAME} (relaxed permissions)")
+            import pwd
+            mosq = pwd.getpwnam("mosquitto")
+            os.chown(pwfile, mosq.pw_uid, mosq.pw_gid)
         except Exception as e:
-            logging.error(f"Failed to create password file: {e}")
+            logging.warning(f"Could not change pwfile ownership: {e}")
+            os.chmod(pwfile, 0o644)
+        logging.info(f"MQTT password file (re)generated for user {MQTT_USERNAME}")
+    except Exception as e:
+        logging.error(f"Failed to create password file: {e}")
 
 
 def requires_auth(f):
