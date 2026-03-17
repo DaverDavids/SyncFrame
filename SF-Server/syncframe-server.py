@@ -6,6 +6,7 @@ import os
 import secrets
 import shutil
 import ssl
+import struct
 import subprocess
 import threading
 import time
@@ -17,8 +18,8 @@ import paho.mqtt.client as mqtt
 import pillow_heif
 import schedule
 from flask import (Blueprint, Flask, Response, redirect,
-                   render_template_string, request, send_from_directory,
-                   session, url_for, jsonify)
+                   render_template_string, request, send_file,
+                   send_from_directory, session, url_for, jsonify)
 from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from PIL import Image, ImageEnhance, ImageSequence
@@ -203,18 +204,48 @@ def _save_clients(clients):
         json.dump(clients, f, indent=2)
 
 
-def _rebuild_manifest():
-    clients = _load_clients()
-    lines = []
-    for hostname, info in clients.items():
-        fw = info.get("firmware")
-        if fw:
-            token = info.get("fw_token", "")
-            lines.append(f"{hostname} {fw} {token}" if token else fw)
-    manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
-    with open(manifest_path, "w") as f:
-        f.write("\n".join(lines) + ("\n" if lines else ""))
-    logging.info("manifest.txt rebuilt with %d entries", len(lines))
+# ---------------------------------------------------------------------------
+# Firmware binary helpers
+# ---------------------------------------------------------------------------
+
+ESP_APP_DESC_MAGIC = 0xABCD5432
+_DESC_OFFSET = 32
+_TIME_OFFSET = _DESC_OFFSET + 80   # = 112
+_DATE_OFFSET = _DESC_OFFSET + 96   # = 128
+
+_MONTHS = {
+    "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
+    "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
+    "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
+}
+
+
+def extract_compile_id(data: bytes):
+    """Extract normalized compile ID from an ESP32 app-only .bin.
+
+    Returns a string like '20260317-134905', or None if the magic doesn't
+    match or parsing fails.
+    """
+    try:
+        if len(data) < _DATE_OFFSET + 16:
+            return None
+        magic, = struct.unpack_from("<I", data, _DESC_OFFSET)
+        if magic != ESP_APP_DESC_MAGIC:
+            return None
+        time_str = data[_TIME_OFFSET:_TIME_OFFSET + 16].decode("ascii").rstrip("\x00").strip()
+        date_str = data[_DATE_OFFSET:_DATE_OFFSET + 16].decode("ascii").rstrip("\x00").strip()
+        # Parse date: "Mar 17 2026"
+        parts = date_str.split()
+        month = _MONTHS.get(parts[0])
+        if not month:
+            return None
+        day  = parts[1].zfill(2)
+        year = parts[2]
+        # Parse time: "13:49:05" -> "134905"
+        time_digits = time_str.replace(":", "")
+        return f"{year}{month}{day}-{time_digits}"
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -844,42 +875,107 @@ def allowed_firmware(filename):
 
 
 # ---------------------------------------------------------------------------
-# OTA public endpoints
+# OTA public endpoint
 # ---------------------------------------------------------------------------
 
-@bp.route("/manifest.txt")
-def serve_manifest():
-    hostname = (request.headers.get("X-SF-Hostname") or request.args.get("hostname", "")).strip()
-    compiled = (request.headers.get("X-SF-Compiled") or request.args.get("compiled", "")).strip()
-    uptime   = (request.headers.get("X-SF-Uptime")   or request.args.get("uptime",   "")).strip()
-    if hostname:
-        now_iso = datetime.now(timezone.utc).isoformat()
-        with _ota_lock:
-            clients = _load_clients()
-            if hostname not in clients:
-                clients[hostname] = {
-                    "mac": "", "label": hostname, "last_seen": now_iso,
-                    "firmware": None, "compiled": compiled or None, "uptime": uptime or None,
-                }
-                logging.info("OTA: auto-registered client %s via manifest fetch", hostname)
-            else:
-                clients[hostname]["last_seen"] = now_iso
-                if compiled: clients[hostname]["compiled"] = compiled
-                if uptime:   clients[hostname]["uptime"]   = uptime
+@bp.route("/ota")
+def ota_check():
+    hostname = (request.headers.get("X-SF-Hostname") or "").strip()
+    mac      = (request.headers.get("X-SF-MAC")      or "").strip().upper()
+    compiled = (request.headers.get("X-SF-Compiled") or "").strip()
+    uptime   = (request.headers.get("X-SF-Uptime")   or "").strip()
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with _ota_lock:
+        clients = _load_clients()
+
+        # --- entry lookup ---
+        mac_match      = None
+        hostname_match = None
+
+        if mac:
+            for k, v in clients.items():
+                if v.get("mac") == mac:
+                    mac_match = k
+                    break
+
+        for k, v in clients.items():
+            if v.get("hostname", k) == hostname and v.get("mac", "") in ("", "0000000000"):
+                hostname_match = k
+                break
+
+        matched_key = None
+
+        if mac_match is not None:
+            matched_key = mac_match
+        elif hostname_match is not None:
+            matched_key = hostname_match
+            if mac:
+                # Check MAC conflict: existing entry has a different non-empty MAC
+                existing_mac = clients[hostname_match].get("mac", "")
+                if existing_mac and existing_mac not in ("", "0000000000") and existing_mac != mac:
+                    # Duplicate device — create new entry
+                    new_key = f"{hostname}--{mac}"
+                    clients[new_key] = {
+                        "hostname": hostname, "mac": mac, "label": new_key,
+                        "last_seen": now_iso, "compiled": compiled or None,
+                        "uptime": uptime or None, "firmware": None,
+                        "fw_compile_id": None, "last_flashed": None,
+                    }
+                    matched_key = new_key
+                else:
+                    clients[hostname_match]["mac"] = mac
+        else:
+            # Auto-register
+            matched_key = hostname
+            clients[matched_key] = {
+                "hostname": hostname, "mac": mac, "label": hostname,
+                "last_seen": now_iso, "compiled": compiled or None,
+                "uptime": uptime or None, "firmware": None,
+                "fw_compile_id": None, "last_flashed": None,
+            }
+
+        if matched_key not in clients:
+            # Safety — shouldn't happen, but guard anyway
+            clients[matched_key] = {
+                "hostname": hostname, "mac": mac, "label": hostname,
+                "last_seen": now_iso, "compiled": compiled or None,
+                "uptime": uptime or None, "firmware": None,
+                "fw_compile_id": None, "last_flashed": None,
+            }
+
+        # Update live fields
+        clients[matched_key]["last_seen"] = now_iso
+        if compiled:
+            clients[matched_key]["compiled"] = compiled
+        if uptime:
+            clients[matched_key]["uptime"] = uptime
+
+        # --- firmware decision ---
+        entry         = clients[matched_key]
+        fw_compile_id = entry.get("fw_compile_id")
+        firmware_file = entry.get("firmware")
+
+        if fw_compile_id and compiled == fw_compile_id:
+            # Device already running the target firmware — auto-clear
+            entry["firmware"]      = None
+            entry["fw_compile_id"] = None
+            entry["last_flashed"]  = now_iso
             _save_clients(clients)
-    manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
-    if not os.path.exists(manifest_path):
-        return Response("", mimetype="text/plain")
-    return send_from_directory(OTA_FIRMWARE_DIR, "manifest.txt", mimetype="text/plain")
+            logging.info("OTA: %s already at %s — cleared pending firmware", matched_key, compiled)
+            return Response("", status=204)
 
+        if fw_compile_id and compiled != fw_compile_id and firmware_file:
+            fw_path = os.path.join(OTA_FIRMWARE_DIR, firmware_file)
+            if os.path.exists(fw_path):
+                _save_clients(clients)
+                logging.info("OTA: sending %s to %s (compiled=%s)", firmware_file, matched_key, compiled)
+                return send_file(fw_path, mimetype="application/octet-stream")
 
-@bp.route("/firmware/<path:filename>")
-def serve_firmware(filename):
-    safe_name = os.path.basename(filename)
-    fw_path   = os.path.join(OTA_FIRMWARE_DIR, safe_name)
-    if not os.path.exists(fw_path):
-        return "Firmware not found", 404
-    return send_from_directory(OTA_FIRMWARE_DIR, safe_name, mimetype="application/octet-stream")
+        _save_clients(clients)
+
+    return Response("", status=204)
 
 
 # ---------------------------------------------------------------------------
@@ -958,7 +1054,8 @@ ADMIN_HTML = """
 </head>
 <body>
 <h1>SyncFrame <span>OTA Admin</span></h1>
-<p class="subtitle">Manage remote firmware updates &nbsp;&middot;&nbsp; <a href="{{ home_url }}">&#8592; Back to Photo Viewer</a></p>
+<p class="subtitle">Manage remote firmware updates &nbsp;&middot;&nbsp; <a href="{{ home_url }}">&#8592; Back to Photo Viewer</a><br>
+<small>Set device <span class="mono" style="color:var(--accent);">cfg.updateUrl</span> to <span class="mono" style="color:var(--accent2);">.../syncframe/ota</span></small></p>
 
 {% if flash_ok %}<div class="flash flash-ok">{{ flash_ok }}</div>{% endif %}
 {% if flash_err %}<div class="flash flash-err">{{ flash_err }}</div>{% endif %}
@@ -981,14 +1078,14 @@ ADMIN_HTML = """
   <table>
     <thead><tr>
       <th>Hostname</th><th>MAC</th><th>Label</th><th>Last Check-In</th>
-      <th>Compiled</th><th>Uptime</th><th>Pending Firmware</th><th>Firmware</th><th></th>
+      <th>Compiled</th><th>Uptime</th><th>Firmware</th><th>Firmware Upload</th><th></th>
     </tr></thead>
     <tbody>
     {% for hostname, info in clients.items() %}
       <tr>
         <td class="mono">{{ hostname }}</td>
-        <td class="mono">{{ info.mac or '&mdash;' }}</td>
-        <td>{{ info.label or '&mdash;' }}</td>
+        <td class="mono">{{ info.mac if info.mac else '\u2014' }}</td>
+        <td>{{ info.label or '\u2014' }}</td>
         <td>
           {% if info.last_seen %}
             <span class="badge {{ 'badge-green' if info.fresh else 'badge-gray' }}">{{ info.last_seen_human }}</span>
@@ -996,15 +1093,20 @@ ADMIN_HTML = """
         </td>
         <td>
           {% if info.compiled %}<span class="badge badge-yellow mono">{{ info.compiled }}</span>
-          {% else %}<span class="badge badge-gray">&mdash;</span>{% endif %}
+          {% else %}<span class="badge badge-gray">\u2014</span>{% endif %}
         </td>
         <td>
           {% if info.uptime %}<span class="uptime-dim mono">{{ info.uptime_human }}</span>
-          {% else %}<span class="badge badge-gray">&mdash;</span>{% endif %}
+          {% else %}<span class="badge badge-gray">\u2014</span>{% endif %}
         </td>
         <td>
-          {% if info.firmware %}<span class="badge badge-blue fw-name mono">{{ info.firmware }}</span>
-          {% else %}<span class="badge badge-gray">None</span>{% endif %}
+          {% if info.fw_compile_id %}
+            <span class="badge badge-yellow mono">Pending: {{ info.fw_compile_id }}</span>
+          {% elif info.last_flashed %}
+            <span class="badge badge-green">\u2713 {{ info.last_flashed_human }}</span>
+          {% else %}
+            <span class="badge badge-gray">\u2014</span>
+          {% endif %}
         </td>
         <td style="min-width:200px">
           <form method="POST" action="{{ upload_fw_url }}" enctype="multipart/form-data" id="fw-form-{{ loop.index }}">
@@ -1020,7 +1122,7 @@ ADMIN_HTML = """
                      onchange="dzPicked(this,'dz-{{ loop.index }}','fn-{{ loop.index }}','fw-form-{{ loop.index }}')">
             </div>
           </form>
-          {% if info.firmware %}
+          {% if info.fw_compile_id %}
           <form method="POST" action="{{ clear_fw_url }}" style="margin-top:6px;">
             <input type="hidden" name="hostname" value="{{ hostname }}">
             <button class="btn btn-sm btn-danger" type="submit"
@@ -1045,11 +1147,11 @@ ADMIN_HTML = """
 </div>
 
 <div class="card">
-  <h2>Current manifest.txt</h2>
-  <pre class="mono" style="white-space:pre-wrap;color:var(--accent2);font-size:0.85em;">{{ manifest_content or '(empty)' }}</pre>
-  <p style="margin-top:10px;font-size:0.8em;color:var(--text-dim);">Served at <span class="mono">{{ manifest_url }}</span></p>
-  <p style="margin-top:8px;font-size:0.8em;color:var(--text-dim);">
-    ESP32 headers: <span class="mono" style="color:var(--accent);">X-SF-Hostname</span> &nbsp;
+  <h2>OTA Endpoint</h2>
+  <p style="font-size:0.85em;color:var(--text-dim);">
+    Devices GET <span class="mono" style="color:var(--accent2);">{{ ota_url }}</span><br>
+    Required headers: <span class="mono" style="color:var(--accent);">X-SF-Hostname</span> &nbsp;
+    <span class="mono" style="color:var(--accent);">X-SF-MAC</span> &nbsp;
     <span class="mono" style="color:var(--accent);">X-SF-Compiled</span> &nbsp;
     <span class="mono" style="color:var(--accent);">X-SF-Uptime</span>
   </p>
@@ -1122,8 +1224,9 @@ def admin_page():
     clients = {}
     for hostname, info in raw_clients.items():
         entry = dict(info)
-        entry["last_seen_human"] = _humanize(info.get("last_seen"))
-        entry["uptime_human"]    = _humanize_uptime(info.get("uptime", "")) if info.get("uptime") else None
+        entry["last_seen_human"]   = _humanize(info.get("last_seen"))
+        entry["last_flashed_human"] = _humanize(info.get("last_flashed"))
+        entry["uptime_human"]      = _humanize_uptime(info.get("uptime", "")) if info.get("uptime") else None
         try:
             dt = datetime.fromisoformat(info["last_seen"])
             if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
@@ -1131,15 +1234,10 @@ def admin_page():
         except Exception:
             entry["fresh"] = False
         clients[hostname] = entry
-    manifest_path    = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
-    manifest_content = ""
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            manifest_content = f.read().strip()
-    manifest_url = (URL_PREFIX or "") + "/manifest.txt"
+    ota_url = (URL_PREFIX or "") + "/ota"
     return render_template_string(
         ADMIN_HTML, clients=clients, flash_ok=flash_ok, flash_err=flash_err,
-        manifest_content=manifest_content, manifest_url=manifest_url,
+        ota_url=ota_url,
         home_url=url_for("syncframe.index"),
         add_url=url_for("syncframe.admin_add_client"),
         remove_url=url_for("syncframe.admin_remove_client"),
@@ -1160,10 +1258,12 @@ def admin_add_client():
         clients = _load_clients()
         if hostname in clients:
             return redirect(url_for("syncframe.admin_page") + "?err=Client+already+exists")
-        clients[hostname] = {"mac": mac, "label": label or hostname,
-                             "last_seen": None, "firmware": None, "compiled": None, "uptime": None}
+        clients[hostname] = {
+            "hostname": hostname, "mac": mac, "label": label or hostname,
+            "last_seen": None, "firmware": None, "fw_compile_id": None,
+            "compiled": None, "uptime": None, "last_flashed": None,
+        }
         _save_clients(clients)
-        _rebuild_manifest()
     return redirect(url_for("syncframe.admin_page") + f"?ok=Client+{hostname}+added")
 
 
@@ -1179,7 +1279,6 @@ def admin_remove_client():
             fw = clients[hostname].get("firmware")
             del clients[hostname]
             _save_clients(clients)
-            _rebuild_manifest()
             if fw and not any(c.get("firmware") == fw for c in clients.values()):
                 try: os.remove(os.path.join(OTA_FIRMWARE_DIR, fw))
                 except Exception: pass
@@ -1197,22 +1296,33 @@ def admin_upload_firmware():
     fw_file = request.files["firmware"]
     if not fw_file or not allowed_firmware(fw_file.filename):
         return redirect(url_for("syncframe.admin_page") + "?err=Only+.bin+files+allowed")
+
+    fw_data = fw_file.read()
+    compile_id = extract_compile_id(fw_data)
+    if compile_id is None:
+        return "Could not extract compile ID \u2014 upload the app-only .bin, not a merged binary", 400
+
     safe_hostname = hostname.replace("/", "_").replace("..", "_")
-    filename = f"{safe_hostname}.bin"
+    filename = f"{safe_hostname}--{compile_id}.bin"
     dest     = os.path.join(OTA_FIRMWARE_DIR, filename)
-    fw_file.save(dest)
-    logging.info("Firmware saved for %s -> %s", hostname, dest)
-    token = str(int(time.time()))
+    with open(dest, "wb") as f:
+        f.write(fw_data)
+    logging.info("Firmware saved for %s -> %s (compile_id=%s)", hostname, dest, compile_id)
+
     with _ota_lock:
         clients = _load_clients()
         if hostname not in clients:
-            clients[hostname] = {"mac": "", "label": hostname, "last_seen": None,
-                                 "firmware": None, "compiled": None, "uptime": None}
-        clients[hostname]["firmware"] = filename
-        clients[hostname]["fw_token"] = token
+            clients[hostname] = {
+                "hostname": hostname, "mac": "", "label": hostname,
+                "last_seen": None, "compiled": None, "uptime": None,
+                "last_flashed": None,
+            }
+        clients[hostname]["firmware"]      = filename
+        clients[hostname]["fw_compile_id"] = compile_id
+        # Remove legacy fw_token if present
+        clients[hostname].pop("fw_token", None)
         _save_clients(clients)
-        _rebuild_manifest()
-    return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+uploaded+for+{hostname}")
+    return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+uploaded+for+{hostname}+({compile_id})")
 
 
 @bp.route("/admin/clear_firmware", methods=["POST"])
@@ -1224,10 +1334,9 @@ def admin_clear_firmware():
     with _ota_lock:
         clients = _load_clients()
         if hostname in clients:
-            clients[hostname]["firmware"] = None
-            clients[hostname]["fw_token"] = None
+            clients[hostname]["firmware"]      = None
+            clients[hostname]["fw_compile_id"] = None
             _save_clients(clients)
-            _rebuild_manifest()
     return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+cleared+for+{hostname}")
 
 
