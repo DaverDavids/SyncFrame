@@ -25,13 +25,11 @@ from PIL import Image, ImageEnhance, ImageSequence
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-# Try to import cryptography for certificate generation; if not available, we'll fall back to openssl CLI.
 try:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
-
     CRYPTOGRAPHY_AVAILABLE = True
 except Exception:
     CRYPTOGRAPHY_AVAILABLE = False
@@ -39,25 +37,33 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # ---------------------------------------------------------------------------
-# Data directory - all runtime-generated files live here so they can be
-# mapped to a persistent host volume when running in Docker.
+# Data directory
 # ---------------------------------------------------------------------------
 DATA_DIR = os.path.join(os.getcwd(), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Mosquitto sub-directory (certs, pwfile, pid, log, and mosquitto.conf)
 MOSQ_DIR = os.path.join(DATA_DIR, "mosq")
 os.makedirs(MOSQ_DIR, exist_ok=True)
 
-# OTA sub-directory (ota_clients.json + firmware bins + manifest.txt)
 OTA_DIR = os.path.join(DATA_DIR, "ota")
 os.makedirs(OTA_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
+# Give the mosquitto user ownership of MOSQ_DIR so it can write
+# pid, log, conf and any other runtime files it needs.
+# ---------------------------------------------------------------------------
+try:
+    import pwd as _pwd
+    _mosq = _pwd.getpwnam("mosquitto")
+    os.chown(MOSQ_DIR, _mosq.pw_uid, _mosq.pw_gid)
+    logging.info("Set %s ownership to mosquitto (%d:%d)", MOSQ_DIR, _mosq.pw_uid, _mosq.pw_gid)
+except KeyError:
+    logging.warning("mosquitto user not found - skipping chown of %s", MOSQ_DIR)
+except Exception as _e:
+    logging.warning("Could not chown %s to mosquitto: %s", MOSQ_DIR, _e)
+
+# ---------------------------------------------------------------------------
 # Seed default JPGs from the script directory into data/ on first run.
-# Any .jpg sitting next to this script is copied into data/ if not already
-# present. This way the repo carries placeholder images that are never
-# overwritten once the user has their own photos in place.
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 for _fname in os.listdir(_SCRIPT_DIR):
@@ -83,7 +89,7 @@ default_config = {
         "url_prefix": "/syncframe",
         "username": "admin",
         "password": "changeme",
-        "secret_key": "",  # empty = auto-generated on first run
+        "secret_key": "",
     },
     "mqtt": {
         "host": "127.0.0.1",
@@ -124,10 +130,8 @@ else:
         logging.info(f"Configuration file {CONFIG_PATH} updated with missing defaults.")
 
 # ---------------------------------------------------------------------------
-# Secret key - generate once and persist in config
+# Secret key
 # ---------------------------------------------------------------------------
-# The old hardcoded key is kept so existing browser sessions are accepted and
-# transparently re-signed with the new key on the user's next request.
 OLD_SECRET_KEY = "syncframe-secret-key-change-me-in-production"
 
 secret_key_value = config.get("server", "secret_key", fallback="").strip()
@@ -142,50 +146,32 @@ if not secret_key_value:
 # Read configuration values
 # ---------------------------------------------------------------------------
 SERVER_HOST = config.get("server", "host", fallback=default_config["server"]["host"])
-SERVER_PORT = config.getint(
-    "server", "port", fallback=int(default_config["server"]["port"])
-)
+SERVER_PORT = config.getint("server", "port", fallback=int(default_config["server"]["port"]))
 USE_HTTPS = config.getboolean(
-    "server",
-    "use_https",
+    "server", "use_https",
     fallback=(default_config["server"]["use_https"].lower() == "true"),
 )
-CERTFILE = os.path.abspath(
-    config.get("server", "certfile", fallback=default_config["server"]["certfile"])
-)
-KEYFILE = os.path.abspath(
-    config.get("server", "keyfile", fallback=default_config["server"]["keyfile"])
-)
+CERTFILE = os.path.abspath(config.get("server", "certfile", fallback=default_config["server"]["certfile"]))
+KEYFILE  = os.path.abspath(config.get("server", "keyfile",  fallback=default_config["server"]["keyfile"]))
 
-_raw_prefix = config.get(
-    "server", "url_prefix", fallback=default_config["server"]["url_prefix"]
-).strip()
-if _raw_prefix in ("", "/"):
-    URL_PREFIX = ""
-else:
-    URL_PREFIX = "/" + _raw_prefix.strip("/")
+_raw_prefix = config.get("server", "url_prefix", fallback=default_config["server"]["url_prefix"]).strip()
+URL_PREFIX = "" if _raw_prefix in ("", "/") else "/" + _raw_prefix.strip("/")
 
-USERNAME = config.get(
-    "server", "username", fallback=default_config["server"]["username"]
-)
-PASSWORD = config.get(
-    "server", "password", fallback=default_config["server"]["password"]
-)
+USERNAME = config.get("server", "username", fallback=default_config["server"]["username"])
+PASSWORD = config.get("server", "password", fallback=default_config["server"]["password"])
 
-MQTT_HOST = config.get("mqtt", "host", fallback=default_config["mqtt"]["host"])
-MQTT_PORT = config.getint("mqtt", "port", fallback=int(default_config["mqtt"]["port"]))
-MQTT_TOPIC = config.get("mqtt", "topic", fallback=default_config["mqtt"]["topic"])
+MQTT_HOST     = config.get("mqtt", "host",     fallback=default_config["mqtt"]["host"])
+MQTT_PORT     = config.getint("mqtt", "port",  fallback=int(default_config["mqtt"]["port"]))
+MQTT_TOPIC    = config.get("mqtt", "topic",    fallback=default_config["mqtt"]["topic"])
 MQTT_USERNAME = config.get("mqtt", "username", fallback="")
 MQTT_PASSWORD = config.get("mqtt", "password", fallback="")
 
 WATCH_FILE = os.path.abspath(
-    config.get(
-        "watcher", "file_to_watch", fallback=default_config["watcher"]["file_to_watch"]
-    )
+    config.get("watcher", "file_to_watch", fallback=default_config["watcher"]["file_to_watch"])
 )
 
-IMAGE_MAX_WIDTH = config.getint("image", "max_width", fallback=1920)
-IMAGE_MAX_HEIGHT = config.getint("image", "max_height", fallback=1080)
+IMAGE_MAX_WIDTH    = config.getint("image", "max_width",    fallback=1920)
+IMAGE_MAX_HEIGHT   = config.getint("image", "max_height",   fallback=1080)
 IMAGE_JPEG_QUALITY = config.getint("image", "jpeg_quality", fallback=85)
 
 RESOLUTIONS = [
@@ -194,11 +180,10 @@ RESOLUTIONS = [
 ]
 
 # ---------------------------------------------------------------------------
-# OTA / Admin state
-# ota_clients.json and firmware bins live together in OTA_DIR.
+# OTA state
 # ---------------------------------------------------------------------------
 OTA_CLIENTS_PATH = os.path.join(OTA_DIR, "ota_clients.json")
-OTA_FIRMWARE_DIR = OTA_DIR  # bins and manifest.txt share the same directory
+OTA_FIRMWARE_DIR = OTA_DIR
 
 _ota_lock = threading.Lock()
 
@@ -219,27 +204,13 @@ def _save_clients(clients):
 
 
 def _rebuild_manifest():
-    """Write ota/manifest.txt based on current client->firmware mappings.
-
-    Each line is three space-separated fields:
-        <hostname>  <filename>  <token>
-
-    <token> is a Unix timestamp (seconds) generated when the firmware is
-    uploaded.  The ESP32 stores the last token it flashed in NVS ("fwtoken")
-    and skips the download if the manifest token matches, even when the
-    filename is unchanged.  If a client entry has no token yet (legacy data)
-    the filename alone is written so old firmware still works.
-    """
     clients = _load_clients()
     lines = []
     for hostname, info in clients.items():
         fw = info.get("firmware")
         if fw:
             token = info.get("fw_token", "")
-            if token:
-                lines.append(f"{hostname} {fw} {token}")
-            else:
-                lines.append(fw)
+            lines.append(f"{hostname} {fw} {token}" if token else fw)
     manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
     with open(manifest_path, "w") as f:
         f.write("\n".join(lines) + ("\n" if lines else ""))
@@ -247,33 +218,24 @@ def _rebuild_manifest():
 
 
 # ---------------------------------------------------------------------------
-# Flask app setup
+# Flask app
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = secret_key_value
 bp = Blueprint("syncframe", __name__)
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "heic", "webp", "gif"}
+ALLOWED_EXTENSIONS          = {"jpg", "jpeg", "png", "heic", "webp", "gif"}
 ALLOWED_FIRMWARE_EXTENSIONS = {"bin"}
 UPLOAD_FOLDER = DATA_DIR
 
 
-# ---------------------------------------------------------------------------
-# Dual-key session interface
-# Accepts sessions signed with OLD_SECRET_KEY and re-signs them with the
-# current key transparently so existing users are not logged out.
-# ---------------------------------------------------------------------------
 class DualKeySessionInterface(SecureCookieSessionInterface):
     def open_session(self, app, request):
-        # Try primary (new) key first via the normal path
         sess = super().open_session(app, request)
-        # SecureCookieSessionInterface returns an empty (but non-None) session
-        # when decoding fails, so we check if 'authenticated' is missing AND
-        # a cookie was actually present before trying the fallback.
         cookie_name = self.get_cookie_name(app)
-        raw_cookie = request.cookies.get(cookie_name)
+        raw_cookie  = request.cookies.get(cookie_name)
         if raw_cookie and not sess.get("authenticated"):
             try:
-                s = URLSafeTimedSerializer(OLD_SECRET_KEY, salt="cookie-session")
+                s    = URLSafeTimedSerializer(OLD_SECRET_KEY, salt="cookie-session")
                 data = s.loads(raw_cookie)
                 logging.info("Session migrated from old secret key to new key.")
                 return self.session_class(data)
@@ -290,38 +252,24 @@ def check_auth(username, password):
 
 
 def create_mqtt_password_file():
-    """Create MQTT password file inside MOSQ_DIR."""
     pwfile = os.path.join(MOSQ_DIR, "pwfile")
-
     file_is_empty = os.path.exists(pwfile) and os.path.getsize(pwfile) == 0
-
-    if (
-        (not os.path.exists(pwfile) or file_is_empty)
-        and MQTT_USERNAME
-        and MQTT_PASSWORD
-    ):
+    if (not os.path.exists(pwfile) or file_is_empty) and MQTT_USERNAME and MQTT_PASSWORD:
         try:
             subprocess.check_call(
                 ["mosquitto_passwd", "-c", "-b", pwfile, MQTT_USERNAME, MQTT_PASSWORD],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             os.chmod(pwfile, 0o600)
-
             try:
                 import pwd
-
-                mosquitto_uid = pwd.getpwnam("mosquitto").pw_uid
-                mosquitto_gid = pwd.getpwnam("mosquitto").pw_gid
-                os.chown(pwfile, mosquitto_uid, mosquitto_gid)
+                mosq = pwd.getpwnam("mosquitto")
+                os.chown(pwfile, mosq.pw_uid, mosq.pw_gid)
                 logging.info(f"Created MQTT password file for user {MQTT_USERNAME}")
             except Exception as e:
                 logging.warning(f"Could not change pwfile ownership: {e}")
                 os.chmod(pwfile, 0o644)
-                logging.info(
-                    f"Created MQTT password file for user {MQTT_USERNAME} (with relaxed permissions)"
-                )
-
+                logging.info(f"Created MQTT password file for user {MQTT_USERNAME} (relaxed permissions)")
         except Exception as e:
             logging.error(f"Failed to create password file: {e}")
 
@@ -331,87 +279,55 @@ def requires_auth(f):
     def decorated(*args, **kwargs):
         if session.get("authenticated"):
             return f(*args, **kwargs)
-
         auth = request.authorization
         if auth and check_auth(auth.username, auth.password):
             session.permanent = True
             session["authenticated"] = True
             app.permanent_session_lifetime = timedelta(days=3650)
             return f(*args, **kwargs)
-
         return Response(
-            "Authentication required",
-            401,
+            "Authentication required", 401,
             {"WWW-Authenticate": 'Basic realm="Login Required"'},
         )
-
     return decorated
 
 
-def generate_self_signed_cert_py(
-    certfile, keyfile, common_name="localhost", days_valid=3650
-):
-    """Generate a self-signed cert using cryptography library."""
+def generate_self_signed_cert_py(certfile, keyfile, common_name="localhost", days_valid=3650):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = issuer = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-            x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "State"),
-            x509.NameAttribute(NameOID.LOCALITY_NAME, "Locality"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SyncFrame"),
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-        ]
-    )
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "State"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, "Locality"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SyncFrame"),
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+    ])
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(
-            datetime.utcnow() - timedelta(days=1)
-        )
-        .not_valid_after(
-            datetime.utcnow() + timedelta(days=days_valid)
-        )
+        .not_valid_before(datetime.utcnow() - timedelta(days=1))
+        .not_valid_after(datetime.utcnow() + timedelta(days=days_valid))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
     )
-
     with open(keyfile, "wb") as f:
-        f.write(
-            key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
     os.chmod(keyfile, 0o600)
-
     with open(certfile, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
 
-def generate_self_signed_cert_openssl(
-    certfile, keyfile, common_name="localhost", days_valid=3650
-):
-    """Generate a self-signed cert using openssl CLI as fallback."""
-    subj = f"/CN={common_name}"
+def generate_self_signed_cert_openssl(certfile, keyfile, common_name="localhost", days_valid=3650):
     cmd = [
-        "openssl",
-        "req",
-        "-x509",
-        "-nodes",
-        "-newkey",
-        "rsa:2048",
-        "-keyout",
-        keyfile,
-        "-out",
-        certfile,
-        "-days",
-        str(days_valid),
-        "-subj",
-        subj,
+        "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+        "-keyout", keyfile, "-out", certfile,
+        "-days", str(days_valid), "-subj", f"/CN={common_name}",
     ]
     try:
         subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -422,22 +338,14 @@ def generate_self_signed_cert_openssl(
 
 
 def ensure_certificates(certfile, keyfile):
-    """Ensure both certificate and key exist. If not, create them."""
-    cert_exists = os.path.exists(certfile)
-    key_exists = os.path.exists(keyfile)
-
-    if cert_exists and key_exists:
+    if os.path.exists(certfile) and os.path.exists(keyfile):
         logging.info("Certificate and key already exist: %s, %s", certfile, keyfile)
         return
-
     for path in (certfile, keyfile):
         d = os.path.dirname(path)
         if d and not os.path.exists(d):
             os.makedirs(d, exist_ok=True)
-
-    logging.info(
-        "Generating self-signed certificate and key at %s and %s", certfile, keyfile
-    )
+    logging.info("Generating self-signed certificate and key at %s and %s", certfile, keyfile)
     try:
         if CRYPTOGRAPHY_AVAILABLE:
             generate_self_signed_cert_py(certfile, keyfile)
@@ -451,114 +359,68 @@ def ensure_certificates(certfile, keyfile):
 
 
 def fix_image_orientation(image):
-    """Fix image orientation based on EXIF data."""
     try:
         exif = image._getexif()
         if not exif:
             return image
-
         orientation = exif.get(274)
-
         if orientation == 3:
             image = image.rotate(180, expand=True)
         elif orientation == 6:
             image = image.rotate(270, expand=True)
         elif orientation == 8:
             image = image.rotate(90, expand=True)
-
         return image
     except Exception:
         return image
 
 
 def generate_mqtt_certificates():
-    """Generate CA and server certificates for MQTT broker in MOSQ_DIR."""
     os.makedirs(MOSQ_DIR, exist_ok=True)
-
-    ca_key = os.path.join(MOSQ_DIR, "ca.key")
-    ca_crt = os.path.join(MOSQ_DIR, "ca.crt")
+    ca_key     = os.path.join(MOSQ_DIR, "ca.key")
+    ca_crt     = os.path.join(MOSQ_DIR, "ca.crt")
     server_key = os.path.join(MOSQ_DIR, "server.key")
     server_crt = os.path.join(MOSQ_DIR, "server.crt")
     server_csr = os.path.join(MOSQ_DIR, "server.csr")
 
-    if (
-        os.path.exists(ca_crt)
-        and os.path.exists(server_crt)
-        and os.path.exists(server_key)
-    ):
+    if os.path.exists(ca_crt) and os.path.exists(server_crt) and os.path.exists(server_key):
         logging.info("MQTT certificates already exist in %s", MOSQ_DIR)
         return
 
     logging.info("Generating MQTT certificates in %s...", MOSQ_DIR)
-
     try:
-        subprocess.check_call(
-            ["openssl", "genrsa", "-out", ca_key, "2048"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        subprocess.check_call(
-            [
-                "openssl", "req", "-new", "-x509", "-days", "3650",
-                "-key", ca_key, "-out", ca_crt, "-subj", "/CN=MQTT-CA",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        subprocess.check_call(
-            ["openssl", "genrsa", "-out", server_key, "2048"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        subprocess.check_call(
-            [
-                "openssl", "req", "-new", "-key", server_key,
-                "-out", server_csr, "-subj", "/CN=localhost",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        subprocess.check_call(
-            [
-                "openssl", "x509", "-req", "-in", server_csr,
-                "-CA", ca_crt, "-CAkey", ca_key, "-CAcreateserial",
-                "-out", server_crt, "-days", "3650",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
+        subprocess.check_call(["openssl", "genrsa", "-out", ca_key, "2048"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["openssl", "req", "-new", "-x509", "-days", "3650",
+                                "-key", ca_key, "-out", ca_crt, "-subj", "/CN=MQTT-CA"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["openssl", "genrsa", "-out", server_key, "2048"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["openssl", "req", "-new", "-key", server_key,
+                                "-out", server_csr, "-subj", "/CN=localhost"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["openssl", "x509", "-req", "-in", server_csr,
+                                "-CA", ca_crt, "-CAkey", ca_key, "-CAcreateserial",
+                                "-out", server_crt, "-days", "3650"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         os.chmod(ca_key, 0o600)
         os.chmod(server_key, 0o600)
-
         try:
             import pwd
-
-            mosquitto_uid = pwd.getpwnam("mosquitto").pw_uid
-            mosquitto_gid = pwd.getpwnam("mosquitto").pw_gid
-
-            os.chown(ca_crt, mosquitto_uid, mosquitto_gid)
-            os.chown(server_crt, mosquitto_uid, mosquitto_gid)
-            os.chown(server_key, mosquitto_uid, mosquitto_gid)
+            mosq = pwd.getpwnam("mosquitto")
+            for f in (ca_crt, server_crt, server_key):
+                os.chown(f, mosq.pw_uid, mosq.pw_gid)
         except Exception as e:
             logging.warning(f"Could not change certificate ownership: {e}")
-
         if os.path.exists(server_csr):
             os.remove(server_csr)
-
         logging.info("MQTT certificates generated successfully in %s", MOSQ_DIR)
-
     except Exception as e:
         logging.error(f"Failed to generate MQTT certificates: {e}")
         raise
 
 
 def generate_thumbnails(source_img=None):
-    """Generate all resolution variants listed in RESOLUTIONS from the master photo.jpg."""
     try:
         if source_img is None:
             if not os.path.exists(WATCH_FILE):
@@ -566,7 +428,6 @@ def generate_thumbnails(source_img=None):
                 return
             source_img = Image.open(WATCH_FILE)
             source_img = fix_image_orientation(source_img)
-
         for (w, h) in RESOLUTIONS:
             try:
                 thumb = source_img.copy()
@@ -584,10 +445,10 @@ class Watcher:
     FILE_TO_WATCH = WATCH_FILE
 
     def __init__(self):
-        self.observer = Observer()
-        self.last_md5 = self.calculate_md5()
+        self.observer          = Observer()
+        self.last_md5          = self.calculate_md5()
         self.last_notification = 0
-        self.debounce_ms = 1000
+        self.debounce_ms       = 1000
 
     def calculate_md5(self):
         hash_md5 = hashlib.md5()
@@ -618,21 +479,18 @@ class Handler(FileSystemEventHandler):
 
     def on_modified(self, event):
         try:
-            event_path = os.path.abspath(event.src_path)
+            event_path   = os.path.abspath(event.src_path)
             watched_path = os.path.abspath(self.watcher.FILE_TO_WATCH)
         except Exception:
             return None
-
         if event.is_directory or event_path != watched_path:
             return None
-
         current_time = int(time.time() * 1000)
         if current_time - self.watcher.last_notification < self.watcher.debounce_ms:
             return None
-
         current_md5 = self.watcher.calculate_md5()
         if current_md5 != self.watcher.last_md5:
-            self.watcher.last_md5 = current_md5
+            self.watcher.last_md5          = current_md5
             self.watcher.last_notification = current_time
             logging.info(f"File {event.src_path} has been modified")
             send_mqtt_message("refresh")
@@ -641,9 +499,7 @@ class Handler(FileSystemEventHandler):
 def send_mqtt_message(message):
     logging.info("Sending MQTT message: %s", message)
     client = mqtt.Client()
-
     ca_crt = os.path.join(MOSQ_DIR, "ca.crt")
-
     if os.path.exists(ca_crt):
         try:
             client.tls_set(ca_certs=ca_crt, tls_version=ssl.PROTOCOL_TLSv1_2)
@@ -651,10 +507,8 @@ def send_mqtt_message(message):
             logging.info("MQTT TLS enabled")
         except Exception as e:
             logging.warning(f"Could not enable MQTT TLS: {e}")
-
     if MQTT_USERNAME and MQTT_PASSWORD:
         client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-
     try:
         client.connect(MQTT_HOST, MQTT_PORT, 60)
         client.publish(MQTT_TOPIC, message, qos=0, retain=False)
@@ -669,14 +523,12 @@ def send_mqtt_message(message):
 
 def desaturate_image():
     try:
-        img = Image.open(WATCH_FILE)
+        img       = Image.open(WATCH_FILE)
         converter = ImageEnhance.Color(img)
-        img = converter.enhance(0.66)
+        img       = converter.enhance(0.66)
         changed_path = os.path.join(DATA_DIR, "photo-changed.jpg")
         img.save(changed_path)
-        logging.info(
-            "Desaturated %s by 34%% and saved to %s", WATCH_FILE, changed_path
-        )
+        logging.info("Desaturated %s by 34%% and saved to %s", WATCH_FILE, changed_path)
         finalize_changes(img)
     except Exception as e:
         logging.error(f"Error desaturating image: {e}")
@@ -700,11 +552,9 @@ def schedule_desaturation():
 
 
 def write_mosquitto_conf():
-    """Write mosquitto.conf into MOSQ_DIR with absolute paths so Mosquitto
-    can be launched from any working directory."""
     conf_path = os.path.join(MOSQ_DIR, "mosquitto.conf")
     if os.path.exists(conf_path):
-        return  # already written; don't overwrite customisations
+        return
     content = f"""# Auto-generated by syncframe-server.py
 # Edit this file to customise Mosquitto. It will not be overwritten once created.
 
@@ -728,7 +578,7 @@ tls_version tlsv1.2
 
 
 # ---------------------------------------------------------------------------
-# Flask routes - main photo viewer
+# Flask routes
 # ---------------------------------------------------------------------------
 
 @bp.route("/", methods=["GET"])
@@ -749,12 +599,9 @@ def index():
         <link rel="icon" type="image/x-icon" href="{{ url_for('syncframe.serve_static', filename='favicon.ico') }}">
         <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('syncframe.serve_static', filename='favicon-16x16.png') }}">
         <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('syncframe.serve_static', filename='favicon-32x32.png') }}">
-
         <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('syncframe.serve_static', filename='apple-touch-icon.png') }}">
-
         <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('syncframe.serve_static', filename='icon-192x192.png') }}">
         <link rel="icon" type="image/png" sizes="512x512" href="{{ url_for('syncframe.serve_static', filename='icon-512x512.png') }}">
-
         <meta name="apple-mobile-web-app-capable" content="yes">
         <meta name="apple-mobile-web-app-title" content="SyncFrame">
     <style>
@@ -776,151 +623,64 @@ def index():
             animation: gradientShift 15s ease infinite;
             overflow-x: hidden;
         }
-
         @keyframes gradientShift {
             0% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
             100% { background-position: 0% 50%; }
         }
-
-        h1 {
-            color: #ffffff;
-            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
-            font-size: 2.5em;
-            margin-bottom: 30px;
-        }
-
-        form {
-            margin-bottom: 30px;
-        }
-
-        .container {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: space-around;
-            align-items: center;
-            gap: 60px;
-        }
-
+        h1 { color: #ffffff; text-shadow: 0 2px 10px rgba(0,0,0,0.7); font-size: 2.5em; margin-bottom: 30px; }
+        form { margin-bottom: 30px; }
+        .container { display: flex; flex-wrap: wrap; justify-content: space-around; align-items: center; gap: 60px; }
         .image-container {
-            flex: 1;
-            min-width: 300px;
-            max-width: 45%;
-            text-align: center;
-            background: #000000;
-            padding: 0;
-            margin-top: 50px;
-            border-radius: 4px;
+            flex: 1; min-width: 300px; max-width: 45%; text-align: center;
+            background: #000000; padding: 0; margin-top: 50px; border-radius: 4px;
             border: 15px solid;
             border-image: linear-gradient(145deg, #8b6f47, #d4a574, #c4956a, #8b6f47, #6a5537) 1;
-            box-shadow:
-                inset 0 0 30px rgba(0, 0, 0, 0.8),
-                0 10px 40px rgba(0, 0, 0, 0.8),
-                0 0 0 3px #4a3a2a,
-                0 0 0 4px #2a1a0a;
-            position: relative;
-            aspect-ratio: 16 / 9;
-            overflow: visible;
+            box-shadow: inset 0 0 30px rgba(0,0,0,0.8), 0 10px 40px rgba(0,0,0,0.8),
+                        0 0 0 3px #4a3a2a, 0 0 0 4px #2a1a0a;
+            position: relative; aspect-ratio: 16/9; overflow: visible;
         }
-
         .image-container img {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            border: none;
-            border-radius: 2px;
-            position: relative;
-            z-index: 1;
-            display: block;
+            width: 100%; height: 100%; object-fit: contain; border: none;
+            border-radius: 2px; position: relative; z-index: 1; display: block;
         }
-
         .image-container h2 {
-            position: absolute;
-            top: -60px;
-            left: -40px;
-            right: -40px;
-            bottom: -40px;
-            margin: 0;
-            padding: 15px 20px;
-            padding-bottom: 60px;
-            font-size: 1.3em;
-            color: #ffffff;
-            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
-            background: rgba(0, 0, 0, 0.4);
-            backdrop-filter: blur(10px);
-            border-radius: 12px;
-            z-index: -1;
-            display: flex;
-            align-items: flex-start;
-            justify-content: center;
+            position: absolute; top: -60px; left: -40px; right: -40px; bottom: -40px;
+            margin: 0; padding: 15px 20px; padding-bottom: 60px; font-size: 1.3em;
+            color: #ffffff; text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+            background: rgba(0,0,0,0.4); backdrop-filter: blur(10px);
+            border-radius: 12px; z-index: -1;
+            display: flex; align-items: flex-start; justify-content: center;
         }
-
         input[type="file"] {
-            margin-bottom: 20px;
-            background: rgba(255, 255, 255, 0.15);
-            color: #ffffff;
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            padding: 10px 20px;
-            border-radius: 6px;
-            backdrop-filter: blur(10px);
-            cursor: pointer;
+            margin-bottom: 20px; background: rgba(255,255,255,0.15); color: #ffffff;
+            border: 1px solid rgba(255,255,255,0.3); padding: 10px 20px;
+            border-radius: 6px; backdrop-filter: blur(10px); cursor: pointer;
         }
-
         input[type="file"]::file-selector-button {
-            background: rgba(255, 255, 255, 0.2);
-            color: #ffffff;
-            border: none;
-            padding: 5px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-right: 10px;
+            background: rgba(255,255,255,0.2); color: #ffffff; border: none;
+            padding: 5px 15px; border-radius: 4px; cursor: pointer; margin-right: 10px;
         }
-
-        input[type="file"]::file-selector-button:hover {
-            background: rgba(255, 255, 255, 0.3);
-        }
-
+        input[type="file"]::file-selector-button:hover { background: rgba(255,255,255,0.3); }
         button {
-            background: rgba(255, 255, 255, 0.15);
-            color: #ffffff;
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            padding: 10px 20px;
-            border-radius: 6px;
-            cursor: pointer;
-            backdrop-filter: blur(10px);
-            font-size: 1em;
-            transition: background 0.3s ease;
+            background: rgba(255,255,255,0.15); color: #ffffff;
+            border: 1px solid rgba(255,255,255,0.3); padding: 10px 20px;
+            border-radius: 6px; cursor: pointer; backdrop-filter: blur(10px);
+            font-size: 1em; transition: background 0.3s ease;
         }
-
-        button:hover {
-            background: rgba(255, 255, 255, 0.25);
-        }
-
+        button:hover { background: rgba(255,255,255,0.25); }
         @media (max-width: 768px) {
-            .container {
-                flex-direction: column;
-            }
-            .image-container {
-                max-width: 100%;
-            }
-            h1 {
-                font-size: 2em;
-            }
+            .container { flex-direction: column; }
+            .image-container { max-width: 100%; }
+            h1 { font-size: 2em; }
         }
-
-        footer {
-            margin-bottom: 0;
-        }
-
-        footer p {
-            margin-bottom: 0;
-        }
+        footer { margin-bottom: 0; }
+        footer p { margin-bottom: 0; }
     </style>
-
     </head>
     <body>
         <h1>SyncFrame Photo Viewer</h1>
-            <form action="{{ url_for('syncframe.upload_file') }}" method="POST" enctype="multipart/form-data">
+        <form action="{{ url_for('syncframe.upload_file') }}" method="POST" enctype="multipart/form-data">
             <input type="file" name="file" accept="image/*" required>
             <button type="submit">Upload Photo</button>
         </form>
@@ -932,17 +692,14 @@ def index():
             <div class="image-container">
                 <h2>Current Photo</h2>
                 <img id="current-photo" src="{{ url_for('syncframe.serve_photo') }}" alt="Current Photo">
-
             </div>
         </div>
-                <script>
-            const fileInput = document.querySelector('input[type="file"]');
+        <script>
+            const fileInput    = document.querySelector('input[type="file"]');
             const uploadButton = document.querySelector('button[type="submit"]');
             const uploadedPhoto = document.getElementById('uploaded-photo');
-
             fileInput.addEventListener('change', function(event) {
                 const file = event.target.files[0];
-
                 if (file) {
                     const reader = new FileReader();
                     reader.onload = function(e) {
@@ -950,24 +707,23 @@ def index():
                         uploadedPhoto.style.display = 'block';
                     };
                     reader.readAsDataURL(file);
-
-                    uploadButton.style.background = 'rgba(0, 255, 100, 0.8)';
-                    uploadButton.style.border = '2px solid rgba(0, 255, 100, 1)';
-                    uploadButton.style.transform = 'scale(1.1)';
-                    uploadButton.style.boxShadow = '0 0 20px rgba(0, 255, 100, 0.6)';
-                    uploadButton.textContent = '\\u2713 Click to Upload!';
+                    uploadButton.style.background  = 'rgba(0,255,100,0.8)';
+                    uploadButton.style.border      = '2px solid rgba(0,255,100,1)';
+                    uploadButton.style.transform   = 'scale(1.1)';
+                    uploadButton.style.boxShadow   = '0 0 20px rgba(0,255,100,0.6)';
+                    uploadButton.textContent       = '\\u2713 Click to Upload!';
                 } else {
                     uploadedPhoto.src = '';
-                    uploadedPhoto.style.display = 'none';
-                    uploadButton.style.background = 'rgba(255, 255, 255, 0.15)';
-                    uploadButton.style.border = '1px solid rgba(255, 255, 255, 0.3)';
-                    uploadButton.style.transform = 'scale(1)';
-                    uploadButton.style.boxShadow = 'none';
-                    uploadButton.textContent = 'Upload Photo';
+                    uploadedPhoto.style.display   = 'none';
+                    uploadButton.style.background  = 'rgba(255,255,255,0.15)';
+                    uploadButton.style.border      = '1px solid rgba(255,255,255,0.3)';
+                    uploadButton.style.transform   = 'scale(1)';
+                    uploadButton.style.boxShadow   = 'none';
+                    uploadButton.textContent       = 'Upload Photo';
                 }
             });
         </script>
-        <footer style="margin-top: 10px; padding: 5px; color: rgba(255, 255, 255, 0.7); font-size: 0.9em;">
+        <footer style="margin-top:10px;padding:5px;color:rgba(255,255,255,0.7);font-size:0.9em;">
             <p id="last-updated">
                 {% if last_updated %}Last updated: <span id='update-time'></span>{% else %}No photo uploaded yet{% endif %}
             </p>
@@ -976,14 +732,9 @@ def index():
             const lastUpdated = {{ last_updated if last_updated else 'null' }};
             if (lastUpdated) {
                 const date = new Date(lastUpdated);
-                const options = {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: 'numeric',
-                    minute: '2-digit',
-                    hour12: true
-                };
-                document.getElementById('update-time').textContent = date.toLocaleString('en-US', options);
+                document.getElementById('update-time').textContent = date.toLocaleString('en-US', {
+                    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true
+                });
             }
         </script>
     </body>
@@ -1000,24 +751,17 @@ def upload_file():
     file = request.files["file"]
     if not file or not allowed_file(file.filename):
         return "File not allowed", 400
-
     target_path = WATCH_FILE
     ext = file.filename.rsplit(".", 1)[1].lower()
-
     try:
         data = file.read()
-        buf = BytesIO(data)
-
+        buf  = BytesIO(data)
         if ext == "heic":
             try:
                 heif_file = pillow_heif.read_heif(buf.getvalue())
                 img = Image.frombytes(
-                    heif_file.mode,
-                    heif_file.size,
-                    heif_file.data,
-                    "raw",
-                    heif_file.mode,
-                    heif_file.stride,
+                    heif_file.mode, heif_file.size, heif_file.data,
+                    "raw", heif_file.mode, heif_file.stride,
                 )
             except Exception as e:
                 logging.error("HEIC conversion failed: %s", e)
@@ -1027,10 +771,7 @@ def upload_file():
                 buf.seek(0)
                 img = Image.open(buf)
                 first_frame = next(ImageSequence.Iterator(img))
-                if first_frame.mode in ("RGBA", "P", "LA"):
-                    img = first_frame.convert("RGB")
-                else:
-                    img = first_frame
+                img = first_frame.convert("RGB") if first_frame.mode in ("RGBA", "P", "LA") else first_frame
             except Exception as e:
                 logging.error("GIF processing failed: %s", e)
                 return "GIF processing failed", 500
@@ -1042,22 +783,14 @@ def upload_file():
             except Exception as e:
                 logging.error("Image open failed: %s", e)
                 return "Image open failed", 500
-
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
-
         max_size = (IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT)
         img.thumbnail(max_size, Image.LANCZOS)
-
         img.save(target_path, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
-        logging.info(
-            "Uploaded image resized to max %s and saved to %s", max_size, target_path
-        )
-
+        logging.info("Uploaded image resized to max %s and saved to %s", max_size, target_path)
         generate_thumbnails(source_img=img)
-
         return redirect(url_for("syncframe.index"))
-
     except Exception as e:
         logging.error("Upload failed: %s", e)
         return "Upload failed", 500
@@ -1079,15 +812,12 @@ def serve_photo():
 def serve_photo_variant(w, h):
     if (w, h) not in RESOLUTIONS:
         return "Resolution not supported", 404
-
     variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
-
     if os.path.exists(variant_file):
         return send_from_directory(
             os.path.dirname(os.path.abspath(variant_file)) or ".",
             os.path.basename(variant_file),
         )
-
     if os.path.exists(WATCH_FILE):
         logging.info("Variant %dx%d missing - generating all thumbnails on-the-fly", w, h)
         generate_thumbnails()
@@ -1096,13 +826,11 @@ def serve_photo_variant(w, h):
                 os.path.dirname(os.path.abspath(variant_file)) or ".",
                 os.path.basename(variant_file),
             )
-
     return "No photo available - upload an image first", 404
 
 
 @bp.route("/static/<path:filename>")
 def serve_static(filename):
-    """Serve static files - NO AUTH required"""
     return send_from_directory("static", filename)
 
 
@@ -1115,37 +843,29 @@ def allowed_firmware(filename):
 
 
 # ---------------------------------------------------------------------------
-# OTA public endpoints (no auth - ESP32 fetches these)
+# OTA public endpoints
 # ---------------------------------------------------------------------------
 
 @bp.route("/manifest.txt")
 def serve_manifest():
-    hostname = (request.headers.get("X-SF-Hostname") or
-                request.args.get("hostname", "")).strip()
-    compiled = (request.headers.get("X-SF-Compiled") or
-                request.args.get("compiled", "")).strip()
-    uptime   = (request.headers.get("X-SF-Uptime")   or
-                request.args.get("uptime", "")).strip()
-
+    hostname = (request.headers.get("X-SF-Hostname") or request.args.get("hostname", "")).strip()
+    compiled = (request.headers.get("X-SF-Compiled") or request.args.get("compiled", "")).strip()
+    uptime   = (request.headers.get("X-SF-Uptime")   or request.args.get("uptime",   "")).strip()
     if hostname:
         now_iso = datetime.now(timezone.utc).isoformat()
         with _ota_lock:
             clients = _load_clients()
             if hostname not in clients:
                 clients[hostname] = {
-                    "mac": "", "label": hostname,
-                    "last_seen": now_iso, "firmware": None,
-                    "compiled": compiled or None, "uptime": uptime or None,
+                    "mac": "", "label": hostname, "last_seen": now_iso,
+                    "firmware": None, "compiled": compiled or None, "uptime": uptime or None,
                 }
                 logging.info("OTA: auto-registered client %s via manifest fetch", hostname)
             else:
                 clients[hostname]["last_seen"] = now_iso
-                if compiled:
-                    clients[hostname]["compiled"] = compiled
-                if uptime:
-                    clients[hostname]["uptime"] = uptime
+                if compiled: clients[hostname]["compiled"] = compiled
+                if uptime:   clients[hostname]["uptime"]   = uptime
             _save_clients(clients)
-
     manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
     if not os.path.exists(manifest_path):
         return Response("", mimetype="text/plain")
@@ -1154,17 +874,15 @@ def serve_manifest():
 
 @bp.route("/firmware/<path:filename>")
 def serve_firmware(filename):
-    """Serve firmware .bin files. Public - no auth - ESP32 downloads these."""
     safe_name = os.path.basename(filename)
-    fw_path = os.path.join(OTA_FIRMWARE_DIR, safe_name)
+    fw_path   = os.path.join(OTA_FIRMWARE_DIR, safe_name)
     if not os.path.exists(fw_path):
         return "Firmware not found", 404
-    return send_from_directory(OTA_FIRMWARE_DIR, safe_name,
-                                mimetype="application/octet-stream")
+    return send_from_directory(OTA_FIRMWARE_DIR, safe_name, mimetype="application/octet-stream")
 
 
 # ---------------------------------------------------------------------------
-# OTA Admin page (auth required)
+# OTA Admin page
 # ---------------------------------------------------------------------------
 
 ADMIN_HTML = """
@@ -1176,14 +894,9 @@ ADMIN_HTML = """
 <title>SyncFrame OTA Admin</title>
 <style>
   :root {
-    --bg: #0d1117;
-    --surface: #161b22;
-    --border: #30363d;
-    --accent: #58a6ff;
-    --accent2: #3fb950;
-    --warn: #f85149;
-    --text: #c9d1d9;
-    --text-dim: #8b949e;
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --accent: #58a6ff; --accent2: #3fb950; --warn: #f85149;
+    --text: #c9d1d9; --text-dim: #8b949e;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 24px; }
@@ -1192,16 +905,16 @@ ADMIN_HTML = """
   .subtitle { color: var(--text-dim); font-size: 0.9em; margin-bottom: 28px; }
   .subtitle a { color: var(--accent); text-decoration: none; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; }
-  .card h2 { font-size: 1.05em; margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.8em; }
+  .card h2 { margin-bottom: 16px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.8em; }
   table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
   th { text-align: left; padding: 8px 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 0.8em; text-transform: uppercase; }
   td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   tr:last-child td { border-bottom: none; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; font-weight: 600; }
-  .badge-green { background: rgba(63,185,80,0.15); color: var(--accent2); border: 1px solid rgba(63,185,80,0.3); }
-  .badge-gray  { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 1px solid rgba(139,148,158,0.2); }
-  .badge-blue  { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
-  .badge-yellow{ background: rgba(210,153,34,0.15); color: #e3b341; border: 1px solid rgba(210,153,34,0.3); }
+  .badge-green  { background: rgba(63,185,80,0.15);   color: var(--accent2); border: 1px solid rgba(63,185,80,0.3); }
+  .badge-gray   { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 1px solid rgba(139,148,158,0.2); }
+  .badge-blue   { background: rgba(88,166,255,0.15);  color: var(--accent);  border: 1px solid rgba(88,166,255,0.3); }
+  .badge-yellow { background: rgba(210,153,34,0.15);  color: #e3b341;        border: 1px solid rgba(210,153,34,0.3); }
   input[type=text], input[type=file] {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 7px 12px; font-size: 0.9em; width: 100%;
@@ -1212,77 +925,39 @@ ADMIN_HTML = """
     background: var(--surface); color: var(--text); cursor: pointer; font-size: 0.88em;
     transition: border-color 0.15s, background 0.15s; text-decoration: none;
   }
-  .btn:hover { border-color: var(--accent); background: rgba(88,166,255,0.08); }
-  .btn-primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+  .btn:hover       { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+  .btn-primary     { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
   .btn-primary:hover { background: #79b8ff; border-color: #79b8ff; }
-  .btn-danger { color: var(--warn); border-color: rgba(248,81,73,0.3); }
+  .btn-danger      { color: var(--warn); border-color: rgba(248,81,73,0.3); }
   .btn-danger:hover { background: rgba(248,81,73,0.08); border-color: var(--warn); }
-  .btn-sm { padding: 4px 10px; font-size: 0.8em; }
-  .form-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-  .form-group { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 160px; }
+  .btn-sm          { padding: 4px 10px; font-size: 0.8em; }
+  .form-row        { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .form-group      { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 160px; }
   .form-group label { font-size: 0.8em; color: var(--text-dim); }
-  .no-clients { color: var(--text-dim); font-size: 0.9em; padding: 12px 0; }
-  .flash { padding: 10px 16px; border-radius: 6px; margin-bottom: 20px; font-size: 0.9em; }
-  .flash-ok  { background: rgba(63,185,80,0.12); border: 1px solid rgba(63,185,80,0.3); color: var(--accent2); }
-  .flash-err { background: rgba(248,81,73,0.12); border: 1px solid rgba(248,81,73,0.3); color: var(--warn); }
-  .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.85em; }
-  .fw-name { color: var(--accent2); }
-  .stale { color: var(--warn); }
-  details summary { cursor: pointer; color: var(--text-dim); font-size: 0.85em; margin-top: 10px; }
-  details[open] summary { margin-bottom: 10px; }
-  .uptime-dim { color: var(--text-dim); font-size: 0.8em; }
-
+  .no-clients      { color: var(--text-dim); font-size: 0.9em; padding: 12px 0; }
+  .flash           { padding: 10px 16px; border-radius: 6px; margin-bottom: 20px; font-size: 0.9em; }
+  .flash-ok        { background: rgba(63,185,80,0.12);  border: 1px solid rgba(63,185,80,0.3);  color: var(--accent2); }
+  .flash-err       { background: rgba(248,81,73,0.12);  border: 1px solid rgba(248,81,73,0.3);  color: var(--warn); }
+  .mono            { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.85em; }
+  .fw-name         { color: var(--accent2); }
+  .uptime-dim      { color: var(--text-dim); font-size: 0.8em; }
   .drop-zone {
-    border: 2px dashed var(--border);
-    border-radius: 6px;
-    padding: 16px 12px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 0.85em;
-    cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
-    position: relative;
+    border: 2px dashed var(--border); border-radius: 6px; padding: 16px 12px;
+    text-align: center; color: var(--text-dim); font-size: 0.85em; cursor: pointer;
+    transition: border-color 0.15s, background 0.15s; position: relative;
   }
-  .drop-zone:hover, .drop-zone.dragover {
-    border-color: var(--accent);
-    background: rgba(88,166,255,0.06);
-    color: var(--text);
-  }
-  .drop-zone input[type=file] {
-    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
-  }
+  .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: rgba(88,166,255,0.06); color: var(--text); }
+  .drop-zone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
   .drop-zone .drop-icon { font-size: 1.4em; display: block; margin-bottom: 4px; }
-  .drop-zone .drop-filename {
-    display: inline-block; margin-top: 6px;
-    color: var(--accent2); font-weight: 600; font-size: 0.9em;
-  }
-
-  .remove-cell {
-    text-align: right;
-    white-space: nowrap;
-  }
-  .btn-remove {
-    color: var(--text-dim);
-    border-color: transparent;
-    font-size: 0.78em;
-    padding: 3px 8px;
-    opacity: 0.55;
-    transition: opacity 0.15s, color 0.15s;
-  }
-  .btn-remove:hover {
-    opacity: 1;
-    color: var(--warn);
-    border-color: rgba(248,81,73,0.3);
-    background: rgba(248,81,73,0.06);
-  }
+  .drop-zone .drop-filename { display: inline-block; margin-top: 6px; color: var(--accent2); font-weight: 600; font-size: 0.9em; }
+  .remove-cell { text-align: right; white-space: nowrap; }
+  .btn-remove { color: var(--text-dim); border-color: transparent; font-size: 0.78em; padding: 3px 8px; opacity: 0.55; transition: opacity 0.15s, color 0.15s; }
+  .btn-remove:hover { opacity: 1; color: var(--warn); border-color: rgba(248,81,73,0.3); background: rgba(248,81,73,0.06); }
 </style>
 </head>
 <body>
 <h1>SyncFrame <span>OTA Admin</span></h1>
-<p class="subtitle">
-  Manage remote firmware updates &nbsp;&middot;&nbsp;
-  <a href="{{ home_url }}">&#8592; Back to Photo Viewer</a>
-</p>
+<p class="subtitle">Manage remote firmware updates &nbsp;&middot;&nbsp; <a href="{{ home_url }}">&#8592; Back to Photo Viewer</a></p>
 
 {% if flash_ok %}<div class="flash flash-ok">{{ flash_ok }}</div>{% endif %}
 {% if flash_err %}<div class="flash flash-err">{{ flash_err }}</div>{% endif %}
@@ -1291,21 +966,10 @@ ADMIN_HTML = """
   <h2>Register Client</h2>
   <form method="POST" action="{{ add_url }}">
     <div class="form-row">
-      <div class="form-group">
-        <label>Hostname (e.g. syncframe-4A2)</label>
-        <input type="text" name="hostname" placeholder="syncframe-XXXX" required>
-      </div>
-      <div class="form-group">
-        <label>MAC Address (optional)</label>
-        <input type="text" name="mac" placeholder="AA:BB:CC:DD:EE:FF">
-      </div>
-      <div class="form-group">
-        <label>Label / Notes</label>
-        <input type="text" name="label" placeholder="Living room frame">
-      </div>
-      <div style="display:flex;align-items:flex-end;">
-        <button class="btn btn-primary" type="submit">Add Client</button>
-      </div>
+      <div class="form-group"><label>Hostname</label><input type="text" name="hostname" placeholder="syncframe-XXXX" required></div>
+      <div class="form-group"><label>MAC Address (optional)</label><input type="text" name="mac" placeholder="AA:BB:CC:DD:EE:FF"></div>
+      <div class="form-group"><label>Label / Notes</label><input type="text" name="label" placeholder="Living room frame"></div>
+      <div style="display:flex;align-items:flex-end;"><button class="btn btn-primary" type="submit">Add Client</button></div>
     </div>
   </form>
 </div>
@@ -1314,19 +978,10 @@ ADMIN_HTML = """
   <h2>Registered Clients</h2>
   {% if clients %}
   <table>
-    <thead>
-      <tr>
-        <th>Hostname</th>
-        <th>MAC</th>
-        <th>Label</th>
-        <th>Last Check-In</th>
-        <th>Compiled</th>
-        <th>Uptime</th>
-        <th>Pending Firmware</th>
-        <th>Firmware</th>
-        <th></th>
-      </tr>
-    </thead>
+    <thead><tr>
+      <th>Hostname</th><th>MAC</th><th>Label</th><th>Last Check-In</th>
+      <th>Compiled</th><th>Uptime</th><th>Pending Firmware</th><th>Firmware</th><th></th>
+    </tr></thead>
     <tbody>
     {% for hostname, info in clients.items() %}
       <tr>
@@ -1335,46 +990,30 @@ ADMIN_HTML = """
         <td>{{ info.label or '&mdash;' }}</td>
         <td>
           {% if info.last_seen %}
-            <span class="badge {{ 'badge-green' if info.fresh else 'badge-gray' }}">
-              {{ info.last_seen_human }}
-            </span>
-          {% else %}
-            <span class="badge badge-gray">Never</span>
-          {% endif %}
+            <span class="badge {{ 'badge-green' if info.fresh else 'badge-gray' }}">{{ info.last_seen_human }}</span>
+          {% else %}<span class="badge badge-gray">Never</span>{% endif %}
         </td>
         <td>
-          {% if info.compiled %}
-            <span class="badge badge-yellow mono">{{ info.compiled }}</span>
-          {% else %}
-            <span class="badge badge-gray">&mdash;</span>
-          {% endif %}
+          {% if info.compiled %}<span class="badge badge-yellow mono">{{ info.compiled }}</span>
+          {% else %}<span class="badge badge-gray">&mdash;</span>{% endif %}
         </td>
         <td>
-          {% if info.uptime %}
-            <span class="uptime-dim mono">{{ info.uptime_human }}</span>
-          {% else %}
-            <span class="badge badge-gray">&mdash;</span>
-          {% endif %}
+          {% if info.uptime %}<span class="uptime-dim mono">{{ info.uptime_human }}</span>
+          {% else %}<span class="badge badge-gray">&mdash;</span>{% endif %}
         </td>
         <td>
-          {% if info.firmware %}
-            <span class="badge badge-blue fw-name mono">{{ info.firmware }}</span>
-          {% else %}
-            <span class="badge badge-gray">None</span>
-          {% endif %}
+          {% if info.firmware %}<span class="badge badge-blue fw-name mono">{{ info.firmware }}</span>
+          {% else %}<span class="badge badge-gray">None</span>{% endif %}
         </td>
-
         <td style="min-width:200px">
-          <form method="POST" action="{{ upload_fw_url }}" enctype="multipart/form-data"
-                id="fw-form-{{ loop.index }}">
+          <form method="POST" action="{{ upload_fw_url }}" enctype="multipart/form-data" id="fw-form-{{ loop.index }}">
             <input type="hidden" name="hostname" value="{{ hostname }}">
             <div class="drop-zone" id="dz-{{ loop.index }}"
                  ondragover="dzOver(event,'dz-{{ loop.index }}')"
                  ondragleave="dzLeave('dz-{{ loop.index }}')"
                  ondrop="dzDrop(event,'dz-{{ loop.index }}','fw-form-{{ loop.index }}','fn-{{ loop.index }}')"
                  onclick="this.querySelector('input[type=file]').click()">
-              <span class="drop-icon">&#128229;</span>
-              Drop .bin or click to browse
+              <span class="drop-icon">&#128229;</span>Drop .bin or click to browse
               <span class="drop-filename" id="fn-{{ loop.index }}"></span>
               <input type="file" name="firmware" accept=".bin" required
                      onchange="dzPicked(this,'dz-{{ loop.index }}','fn-{{ loop.index }}','fw-form-{{ loop.index }}')">
@@ -1384,21 +1023,15 @@ ADMIN_HTML = """
           <form method="POST" action="{{ clear_fw_url }}" style="margin-top:6px;">
             <input type="hidden" name="hostname" value="{{ hostname }}">
             <button class="btn btn-sm btn-danger" type="submit"
-                    onclick="return confirm('Clear pending firmware for {{ hostname }}?')">
-              &#10007; Clear pending fw
-            </button>
+                    onclick="return confirm('Clear pending firmware for {{ hostname }}?')">&#10007; Clear pending fw</button>
           </form>
           {% endif %}
         </td>
-
         <td class="remove-cell">
           <form method="POST" action="{{ remove_url }}">
             <input type="hidden" name="hostname" value="{{ hostname }}">
             <button class="btn btn-sm btn-remove" type="submit"
-                    title="Remove this device entry"
-                    onclick="return confirm('Remove device entry for {{ hostname }}? This only deletes the record here.')">
-              &#128465; Remove device
-            </button>
+                    onclick="return confirm('Remove device entry for {{ hostname }}?')">&#128465; Remove device</button>
           </form>
         </td>
       </tr>
@@ -1406,57 +1039,41 @@ ADMIN_HTML = """
     </tbody>
   </table>
   {% else %}
-  <p class="no-clients">No clients registered yet. Add one above or let a device check in automatically.</p>
+  <p class="no-clients">No clients registered yet.</p>
   {% endif %}
 </div>
 
 <div class="card">
   <h2>Current manifest.txt</h2>
   <pre class="mono" style="white-space:pre-wrap;color:var(--accent2);font-size:0.85em;">{{ manifest_content or '(empty)' }}</pre>
-  <p style="margin-top:10px;font-size:0.8em;color:var(--text-dim);">
-    Served at <span class="mono">{{ manifest_url }}</span>
-  </p>
+  <p style="margin-top:10px;font-size:0.8em;color:var(--text-dim);">Served at <span class="mono">{{ manifest_url }}</span></p>
   <p style="margin-top:8px;font-size:0.8em;color:var(--text-dim);">
-    ESP32 headers to send with manifest fetch:<br>
-    <span class="mono" style="color:var(--accent);">X-SF-Hostname</span> &nbsp;
+    ESP32 headers: <span class="mono" style="color:var(--accent);">X-SF-Hostname</span> &nbsp;
     <span class="mono" style="color:var(--accent);">X-SF-Compiled</span> &nbsp;
     <span class="mono" style="color:var(--accent);">X-SF-Uptime</span>
   </p>
 </div>
 
 <script>
-  function dzOver(e, id) {
-    e.preventDefault();
-    document.getElementById(id).classList.add('dragover');
+  function dzOver(e,id){e.preventDefault();document.getElementById(id).classList.add('dragover');}
+  function dzLeave(id){document.getElementById(id).classList.remove('dragover');}
+  function dzDrop(e,dzId,formId,fnId){
+    e.preventDefault();dzLeave(dzId);
+    const file=e.dataTransfer.files[0];
+    if(!file)return;
+    if(!file.name.toLowerCase().endsWith('.bin')){alert('Only .bin firmware files are accepted.');return;}
+    const form=document.getElementById(formId);
+    const input=form.querySelector('input[type=file]');
+    const dt=new DataTransfer();dt.items.add(file);input.files=dt.files;
+    document.getElementById(fnId).textContent=file.name;
+    setTimeout(()=>form.submit(),300);
   }
-  function dzLeave(id) {
-    document.getElementById(id).classList.remove('dragover');
+  function dzPicked(input,dzId,fnId,formId){
+    if(!input.files.length)return;
+    document.getElementById(fnId).textContent=input.files[0].name;
+    setTimeout(()=>document.getElementById(formId).submit(),300);
   }
-  function dzDrop(e, dzId, formId, fnId) {
-    e.preventDefault();
-    dzLeave(dzId);
-    const file = e.dataTransfer.files[0];
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.bin')) {
-      alert('Only .bin firmware files are accepted.');
-      return;
-    }
-    const form = document.getElementById(formId);
-    const input = form.querySelector('input[type=file]');
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    input.files = dt.files;
-    document.getElementById(fnId).textContent = file.name;
-    setTimeout(() => form.submit(), 300);
-  }
-  function dzPicked(input, dzId, fnId, formId) {
-    if (!input.files.length) return;
-    const name = input.files[0].name;
-    document.getElementById(fnId).textContent = name;
-    setTimeout(() => document.getElementById(formId).submit(), 300);
-  }
-
-  setInterval(() => { location.reload(); }, 60000);
+  setInterval(()=>{location.reload();},60000);
 </script>
 </body>
 </html>
@@ -1470,16 +1087,11 @@ def _humanize(iso_str):
         dt = datetime.fromisoformat(iso_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        delta = datetime.now(timezone.utc) - dt
-        s = int(delta.total_seconds())
-        if s < 60:
-            return f"{s}s ago"
-        elif s < 3600:
-            return f"{s // 60}m ago"
-        elif s < 86400:
-            return f"{s // 3600}h ago"
-        else:
-            return f"{s // 86400}d ago"
+        s = int((datetime.now(timezone.utc) - dt).total_seconds())
+        if s < 60:    return f"{s}s ago"
+        if s < 3600:  return f"{s // 60}m ago"
+        if s < 86400: return f"{s // 3600}h ago"
+        return f"{s // 86400}d ago"
     except Exception:
         return iso_str
 
@@ -1487,14 +1099,12 @@ def _humanize(iso_str):
 def _humanize_uptime(seconds_str):
     try:
         s = int(seconds_str)
-        days = s // 86400
-        hours = (s % 86400) // 3600
-        minutes = (s % 3600) // 60
+        days, rem = divmod(s, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
         parts = []
-        if days:
-            parts.append(f"{days}d")
-        if hours:
-            parts.append(f"{hours}h")
+        if days:  parts.append(f"{days}d")
+        if hours: parts.append(f"{hours}h")
         parts.append(f"{minutes}m")
         return " ".join(parts)
     except Exception:
@@ -1504,41 +1114,31 @@ def _humanize_uptime(seconds_str):
 @bp.route("/admin")
 @requires_auth
 def admin_page():
-    flash_ok = request.args.get("ok")
+    flash_ok  = request.args.get("ok")
     flash_err = request.args.get("err")
-
     with _ota_lock:
         raw_clients = _load_clients()
-
     clients = {}
     for hostname, info in raw_clients.items():
         entry = dict(info)
         entry["last_seen_human"] = _humanize(info.get("last_seen"))
-        entry["uptime_human"] = _humanize_uptime(info.get("uptime", "")) if info.get("uptime") else None
+        entry["uptime_human"]    = _humanize_uptime(info.get("uptime", "")) if info.get("uptime") else None
         try:
             dt = datetime.fromisoformat(info["last_seen"])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+            if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
             entry["fresh"] = (datetime.now(timezone.utc) - dt).total_seconds() < 86400
         except Exception:
             entry["fresh"] = False
         clients[hostname] = entry
-
-    manifest_path = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
+    manifest_path    = os.path.join(OTA_FIRMWARE_DIR, "manifest.txt")
     manifest_content = ""
     if os.path.exists(manifest_path):
         with open(manifest_path) as f:
             manifest_content = f.read().strip()
-
     manifest_url = (URL_PREFIX or "") + "/manifest.txt"
-
     return render_template_string(
-        ADMIN_HTML,
-        clients=clients,
-        flash_ok=flash_ok,
-        flash_err=flash_err,
-        manifest_content=manifest_content,
-        manifest_url=manifest_url,
+        ADMIN_HTML, clients=clients, flash_ok=flash_ok, flash_err=flash_err,
+        manifest_content=manifest_content, manifest_url=manifest_url,
         home_url=url_for("syncframe.index"),
         add_url=url_for("syncframe.admin_add_client"),
         remove_url=url_for("syncframe.admin_remove_client"),
@@ -1551,24 +1151,18 @@ def admin_page():
 @requires_auth
 def admin_add_client():
     hostname = request.form.get("hostname", "").strip()
-    mac = request.form.get("mac", "").strip()
-    label = request.form.get("label", "").strip()
-
+    mac      = request.form.get("mac",      "").strip()
+    label    = request.form.get("label",    "").strip()
     if not hostname:
         return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
-
     with _ota_lock:
         clients = _load_clients()
         if hostname in clients:
             return redirect(url_for("syncframe.admin_page") + "?err=Client+already+exists")
-        clients[hostname] = {
-            "mac": mac, "label": label or hostname,
-            "last_seen": None, "firmware": None,
-            "compiled": None, "uptime": None,
-        }
+        clients[hostname] = {"mac": mac, "label": label or hostname,
+                             "last_seen": None, "firmware": None, "compiled": None, "uptime": None}
         _save_clients(clients)
         _rebuild_manifest()
-
     return redirect(url_for("syncframe.admin_page") + f"?ok=Client+{hostname}+added")
 
 
@@ -1578,7 +1172,6 @@ def admin_remove_client():
     hostname = request.form.get("hostname", "").strip()
     if not hostname:
         return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
-
     with _ota_lock:
         clients = _load_clients()
         if hostname in clients:
@@ -1587,12 +1180,8 @@ def admin_remove_client():
             _save_clients(clients)
             _rebuild_manifest()
             if fw and not any(c.get("firmware") == fw for c in clients.values()):
-                fw_path = os.path.join(OTA_FIRMWARE_DIR, fw)
-                try:
-                    os.remove(fw_path)
-                except Exception:
-                    pass
-
+                try: os.remove(os.path.join(OTA_FIRMWARE_DIR, fw))
+                except Exception: pass
     return redirect(url_for("syncframe.admin_page") + f"?ok=Client+{hostname}+removed")
 
 
@@ -1602,35 +1191,26 @@ def admin_upload_firmware():
     hostname = request.form.get("hostname", "").strip()
     if not hostname:
         return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
-
     if "firmware" not in request.files:
         return redirect(url_for("syncframe.admin_page") + "?err=No+file+provided")
-
     fw_file = request.files["firmware"]
     if not fw_file or not allowed_firmware(fw_file.filename):
         return redirect(url_for("syncframe.admin_page") + "?err=Only+.bin+files+allowed")
-
     safe_hostname = hostname.replace("/", "_").replace("..", "_")
     filename = f"{safe_hostname}.bin"
-    dest = os.path.join(OTA_FIRMWARE_DIR, filename)
+    dest     = os.path.join(OTA_FIRMWARE_DIR, filename)
     fw_file.save(dest)
     logging.info("Firmware saved for %s -> %s", hostname, dest)
-
     token = str(int(time.time()))
-
     with _ota_lock:
         clients = _load_clients()
         if hostname not in clients:
-            clients[hostname] = {
-                "mac": "", "label": hostname,
-                "last_seen": None, "firmware": None,
-                "compiled": None, "uptime": None,
-            }
+            clients[hostname] = {"mac": "", "label": hostname, "last_seen": None,
+                                 "firmware": None, "compiled": None, "uptime": None}
         clients[hostname]["firmware"] = filename
         clients[hostname]["fw_token"] = token
         _save_clients(clients)
         _rebuild_manifest()
-
     return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+uploaded+for+{hostname}")
 
 
@@ -1640,7 +1220,6 @@ def admin_clear_firmware():
     hostname = request.form.get("hostname", "").strip()
     if not hostname:
         return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
-
     with _ota_lock:
         clients = _load_clients()
         if hostname in clients:
@@ -1648,7 +1227,6 @@ def admin_clear_firmware():
             clients[hostname]["fw_token"] = None
             _save_clients(clients)
             _rebuild_manifest()
-
     return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+cleared+for+{hostname}")
 
 
@@ -1667,28 +1245,16 @@ def start_web_server():
             logging.error("Could not ensure certificates: %s. Falling back to HTTP.", e)
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
             return
-
         if os.path.exists(CERTFILE) and os.path.exists(KEYFILE):
-            logging.info(
-                "Starting HTTPS Flask server on %s:%s (prefix=%s)",
-                SERVER_HOST, SERVER_PORT, URL_PREFIX or "/",
-            )
-            app.run(
-                host=SERVER_HOST,
-                port=SERVER_PORT,
-                threaded=True,
-                ssl_context=(CERTFILE, KEYFILE),
-            )
+            logging.info("Starting HTTPS Flask server on %s:%s (prefix=%s)",
+                         SERVER_HOST, SERVER_PORT, URL_PREFIX or "/")
+            app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True, ssl_context=(CERTFILE, KEYFILE))
         else:
-            logging.error(
-                "CERTFILE or KEYFILE not found after generation. Falling back to HTTP."
-            )
+            logging.error("CERTFILE or KEYFILE not found after generation. Falling back to HTTP.")
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
     else:
-        logging.info(
-            "Starting HTTP Flask server on %s:%s (prefix=%s)",
-            SERVER_HOST, SERVER_PORT, URL_PREFIX or "/",
-        )
+        logging.info("Starting HTTP Flask server on %s:%s (prefix=%s)",
+                     SERVER_HOST, SERVER_PORT, URL_PREFIX or "/")
         app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
 
 
@@ -1702,22 +1268,16 @@ if __name__ == "__main__":
     try:
         broker_process = subprocess.Popen(
             ["/usr/sbin/mosquitto", "-c", mosq_conf, "-p", str(MQTT_PORT)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
     except FileNotFoundError:
         broker_process = None
-        logging.warning(
-            "mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start."
-        )
+        logging.warning("mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start.")
 
     try:
         w = Watcher()
         logging.info("Watcher started. Monitoring file changes on %s...", WATCH_FILE)
-        logging.info(
-            'URL prefix is: "%s" (use / or empty in config to serve at root)',
-            URL_PREFIX or "/",
-        )
+        logging.info('URL prefix is: "%s"', URL_PREFIX or "/")
         logging.info("Basic auth enabled. Username: %s", USERNAME)
 
         web_server_thread = threading.Thread(target=start_web_server)
