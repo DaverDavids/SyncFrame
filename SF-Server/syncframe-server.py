@@ -17,9 +17,19 @@ from io import BytesIO
 import paho.mqtt.client as mqtt
 import pillow_heif
 import schedule
-from flask import (Blueprint, Flask, Response, redirect,
-                   render_template_string, request, send_file,
-                   send_from_directory, session, url_for, jsonify)
+from flask import (
+    Blueprint,
+    Flask,
+    Response,
+    redirect,
+    render_template_string,
+    request,
+    send_file,
+    send_from_directory,
+    session,
+    url_for,
+    jsonify,
+)
 from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from PIL import Image, ImageEnhance, ImageSequence
@@ -31,6 +41,7 @@ try:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
+
     CRYPTOGRAPHY_AVAILABLE = True
 except Exception:
     CRYPTOGRAPHY_AVAILABLE = False
@@ -55,9 +66,12 @@ os.makedirs(OTA_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 try:
     import pwd as _pwd
+
     _mosq = _pwd.getpwnam("mosquitto")
     os.chown(MOSQ_DIR, _mosq.pw_uid, _mosq.pw_gid)
-    logging.info("Set %s ownership to mosquitto (%d:%d)", MOSQ_DIR, _mosq.pw_uid, _mosq.pw_gid)
+    logging.info(
+        "Set %s ownership to mosquitto (%d:%d)", MOSQ_DIR, _mosq.pw_uid, _mosq.pw_gid
+    )
 except KeyError:
     logging.warning("mosquitto user not found - skipping chown of %s", MOSQ_DIR)
 except Exception as _e:
@@ -147,32 +161,47 @@ if not secret_key_value:
 # Read configuration values
 # ---------------------------------------------------------------------------
 SERVER_HOST = config.get("server", "host", fallback=default_config["server"]["host"])
-SERVER_PORT = config.getint("server", "port", fallback=int(default_config["server"]["port"]))
+SERVER_PORT = config.getint(
+    "server", "port", fallback=int(default_config["server"]["port"])
+)
 USE_HTTPS = config.getboolean(
-    "server", "use_https",
+    "server",
+    "use_https",
     fallback=(default_config["server"]["use_https"].lower() == "true"),
 )
-CERTFILE = os.path.abspath(config.get("server", "certfile", fallback=default_config["server"]["certfile"]))
-KEYFILE  = os.path.abspath(config.get("server", "keyfile",  fallback=default_config["server"]["keyfile"]))
+CERTFILE = os.path.abspath(
+    config.get("server", "certfile", fallback=default_config["server"]["certfile"])
+)
+KEYFILE = os.path.abspath(
+    config.get("server", "keyfile", fallback=default_config["server"]["keyfile"])
+)
 
-_raw_prefix = config.get("server", "url_prefix", fallback=default_config["server"]["url_prefix"]).strip()
+_raw_prefix = config.get(
+    "server", "url_prefix", fallback=default_config["server"]["url_prefix"]
+).strip()
 URL_PREFIX = "" if _raw_prefix in ("", "/") else "/" + _raw_prefix.strip("/")
 
-USERNAME = config.get("server", "username", fallback=default_config["server"]["username"])
-PASSWORD = config.get("server", "password", fallback=default_config["server"]["password"])
+USERNAME = config.get(
+    "server", "username", fallback=default_config["server"]["username"]
+)
+PASSWORD = config.get(
+    "server", "password", fallback=default_config["server"]["password"]
+)
 
-MQTT_HOST     = config.get("mqtt", "host",     fallback=default_config["mqtt"]["host"])
-MQTT_PORT     = config.getint("mqtt", "port",  fallback=int(default_config["mqtt"]["port"]))
-MQTT_TOPIC    = config.get("mqtt", "topic",    fallback=default_config["mqtt"]["topic"])
+MQTT_HOST = config.get("mqtt", "host", fallback=default_config["mqtt"]["host"])
+MQTT_PORT = config.getint("mqtt", "port", fallback=int(default_config["mqtt"]["port"]))
+MQTT_TOPIC = config.get("mqtt", "topic", fallback=default_config["mqtt"]["topic"])
 MQTT_USERNAME = config.get("mqtt", "username", fallback="")
 MQTT_PASSWORD = config.get("mqtt", "password", fallback="")
 
 WATCH_FILE = os.path.abspath(
-    config.get("watcher", "file_to_watch", fallback=default_config["watcher"]["file_to_watch"])
+    config.get(
+        "watcher", "file_to_watch", fallback=default_config["watcher"]["file_to_watch"]
+    )
 )
 
-IMAGE_MAX_WIDTH    = config.getint("image", "max_width",    fallback=1920)
-IMAGE_MAX_HEIGHT   = config.getint("image", "max_height",   fallback=1080)
+IMAGE_MAX_WIDTH = config.getint("image", "max_width", fallback=1920)
+IMAGE_MAX_HEIGHT = config.getint("image", "max_height", fallback=1080)
 IMAGE_JPEG_QUALITY = config.getint("image", "jpeg_quality", fallback=85)
 
 RESOLUTIONS = [
@@ -219,10 +248,10 @@ ESP_APP_DESC_MAGIC = 0xABCD5432
 #   +48  project_name (32 bytes)
 #   +80  time[16]     <- compile time  e.g. "19:50:46"  (logged, not used as ID)
 #   +96  date[16]     <- compile date  e.g. "Feb 11 2026" (logged, not used as ID)
-_VER_REL_OFFSET  = 16
+_VER_REL_OFFSET = 16
 _TIME_REL_OFFSET = 80
 _DATE_REL_OFFSET = 96
-_DESC_MIN_SIZE   = 112  # must have at least date field fully present
+_DESC_MIN_SIZE = 112  # must have at least date field fully present
 
 
 def _find_app_desc_offset(data: bytes):
@@ -264,21 +293,26 @@ def extract_compile_id(data: bytes):
             logging.warning("extract_compile_id: ESP app descriptor magic not found")
             return None
 
-        ver_off  = desc_off + _VER_REL_OFFSET
+        ver_off = desc_off + _VER_REL_OFFSET
         time_off = desc_off + _TIME_REL_OFFSET
         date_off = desc_off + _DATE_REL_OFFSET
 
         if len(data) < date_off + 16:
-            logging.warning("extract_compile_id: binary too short to contain date field")
+            logging.warning(
+                "extract_compile_id: binary too short to contain date field"
+            )
             return None
 
-        version   = data[ver_off:ver_off + 32].decode("ascii").rstrip("\x00").strip()
-        time_str  = data[time_off:time_off + 16].decode("ascii").rstrip("\x00").strip()
-        date_str  = data[date_off:date_off + 16].decode("ascii").rstrip("\x00").strip()
+        version = data[ver_off : ver_off + 32].decode("ascii").rstrip("\x00").strip()
+        time_str = data[time_off : time_off + 16].decode("ascii").rstrip("\x00").strip()
+        date_str = data[date_off : date_off + 16].decode("ascii").rstrip("\x00").strip()
 
         logging.info(
             "extract_compile_id: descriptor at offset %d  version=%r  date=%r  time=%r",
-            desc_off, version, date_str, time_str,
+            desc_off,
+            version,
+            date_str,
+            time_str,
         )
 
         if not version:
@@ -297,7 +331,7 @@ def extract_compile_id(data: bytes):
 app = Flask(__name__)
 app.secret_key = secret_key_value
 bp = Blueprint("syncframe", __name__)
-ALLOWED_EXTENSIONS          = {"jpg", "jpeg", "png", "heic", "webp", "gif"}
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "heic", "webp", "gif"}
 ALLOWED_FIRMWARE_EXTENSIONS = {"bin"}
 UPLOAD_FOLDER = DATA_DIR
 
@@ -306,10 +340,10 @@ class DualKeySessionInterface(SecureCookieSessionInterface):
     def open_session(self, app, request):
         sess = super().open_session(app, request)
         cookie_name = self.get_cookie_name(app)
-        raw_cookie  = request.cookies.get(cookie_name)
+        raw_cookie = request.cookies.get(cookie_name)
         if raw_cookie and not sess.get("authenticated"):
             try:
-                s    = URLSafeTimedSerializer(OLD_SECRET_KEY, salt="cookie-session")
+                s = URLSafeTimedSerializer(OLD_SECRET_KEY, salt="cookie-session")
                 data = s.loads(raw_cookie)
                 logging.info("Session migrated from old secret key to new key.")
                 return self.session_class(data)
@@ -329,16 +363,20 @@ def create_mqtt_password_file():
     """Always regenerate the pwfile from current config so credential changes take effect."""
     pwfile = os.path.join(MOSQ_DIR, "pwfile")
     if not MQTT_USERNAME or not MQTT_PASSWORD:
-        logging.warning("MQTT username or password not set - skipping pwfile generation")
+        logging.warning(
+            "MQTT username or password not set - skipping pwfile generation"
+        )
         return
     try:
         subprocess.check_call(
             ["mosquitto_passwd", "-c", "-b", pwfile, MQTT_USERNAME, MQTT_PASSWORD],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         os.chmod(pwfile, 0o600)
         try:
             import pwd
+
             mosq = pwd.getpwnam("mosquitto")
             os.chown(pwfile, mosq.pw_uid, mosq.pw_gid)
         except Exception as e:
@@ -361,21 +399,27 @@ def requires_auth(f):
             app.permanent_session_lifetime = timedelta(days=3650)
             return f(*args, **kwargs)
         return Response(
-            "Authentication required", 401,
+            "Authentication required",
+            401,
             {"WWW-Authenticate": 'Basic realm="Login Required"'},
         )
+
     return decorated
 
 
-def generate_self_signed_cert_py(certfile, keyfile, common_name="localhost", days_valid=3650):
+def generate_self_signed_cert_py(
+    certfile, keyfile, common_name="localhost", days_valid=3650
+):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "State"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, "Locality"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SyncFrame"),
-        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-    ])
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "State"),
+            x509.NameAttribute(NameOID.LOCALITY_NAME, "Locality"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SyncFrame"),
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -388,21 +432,36 @@ def generate_self_signed_cert_py(certfile, keyfile, common_name="localhost", day
         .sign(key, hashes.SHA256())
     )
     with open(keyfile, "wb") as f:
-        f.write(key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption(),
-        ))
+        f.write(
+            key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
     os.chmod(keyfile, 0o600)
     with open(certfile, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
 
-def generate_self_signed_cert_openssl(certfile, keyfile, common_name="localhost", days_valid=3650):
+def generate_self_signed_cert_openssl(
+    certfile, keyfile, common_name="localhost", days_valid=3650
+):
     cmd = [
-        "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
-        "-keyout", keyfile, "-out", certfile,
-        "-days", str(days_valid), "-subj", f"/CN={common_name}",
+        "openssl",
+        "req",
+        "-x509",
+        "-nodes",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        keyfile,
+        "-out",
+        certfile,
+        "-days",
+        str(days_valid),
+        "-subj",
+        f"/CN={common_name}",
     ]
     try:
         subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -420,7 +479,9 @@ def ensure_certificates(certfile, keyfile):
         d = os.path.dirname(path)
         if d and not os.path.exists(d):
             os.makedirs(d, exist_ok=True)
-    logging.info("Generating self-signed certificate and key at %s and %s", certfile, keyfile)
+    logging.info(
+        "Generating self-signed certificate and key at %s and %s", certfile, keyfile
+    )
     try:
         if CRYPTOGRAPHY_AVAILABLE:
             generate_self_signed_cert_py(certfile, keyfile)
@@ -452,36 +513,90 @@ def fix_image_orientation(image):
 
 def generate_mqtt_certificates():
     os.makedirs(MOSQ_DIR, exist_ok=True)
-    ca_key     = os.path.join(MOSQ_DIR, "ca.key")
-    ca_crt     = os.path.join(MOSQ_DIR, "ca.crt")
+    ca_key = os.path.join(MOSQ_DIR, "ca.key")
+    ca_crt = os.path.join(MOSQ_DIR, "ca.crt")
     server_key = os.path.join(MOSQ_DIR, "server.key")
     server_crt = os.path.join(MOSQ_DIR, "server.crt")
     server_csr = os.path.join(MOSQ_DIR, "server.csr")
 
-    if os.path.exists(ca_crt) and os.path.exists(server_crt) and os.path.exists(server_key):
+    if (
+        os.path.exists(ca_crt)
+        and os.path.exists(server_crt)
+        and os.path.exists(server_key)
+    ):
         logging.info("MQTT certificates already exist in %s", MOSQ_DIR)
         return
 
     logging.info("Generating MQTT certificates in %s...", MOSQ_DIR)
     try:
-        subprocess.check_call(["openssl", "genrsa", "-out", ca_key, "2048"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.check_call(["openssl", "req", "-new", "-x509", "-days", "3650",
-                                "-key", ca_key, "-out", ca_crt, "-subj", "/CN=MQTT-CA"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.check_call(["openssl", "genrsa", "-out", server_key, "2048"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.check_call(["openssl", "req", "-new", "-key", server_key,
-                                "-out", server_csr, "-subj", "/CN=localhost"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.check_call(["openssl", "x509", "-req", "-in", server_csr,
-                                "-CA", ca_crt, "-CAkey", ca_key, "-CAcreateserial",
-                                "-out", server_crt, "-days", "3650"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(
+            ["openssl", "genrsa", "-out", ca_key, "2048"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-x509",
+                "-days",
+                "3650",
+                "-key",
+                ca_key,
+                "-out",
+                ca_crt,
+                "-subj",
+                "/CN=MQTT-CA",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            ["openssl", "genrsa", "-out", server_key, "2048"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-key",
+                server_key,
+                "-out",
+                server_csr,
+                "-subj",
+                "/CN=localhost",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            [
+                "openssl",
+                "x509",
+                "-req",
+                "-in",
+                server_csr,
+                "-CA",
+                ca_crt,
+                "-CAkey",
+                ca_key,
+                "-CAcreateserial",
+                "-out",
+                server_crt,
+                "-days",
+                "3650",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         os.chmod(ca_key, 0o600)
         os.chmod(server_key, 0o600)
         try:
             import pwd
+
             mosq = pwd.getpwnam("mosquitto")
             for f in (ca_crt, server_crt, server_key):
                 os.chown(f, mosq.pw_uid, mosq.pw_gid)
@@ -503,7 +618,7 @@ def generate_thumbnails(source_img=None):
                 return
             source_img = Image.open(WATCH_FILE)
             source_img = fix_image_orientation(source_img)
-        for (w, h) in RESOLUTIONS:
+        for w, h in RESOLUTIONS:
             try:
                 thumb = source_img.copy()
                 thumb.thumbnail((w, h), Image.LANCZOS)
@@ -520,10 +635,10 @@ class Watcher:
     FILE_TO_WATCH = WATCH_FILE
 
     def __init__(self):
-        self.observer          = Observer()
-        self.last_md5          = self.calculate_md5()
+        self.observer = Observer()
+        self.last_md5 = self.calculate_md5()
         self.last_notification = 0
-        self.debounce_ms       = 1000
+        self.debounce_ms = 1000
 
     def calculate_md5(self):
         hash_md5 = hashlib.md5()
@@ -554,7 +669,7 @@ class Handler(FileSystemEventHandler):
 
     def on_modified(self, event):
         try:
-            event_path   = os.path.abspath(event.src_path)
+            event_path = os.path.abspath(event.src_path)
             watched_path = os.path.abspath(self.watcher.FILE_TO_WATCH)
         except Exception:
             return None
@@ -565,7 +680,7 @@ class Handler(FileSystemEventHandler):
             return None
         current_md5 = self.watcher.calculate_md5()
         if current_md5 != self.watcher.last_md5:
-            self.watcher.last_md5          = current_md5
+            self.watcher.last_md5 = current_md5
             self.watcher.last_notification = current_time
             logging.info(f"File {event.src_path} has been modified")
             send_mqtt_message("refresh")
@@ -598,9 +713,9 @@ def send_mqtt_message(message):
 
 def desaturate_image():
     try:
-        img       = Image.open(WATCH_FILE)
+        img = Image.open(WATCH_FILE)
         converter = ImageEnhance.Color(img)
-        img       = converter.enhance(0.66)
+        img = converter.enhance(0.66)
         changed_path = os.path.join(DATA_DIR, "photo-changed.jpg")
         img.save(changed_path)
         logging.info("Desaturated %s by 34%% and saved to %s", WATCH_FILE, changed_path)
@@ -655,6 +770,7 @@ tls_version tlsv1.2
 # ---------------------------------------------------------------------------
 # Flask routes
 # ---------------------------------------------------------------------------
+
 
 @bp.route("/", methods=["GET"])
 @requires_auth
@@ -830,13 +946,17 @@ def upload_file():
     ext = file.filename.rsplit(".", 1)[1].lower()
     try:
         data = file.read()
-        buf  = BytesIO(data)
+        buf = BytesIO(data)
         if ext == "heic":
             try:
                 heif_file = pillow_heif.read_heif(buf.getvalue())
                 img = Image.frombytes(
-                    heif_file.mode, heif_file.size, heif_file.data,
-                    "raw", heif_file.mode, heif_file.stride,
+                    heif_file.mode,
+                    heif_file.size,
+                    heif_file.data,
+                    "raw",
+                    heif_file.mode,
+                    heif_file.stride,
                 )
             except Exception as e:
                 logging.error("HEIC conversion failed: %s", e)
@@ -846,7 +966,11 @@ def upload_file():
                 buf.seek(0)
                 img = Image.open(buf)
                 first_frame = next(ImageSequence.Iterator(img))
-                img = first_frame.convert("RGB") if first_frame.mode in ("RGBA", "P", "LA") else first_frame
+                img = (
+                    first_frame.convert("RGB")
+                    if first_frame.mode in ("RGBA", "P", "LA")
+                    else first_frame
+                )
             except Exception as e:
                 logging.error("GIF processing failed: %s", e)
                 return "GIF processing failed", 500
@@ -863,7 +987,9 @@ def upload_file():
         max_size = (IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT)
         img.thumbnail(max_size, Image.LANCZOS)
         img.save(target_path, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
-        logging.info("Uploaded image resized to max %s and saved to %s", max_size, target_path)
+        logging.info(
+            "Uploaded image resized to max %s and saved to %s", max_size, target_path
+        )
         generate_thumbnails(source_img=img)
         return redirect(url_for("syncframe.index"))
     except Exception as e:
@@ -894,7 +1020,9 @@ def serve_photo_variant(w, h):
             os.path.basename(variant_file),
         )
     if os.path.exists(WATCH_FILE):
-        logging.info("Variant %dx%d missing - generating all thumbnails on-the-fly", w, h)
+        logging.info(
+            "Variant %dx%d missing - generating all thumbnails on-the-fly", w, h
+        )
         generate_thumbnails()
         if os.path.exists(variant_file):
             return send_from_directory(
@@ -914,19 +1042,23 @@ def allowed_file(filename):
 
 
 def allowed_firmware(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_FIRMWARE_EXTENSIONS
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_FIRMWARE_EXTENSIONS
+    )
 
 
 # ---------------------------------------------------------------------------
 # OTA public endpoint
 # ---------------------------------------------------------------------------
 
+
 @bp.route("/ota")
 def ota_check():
     hostname = (request.headers.get("X-SF-Hostname") or "").strip()
-    mac      = (request.headers.get("X-SF-MAC")      or "").strip().upper()
+    mac = (request.headers.get("X-SF-MAC") or "").strip().upper()
     compiled = (request.headers.get("X-SF-Compiled") or "").strip()
-    uptime   = (request.headers.get("X-SF-Uptime")   or "").strip()
+    uptime = (request.headers.get("X-SF-Uptime") or "").strip()
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -934,7 +1066,7 @@ def ota_check():
         clients = _load_clients()
 
         # --- entry lookup ---
-        mac_match      = None
+        mac_match = None
         hostname_match = None
 
         if mac:
@@ -944,7 +1076,10 @@ def ota_check():
                     break
 
         for k, v in clients.items():
-            if v.get("hostname", k) == hostname and v.get("mac", "") in ("", "0000000000"):
+            if v.get("hostname", k) == hostname and v.get("mac", "") in (
+                "",
+                "0000000000",
+            ):
                 hostname_match = k
                 break
 
@@ -957,14 +1092,23 @@ def ota_check():
             if mac:
                 # Check MAC conflict: existing entry has a different non-empty MAC
                 existing_mac = clients[hostname_match].get("mac", "")
-                if existing_mac and existing_mac not in ("", "0000000000") and existing_mac != mac:
+                if (
+                    existing_mac
+                    and existing_mac not in ("", "0000000000")
+                    and existing_mac != mac
+                ):
                     # Duplicate device — create new entry
                     new_key = f"{hostname}--{mac}"
                     clients[new_key] = {
-                        "hostname": hostname, "mac": mac, "label": new_key,
-                        "last_seen": now_iso, "compiled": compiled or None,
-                        "uptime": uptime or None, "firmware": None,
-                        "fw_compile_id": None, "last_flashed": None,
+                        "hostname": hostname,
+                        "mac": mac,
+                        "label": new_key,
+                        "last_seen": now_iso,
+                        "compiled": compiled or None,
+                        "uptime": uptime or None,
+                        "firmware": None,
+                        "fw_compile_id": None,
+                        "last_flashed": None,
                     }
                     matched_key = new_key
                 else:
@@ -973,19 +1117,29 @@ def ota_check():
             # Auto-register
             matched_key = hostname
             clients[matched_key] = {
-                "hostname": hostname, "mac": mac, "label": hostname,
-                "last_seen": now_iso, "compiled": compiled or None,
-                "uptime": uptime or None, "firmware": None,
-                "fw_compile_id": None, "last_flashed": None,
+                "hostname": hostname,
+                "mac": mac,
+                "label": hostname,
+                "last_seen": now_iso,
+                "compiled": compiled or None,
+                "uptime": uptime or None,
+                "firmware": None,
+                "fw_compile_id": None,
+                "last_flashed": None,
             }
 
         if matched_key not in clients:
             # Safety — shouldn't happen, but guard anyway
             clients[matched_key] = {
-                "hostname": hostname, "mac": mac, "label": hostname,
-                "last_seen": now_iso, "compiled": compiled or None,
-                "uptime": uptime or None, "firmware": None,
-                "fw_compile_id": None, "last_flashed": None,
+                "hostname": hostname,
+                "mac": mac,
+                "label": hostname,
+                "last_seen": now_iso,
+                "compiled": compiled or None,
+                "uptime": uptime or None,
+                "firmware": None,
+                "fw_compile_id": None,
+                "last_flashed": None,
             }
 
         # Update live fields
@@ -996,24 +1150,33 @@ def ota_check():
             clients[matched_key]["uptime"] = uptime
 
         # --- firmware decision ---
-        entry         = clients[matched_key]
+        entry = clients[matched_key]
         fw_compile_id = entry.get("fw_compile_id")
         firmware_file = entry.get("firmware")
 
         if fw_compile_id and compiled == fw_compile_id:
             # Device already running the target firmware — auto-clear
-            entry["firmware"]      = None
+            entry["firmware"] = None
             entry["fw_compile_id"] = None
-            entry["last_flashed"]  = now_iso
+            entry["last_flashed"] = now_iso
             _save_clients(clients)
-            logging.info("OTA: %s already at %s — cleared pending firmware", matched_key, compiled)
+            logging.info(
+                "OTA: %s already at %s — cleared pending firmware",
+                matched_key,
+                compiled,
+            )
             return Response("", status=204)
 
         if fw_compile_id and compiled != fw_compile_id and firmware_file:
             fw_path = os.path.join(OTA_FIRMWARE_DIR, firmware_file)
             if os.path.exists(fw_path):
                 _save_clients(clients)
-                logging.info("OTA: sending %s to %s (compiled=%s)", firmware_file, matched_key, compiled)
+                logging.info(
+                    "OTA: sending %s to %s (compiled=%s)",
+                    firmware_file,
+                    matched_key,
+                    compiled,
+                )
                 return send_file(fw_path, mimetype="application/octet-stream")
 
         _save_clients(clients)
@@ -1234,9 +1397,12 @@ def _humanize(iso_str):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         s = int((datetime.now(timezone.utc) - dt).total_seconds())
-        if s < 60:    return f"{s}s ago"
-        if s < 3600:  return f"{s // 60}m ago"
-        if s < 86400: return f"{s // 3600}h ago"
+        if s < 60:
+            return f"{s}s ago"
+        if s < 3600:
+            return f"{s // 60}m ago"
+        if s < 86400:
+            return f"{s // 3600}h ago"
         return f"{s // 86400}d ago"
     except Exception:
         return iso_str
@@ -1249,8 +1415,10 @@ def _humanize_uptime(seconds_str):
         hours, rem = divmod(rem, 3600)
         minutes = rem // 60
         parts = []
-        if days:  parts.append(f"{days}d")
-        if hours: parts.append(f"{hours}h")
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
         parts.append(f"{minutes}m")
         return " ".join(parts)
     except Exception:
@@ -1260,26 +1428,32 @@ def _humanize_uptime(seconds_str):
 @bp.route("/admin")
 @requires_auth
 def admin_page():
-    flash_ok  = request.args.get("ok")
+    flash_ok = request.args.get("ok")
     flash_err = request.args.get("err")
     with _ota_lock:
         raw_clients = _load_clients()
     clients = {}
     for hostname, info in raw_clients.items():
         entry = dict(info)
-        entry["last_seen_human"]   = _humanize(info.get("last_seen"))
+        entry["last_seen_human"] = _humanize(info.get("last_seen"))
         entry["last_flashed_human"] = _humanize(info.get("last_flashed"))
-        entry["uptime_human"]      = _humanize_uptime(info.get("uptime", "")) if info.get("uptime") else None
+        entry["uptime_human"] = (
+            _humanize_uptime(info.get("uptime", "")) if info.get("uptime") else None
+        )
         try:
             dt = datetime.fromisoformat(info["last_seen"])
-            if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             entry["fresh"] = (datetime.now(timezone.utc) - dt).total_seconds() < 86400
         except Exception:
             entry["fresh"] = False
         clients[hostname] = entry
     ota_url = (URL_PREFIX or "") + "/ota"
     return render_template_string(
-        ADMIN_HTML, clients=clients, flash_ok=flash_ok, flash_err=flash_err,
+        ADMIN_HTML,
+        clients=clients,
+        flash_ok=flash_ok,
+        flash_err=flash_err,
         ota_url=ota_url,
         home_url=url_for("syncframe.index"),
         add_url=url_for("syncframe.admin_add_client"),
@@ -1293,18 +1467,26 @@ def admin_page():
 @requires_auth
 def admin_add_client():
     hostname = request.form.get("hostname", "").strip()
-    mac      = request.form.get("mac",      "").strip()
-    label    = request.form.get("label",    "").strip()
+    mac = request.form.get("mac", "").strip()
+    label = request.form.get("label", "").strip()
     if not hostname:
         return redirect(url_for("syncframe.admin_page") + "?err=Hostname+required")
     with _ota_lock:
         clients = _load_clients()
         if hostname in clients:
-            return redirect(url_for("syncframe.admin_page") + "?err=Client+already+exists")
+            return redirect(
+                url_for("syncframe.admin_page") + "?err=Client+already+exists"
+            )
         clients[hostname] = {
-            "hostname": hostname, "mac": mac, "label": label or hostname,
-            "last_seen": None, "firmware": None, "fw_compile_id": None,
-            "compiled": None, "uptime": None, "last_flashed": None,
+            "hostname": hostname,
+            "mac": mac,
+            "label": label or hostname,
+            "last_seen": None,
+            "firmware": None,
+            "fw_compile_id": None,
+            "compiled": None,
+            "uptime": None,
+            "last_flashed": None,
         }
         _save_clients(clients)
     return redirect(url_for("syncframe.admin_page") + f"?ok=Client+{hostname}+added")
@@ -1323,8 +1505,10 @@ def admin_remove_client():
             del clients[hostname]
             _save_clients(clients)
             if fw and not any(c.get("firmware") == fw for c in clients.values()):
-                try: os.remove(os.path.join(OTA_FIRMWARE_DIR, fw))
-                except Exception: pass
+                try:
+                    os.remove(os.path.join(OTA_FIRMWARE_DIR, fw))
+                except Exception:
+                    pass
     return redirect(url_for("syncframe.admin_page") + f"?ok=Client+{hostname}+removed")
 
 
@@ -1338,34 +1522,48 @@ def admin_upload_firmware():
         return redirect(url_for("syncframe.admin_page") + "?err=No+file+provided")
     fw_file = request.files["firmware"]
     if not fw_file or not allowed_firmware(fw_file.filename):
-        return redirect(url_for("syncframe.admin_page") + "?err=Only+.bin+files+allowed")
+        return redirect(
+            url_for("syncframe.admin_page") + "?err=Only+.bin+files+allowed"
+        )
 
     fw_data = fw_file.read()
     compile_id = extract_compile_id(fw_data)
     if compile_id is None:
-        return "Could not extract compile ID \u2014 is this a valid ESP32 firmware .bin?", 400
+        return (
+            "Could not extract compile ID \u2014 is this a valid ESP32 firmware .bin?",
+            400,
+        )
 
     safe_hostname = hostname.replace("/", "_").replace("..", "_")
     filename = f"{safe_hostname}--{compile_id}.bin"
-    dest     = os.path.join(OTA_FIRMWARE_DIR, filename)
+    dest = os.path.join(OTA_FIRMWARE_DIR, filename)
     with open(dest, "wb") as f:
         f.write(fw_data)
-    logging.info("Firmware saved for %s -> %s (compile_id=%s)", hostname, dest, compile_id)
+    logging.info(
+        "Firmware saved for %s -> %s (compile_id=%s)", hostname, dest, compile_id
+    )
 
     with _ota_lock:
         clients = _load_clients()
         if hostname not in clients:
             clients[hostname] = {
-                "hostname": hostname, "mac": "", "label": hostname,
-                "last_seen": None, "compiled": None, "uptime": None,
+                "hostname": hostname,
+                "mac": "",
+                "label": hostname,
+                "last_seen": None,
+                "compiled": None,
+                "uptime": None,
                 "last_flashed": None,
             }
-        clients[hostname]["firmware"]      = filename
+        clients[hostname]["firmware"] = filename
         clients[hostname]["fw_compile_id"] = compile_id
         # Remove legacy fw_token if present
         clients[hostname].pop("fw_token", None)
         _save_clients(clients)
-    return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+uploaded+for+{hostname}+({compile_id})")
+    return redirect(
+        url_for("syncframe.admin_page")
+        + f"?ok=Firmware+uploaded+for+{hostname}+({compile_id})"
+    )
 
 
 @bp.route("/admin/clear_firmware", methods=["POST"])
@@ -1377,10 +1575,12 @@ def admin_clear_firmware():
     with _ota_lock:
         clients = _load_clients()
         if hostname in clients:
-            clients[hostname]["firmware"]      = None
+            clients[hostname]["firmware"] = None
             clients[hostname]["fw_compile_id"] = None
             _save_clients(clients)
-    return redirect(url_for("syncframe.admin_page") + f"?ok=Firmware+cleared+for+{hostname}")
+    return redirect(
+        url_for("syncframe.admin_page") + f"?ok=Firmware+cleared+for+{hostname}"
+    )
 
 
 # Register blueprint
@@ -1399,15 +1599,30 @@ def start_web_server():
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
             return
         if os.path.exists(CERTFILE) and os.path.exists(KEYFILE):
-            logging.info("Starting HTTPS Flask server on %s:%s (prefix=%s)",
-                         SERVER_HOST, SERVER_PORT, URL_PREFIX or "/")
-            app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True, ssl_context=(CERTFILE, KEYFILE))
+            logging.info(
+                "Starting HTTPS Flask server on %s:%s (prefix=%s)",
+                SERVER_HOST,
+                SERVER_PORT,
+                URL_PREFIX or "/",
+            )
+            app.run(
+                host=SERVER_HOST,
+                port=SERVER_PORT,
+                threaded=True,
+                ssl_context=(CERTFILE, KEYFILE),
+            )
         else:
-            logging.error("CERTFILE or KEYFILE not found after generation. Falling back to HTTP.")
+            logging.error(
+                "CERTFILE or KEYFILE not found after generation. Falling back to HTTP."
+            )
             app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
     else:
-        logging.info("Starting HTTP Flask server on %s:%s (prefix=%s)",
-                     SERVER_HOST, SERVER_PORT, URL_PREFIX or "/")
+        logging.info(
+            "Starting HTTP Flask server on %s:%s (prefix=%s)",
+            SERVER_HOST,
+            SERVER_PORT,
+            URL_PREFIX or "/",
+        )
         app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
 
 
@@ -1421,11 +1636,14 @@ if __name__ == "__main__":
     try:
         broker_process = subprocess.Popen(
             ["/usr/sbin/mosquitto", "-c", mosq_conf, "-p", str(MQTT_PORT)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
     except FileNotFoundError:
         broker_process = None
-        logging.warning("mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start.")
+        logging.warning(
+            "mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start."
+        )
 
     try:
         w = Watcher()

@@ -1,3 +1,4 @@
 SF-Server/data/
 SF-Server/data-alt/
 SF-ESP32-Clients/build
+/SF-Server/__pycache__
