@@ -211,23 +211,18 @@ def _save_clients(clients):
 ESP_APP_DESC_MAGIC = 0xABCD5432
 
 # Offsets within the esp_app_desc_t struct (relative to the magic word):
-#   +0   magic        (4 bytes)
+#   +0   magic_word   (4 bytes)  = 0xABCD5432
 #   +4   secure_ver   (4 bytes)
 #   +8   reserv1      (8 bytes)
-#   +16  version      (32 bytes)  <- firmware version string e.g. "v5.5.2-729-g..."
+#   +16  version[32]  <- firmware version string — this is what the device
+#                        sends in the X-SF-Compiled header (e.g. "8cabf2c")
 #   +48  project_name (32 bytes)
-#   +80  time         (16 bytes)  <- compile time  e.g. "19:50:46"
-#   +96  date         (16 bytes)  <- compile date  e.g. "Feb 11 2026"
+#   +80  time[16]     <- compile time  e.g. "19:50:46"  (logged, not used as ID)
+#   +96  date[16]     <- compile date  e.g. "Feb 11 2026" (logged, not used as ID)
 _VER_REL_OFFSET  = 16
 _TIME_REL_OFFSET = 80
 _DATE_REL_OFFSET = 96
 _DESC_MIN_SIZE   = 112  # must have at least date field fully present
-
-_MONTHS = {
-    "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
-    "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
-    "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
-}
 
 
 def _find_app_desc_offset(data: bytes):
@@ -254,11 +249,14 @@ def _find_app_desc_offset(data: bytes):
 
 
 def extract_compile_id(data: bytes):
-    """Extract a normalized compile ID from an ESP32 firmware .bin.
+    """Extract the firmware version string from an ESP32 firmware .bin.
 
-    Supports both app-only binaries and full merged flash images.
-    Returns a string like '20260211-195046', or None if the descriptor
-    cannot be found or parsed.
+    Returns the version string stored in esp_app_desc_t.version[32]
+    (e.g. "8cabf2c" or "v1.2.3"), which is exactly what the device sends
+    in the X-SF-Compiled header so the OTA match works correctly.
+
+    Returns None if the descriptor cannot be found or the version field
+    is empty/unreadable.
     """
     try:
         desc_off = _find_app_desc_offset(data)
@@ -266,6 +264,7 @@ def extract_compile_id(data: bytes):
             logging.warning("extract_compile_id: ESP app descriptor magic not found")
             return None
 
+        ver_off  = desc_off + _VER_REL_OFFSET
         time_off = desc_off + _TIME_REL_OFFSET
         date_off = desc_off + _DATE_REL_OFFSET
 
@@ -273,28 +272,20 @@ def extract_compile_id(data: bytes):
             logging.warning("extract_compile_id: binary too short to contain date field")
             return None
 
-        time_str = data[time_off:time_off + 16].decode("ascii").rstrip("\x00").strip()
-        date_str = data[date_off:date_off + 16].decode("ascii").rstrip("\x00").strip()
+        version   = data[ver_off:ver_off + 32].decode("ascii").rstrip("\x00").strip()
+        time_str  = data[time_off:time_off + 16].decode("ascii").rstrip("\x00").strip()
+        date_str  = data[date_off:date_off + 16].decode("ascii").rstrip("\x00").strip()
 
-        logging.info("extract_compile_id: found descriptor at offset %d, date=%r time=%r",
-                     desc_off, date_str, time_str)
+        logging.info(
+            "extract_compile_id: descriptor at offset %d  version=%r  date=%r  time=%r",
+            desc_off, version, date_str, time_str,
+        )
 
-        # Parse date: "Mar 17 2026" or "Mar  7 2026" (single-digit day has leading space)
-        parts = date_str.split()
-        if len(parts) != 3:
-            logging.warning("extract_compile_id: unexpected date format %r", date_str)
+        if not version:
+            logging.warning("extract_compile_id: version field is empty")
             return None
-        month = _MONTHS.get(parts[0])
-        if not month:
-            logging.warning("extract_compile_id: unknown month %r", parts[0])
-            return None
-        day  = parts[1].zfill(2)
-        year = parts[2]
 
-        # Parse time: "13:49:05" -> "134905"
-        time_digits = time_str.replace(":", "")
-
-        return f"{year}{month}{day}-{time_digits}"
+        return version
     except Exception as e:
         logging.warning("extract_compile_id: exception %s", e)
         return None
