@@ -209,9 +209,19 @@ def _save_clients(clients):
 # ---------------------------------------------------------------------------
 
 ESP_APP_DESC_MAGIC = 0xABCD5432
-_DESC_OFFSET = 32
-_TIME_OFFSET = _DESC_OFFSET + 80   # = 112
-_DATE_OFFSET = _DESC_OFFSET + 96   # = 128
+
+# Offsets within the esp_app_desc_t struct (relative to the magic word):
+#   +0   magic        (4 bytes)
+#   +4   secure_ver   (4 bytes)
+#   +8   reserv1      (8 bytes)
+#   +16  version      (32 bytes)  <- firmware version string e.g. "v5.5.2-729-g..."
+#   +48  project_name (32 bytes)
+#   +80  time         (16 bytes)  <- compile time  e.g. "19:50:46"
+#   +96  date         (16 bytes)  <- compile date  e.g. "Feb 11 2026"
+_VER_REL_OFFSET  = 16
+_TIME_REL_OFFSET = 80
+_DATE_REL_OFFSET = 96
+_DESC_MIN_SIZE   = 112  # must have at least date field fully present
 
 _MONTHS = {
     "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
@@ -220,31 +230,73 @@ _MONTHS = {
 }
 
 
-def extract_compile_id(data: bytes):
-    """Extract normalized compile ID from an ESP32 app-only .bin.
+def _find_app_desc_offset(data: bytes):
+    """Scan data for the ESP_APP_DESC magic and return the offset, or None.
 
-    Returns a string like '20260317-134905', or None if the magic doesn't
-    match or parsing fails.
+    Works for both app-only .bin files (magic at byte 32) and merged flash
+    images where the app partition starts at an arbitrary flash offset
+    (commonly 0x10000 = 65536).
+    """
+    magic_bytes = struct.pack("<I", ESP_APP_DESC_MAGIC)
+    # Fast path: app-only binary — magic is at offset 32
+    if data[32:36] == magic_bytes:
+        return 32
+    # Scan remaining file in 4-byte aligned steps
+    pos = 36
+    while pos <= len(data) - _DESC_MIN_SIZE:
+        idx = data.find(magic_bytes, pos)
+        if idx == -1:
+            break
+        if idx % 4 == 0:  # must be 4-byte aligned
+            return idx
+        pos = idx + 1
+    return None
+
+
+def extract_compile_id(data: bytes):
+    """Extract a normalized compile ID from an ESP32 firmware .bin.
+
+    Supports both app-only binaries and full merged flash images.
+    Returns a string like '20260211-195046', or None if the descriptor
+    cannot be found or parsed.
     """
     try:
-        if len(data) < _DATE_OFFSET + 16:
+        desc_off = _find_app_desc_offset(data)
+        if desc_off is None:
+            logging.warning("extract_compile_id: ESP app descriptor magic not found")
             return None
-        magic, = struct.unpack_from("<I", data, _DESC_OFFSET)
-        if magic != ESP_APP_DESC_MAGIC:
+
+        time_off = desc_off + _TIME_REL_OFFSET
+        date_off = desc_off + _DATE_REL_OFFSET
+
+        if len(data) < date_off + 16:
+            logging.warning("extract_compile_id: binary too short to contain date field")
             return None
-        time_str = data[_TIME_OFFSET:_TIME_OFFSET + 16].decode("ascii").rstrip("\x00").strip()
-        date_str = data[_DATE_OFFSET:_DATE_OFFSET + 16].decode("ascii").rstrip("\x00").strip()
-        # Parse date: "Mar 17 2026"
+
+        time_str = data[time_off:time_off + 16].decode("ascii").rstrip("\x00").strip()
+        date_str = data[date_off:date_off + 16].decode("ascii").rstrip("\x00").strip()
+
+        logging.info("extract_compile_id: found descriptor at offset %d, date=%r time=%r",
+                     desc_off, date_str, time_str)
+
+        # Parse date: "Mar 17 2026" or "Mar  7 2026" (single-digit day has leading space)
         parts = date_str.split()
+        if len(parts) != 3:
+            logging.warning("extract_compile_id: unexpected date format %r", date_str)
+            return None
         month = _MONTHS.get(parts[0])
         if not month:
+            logging.warning("extract_compile_id: unknown month %r", parts[0])
             return None
         day  = parts[1].zfill(2)
         year = parts[2]
+
         # Parse time: "13:49:05" -> "134905"
         time_digits = time_str.replace(":", "")
+
         return f"{year}{month}{day}-{time_digits}"
-    except Exception:
+    except Exception as e:
+        logging.warning("extract_compile_id: exception %s", e)
         return None
 
 
@@ -1300,7 +1352,7 @@ def admin_upload_firmware():
     fw_data = fw_file.read()
     compile_id = extract_compile_id(fw_data)
     if compile_id is None:
-        return "Could not extract compile ID \u2014 upload the app-only .bin, not a merged binary", 400
+        return "Could not extract compile ID \u2014 is this a valid ESP32 firmware .bin?", 400
 
     safe_hostname = hostname.replace("/", "_").replace("..", "_")
     filename = f"{safe_hostname}--{compile_id}.bin"
