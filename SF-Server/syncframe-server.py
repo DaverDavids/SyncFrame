@@ -301,8 +301,8 @@ def extract_compile_id(data: bytes):
     """
     # Primary path: scan for SFID: sentinel
     sidx = data.find(_SFID_SENTINEL)
-    if sidx != -1 and sidx + 28 <= len(data):
-        raw = data[sidx + 5 : sidx + 25]  # "Mar 17 2026 13:49:05"
+    if sidx != -1 and sidx + 29 <= len(data):
+        raw = data[sidx + 5 : sidx + 26]  # "Mar 17 2026 13:49:05" (21 chars)
         try:
             parts = raw.split()
             if len(parts) >= 5:
