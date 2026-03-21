@@ -243,8 +243,7 @@ ESP_APP_DESC_MAGIC = 0xABCD5432
 #   +0   magic_word   (4 bytes)  = 0xABCD5432
 #   +4   secure_ver   (4 bytes)
 #   +8   reserv1      (8 bytes)
-#   +16  version[32]  <- firmware version string — this is what the device
-#                        sends in the X-SF-Compiled header (e.g. "8cabf2c")
+#   +16  version[32]  <- firmware version string (legacy fallback)
 #   +48  project_name (32 bytes)
 #   +80  time[16]     <- compile time  e.g. "19:50:46"  (logged, not used as ID)
 #   +96  date[16]     <- compile date  e.g. "Feb 11 2026" (logged, not used as ID)
@@ -252,6 +251,22 @@ _VER_REL_OFFSET = 16
 _TIME_REL_OFFSET = 80
 _DATE_REL_OFFSET = 96
 _DESC_MIN_SIZE = 112  # must have at least date field fully present
+
+_SFID_SENTINEL = b"SFID:"
+_MONTH_MAP = {
+    b"Jan": "01",
+    b"Feb": "02",
+    b"Mar": "03",
+    b"Apr": "04",
+    b"May": "05",
+    b"Jun": "06",
+    b"Jul": "07",
+    b"Aug": "08",
+    b"Sep": "09",
+    b"Oct": "10",
+    b"Nov": "11",
+    b"Dec": "12",
+}
 
 
 def _find_app_desc_offset(data: bytes):
@@ -274,6 +289,51 @@ def _find_app_desc_offset(data: bytes):
         if idx % 4 == 0:  # must be 4-byte aligned
             return idx
         pos = idx + 1
+    return None
+
+
+def extract_compile_id(data: bytes):
+    """Extract compile ID from firmware binary.
+
+    Primary: Scan for 'SFID:' sentinel and parse 'Mon DD YYYY HH:MM:SS' format.
+    Fallback: Read version field from esp_app_desc_t struct.
+    Returns compile ID in 'YYYYMMDD-HHMMSS' format or None.
+    """
+    # Primary path: scan for SFID: sentinel
+    sidx = data.find(_SFID_SENTINEL)
+    if sidx != -1 and sidx + 28 <= len(data):
+        raw = data[sidx + 5 : sidx + 25]  # "Mar 17 2026 13:49:05"
+        try:
+            parts = raw.split()
+            if len(parts) >= 5:
+                month = _MONTH_MAP.get(parts[0], "00")
+                day = parts[1].decode() if isinstance(parts[1], bytes) else parts[1]
+                year = parts[2].decode() if isinstance(parts[2], bytes) else parts[2]
+                time_str = (
+                    parts[3].decode() if isinstance(parts[3], bytes) else parts[3]
+                )
+                # Strip colons from time
+                time_part = time_str.replace(":", "")
+                # Zero-pad day if single digit
+                if len(day) == 1:
+                    day = "0" + day
+                return f"{year}{month}{day}-{time_part}"
+        except Exception:
+            pass
+
+    # Fallback: read version from esp_app_desc_t
+    desc_off = _find_app_desc_offset(data)
+    if desc_off is None:
+        return None
+
+    off = desc_off + _VER_REL_OFFSET
+    version_bytes = data[off : off + 32]
+    null_pos = version_bytes.find(b"\x00")
+    if null_pos > 0:
+        version_bytes = version_bytes[:null_pos]
+    version_str = version_bytes.decode("utf-8", errors="ignore").strip()
+    if version_str:
+        return version_str
     return None
 
 
