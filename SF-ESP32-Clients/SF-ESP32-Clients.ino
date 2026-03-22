@@ -43,7 +43,7 @@ static const char* HOST_PREFIX = "syncframe-";
 
 // Compile-time ID string: "YYYYMMDD-HHMMSS"
 static char compileIdStr[16];
-static const volatile char SF_COMPILE_ID[] = "SFID:" __DATE__ " " __TIME__;
+const char SF_COMPILE_ID[] = "SFID:" __DATE__ " " __TIME__;
 
 // ---------------------------------------------------------------------------
 // Draw mutex
