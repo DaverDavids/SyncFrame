@@ -295,11 +295,10 @@ def _find_app_desc_offset(data: bytes):
 def extract_compile_id(data: bytes):
     """Extract compile ID from firmware binary.
 
-    Primary: Scan for 'SFID:' sentinel and parse 'Mon DD YYYY HH:MM:SS' format.
-    Fallback: Read version field from esp_app_desc_t struct.
-    Returns compile ID in 'YYYYMMDD-HHMMSS' format or None.
+    Scans for 'SFID:' sentinel and parses 'Mon DD YYYY HH:MM:SS' format.
+    Returns (compile_id_str, None) on success, or (None, debug_info_str) on failure.
+    debug_info_str describes what was found in the binary for diagnostics.
     """
-    # Primary path: scan for SFID: sentinel
     sidx = data.find(_SFID_SENTINEL)
     if sidx != -1 and sidx + 29 <= len(data):
         raw = data[sidx + 5 : sidx + 26]  # "Mar 17 2026 13:49:05" (21 chars)
@@ -312,29 +311,31 @@ def extract_compile_id(data: bytes):
                 time_str = (
                     parts[3].decode() if isinstance(parts[3], bytes) else parts[3]
                 )
-                # Strip colons from time
                 time_part = time_str.replace(":", "")
-                # Zero-pad day if single digit
                 if len(day) == 1:
                     day = "0" + day
-                return f"{year}{month}{day}-{time_part}"
-        except Exception:
-            pass
-
-    # Fallback: read version from esp_app_desc_t
-    desc_off = _find_app_desc_offset(data)
-    if desc_off is None:
-        return None
-
-    off = desc_off + _VER_REL_OFFSET
-    version_bytes = data[off : off + 32]
-    null_pos = version_bytes.find(b"\x00")
-    if null_pos > 0:
-        version_bytes = version_bytes[:null_pos]
-    version_str = version_bytes.decode("utf-8", errors="ignore").strip()
-    if version_str:
-        return version_str
-    return None
+                return f"{year}{month}{day}-{time_part}", None
+            else:
+                return None, f"SFID sentinel found at offset {sidx} but could not parse date/time from: {raw!r}"
+        except Exception as e:
+            return None, f"SFID sentinel found at offset {sidx} but parse error: {e}, raw={raw!r}"
+    else:
+        debug_parts = [f"SFID sentinel not found in {len(data)}-byte binary"]
+        desc_off = _find_app_desc_offset(data)
+        if desc_off is None:
+            debug_parts.append("esp_app_desc_t magic not found either")
+        else:
+            off = desc_off + _VER_REL_OFFSET
+            version_bytes = data[off : off + 32]
+            null_pos = version_bytes.find(b"\x00")
+            if null_pos >= 0:
+                version_bytes = version_bytes[:null_pos]
+            version_str = version_bytes.decode("utf-8", errors="ignore").strip()
+            debug_parts.append(f"app_desc found at offset {desc_off}, version field='{version_str}'")
+            snippet_start = max(0, desc_off - 64)
+            snippet = data[snippet_start : desc_off + 128]
+            debug_parts.append(f"binary snippet [{snippet_start}:{snippet_start+len(snippet)}]: {snippet!r}")
+        return None, " | ".join(debug_parts)
 
 
 
@@ -1541,13 +1542,14 @@ def admin_upload_firmware():
         )
 
     fw_data = fw_file.read()
-    compile_id = extract_compile_id(fw_data)
+    compile_id, extract_err = extract_compile_id(fw_data)
     if compile_id is None:
+        logging.error("extract_compile_id failed for %s: %s", fw_file.filename, extract_err)
         return (
-            "Could not extract compile ID \u2014 is this a valid ESP32 firmware .bin?",
+            f"Could not extract compile ID from firmware.\nDebug info: {extract_err}",
             400,
         )
-
+        
     safe_hostname = hostname.replace("/", "_").replace("..", "_")
     filename = f"{safe_hostname}--{compile_id}.bin"
     dest = os.path.join(OTA_FIRMWARE_DIR, filename)
