@@ -310,7 +310,7 @@ def extract_compile_id(data: bytes):
                 year = parts[2].decode() if isinstance(parts[2], bytes) else parts[2]
                 time_str = (
                     parts[3].decode() if isinstance(parts[3], bytes) else parts[3]
-                )
+                ).replace("\x00", "").strip()
                 time_part = time_str.replace(":", "")
                 if len(day) == 1:
                     day = "0" + day
