@@ -43,8 +43,7 @@ static const char* HOST_PREFIX = "syncframe-";
 
 // Compile-time ID string: "YYYYMMDD-HHMMSS"
 static char compileIdStr[16];
-const char SF_COMPILE_ID[] = "SFID:" __DATE__ " " __TIME__;
-
+const char SF_COMPILE_ID[] __attribute__((used, section(".rodata"))) = "SFID:" __DATE__ " " __TIME__;
 // ---------------------------------------------------------------------------
 // Draw mutex
 // ---------------------------------------------------------------------------

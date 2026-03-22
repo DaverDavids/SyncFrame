@@ -304,7 +304,7 @@ def extract_compile_id(data: bytes):
         raw = data[sidx + 5 : sidx + 26]  # "Mar 17 2026 13:49:05" (21 chars)
         try:
             parts = raw.split()
-            if len(parts) >= 5:
+            if len(parts) >= 4:
                 month = _MONTH_MAP.get(parts[0], "00")
                 day = parts[1].decode() if isinstance(parts[1], bytes) else parts[1]
                 year = parts[2].decode() if isinstance(parts[2], bytes) else parts[2]
