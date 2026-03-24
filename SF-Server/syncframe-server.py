@@ -204,6 +204,32 @@ IMAGE_MAX_WIDTH = config.getint("image", "max_width", fallback=1920)
 IMAGE_MAX_HEIGHT = config.getint("image", "max_height", fallback=1080)
 IMAGE_JPEG_QUALITY = config.getint("image", "jpeg_quality", fallback=85)
 
+PHOTO_ETAG_PATH = os.path.join(DATA_DIR, "photo_upload_etag.txt")
+
+
+def _load_photo_etag():
+    if os.path.exists(PHOTO_ETAG_PATH):
+        try:
+            with open(PHOTO_ETAG_PATH, "r") as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return None
+
+
+def _save_photo_etag(etag):
+    try:
+        with open(PHOTO_ETAG_PATH, "w") as f:
+            f.write(etag)
+    except Exception:
+        pass
+
+
+photo_upload_etag = _load_photo_etag()
+if not photo_upload_etag:
+    photo_upload_etag = secrets.token_hex(8)
+    _save_photo_etag(photo_upload_etag)
+
 RESOLUTIONS = [
     (800, 480),
     (280, 240),
@@ -1005,6 +1031,9 @@ def upload_file():
         logging.info(
             "Uploaded image resized to max %s and saved to %s", max_size, target_path
         )
+        global photo_upload_etag
+        photo_upload_etag = secrets.token_hex(8)
+        _save_photo_etag(photo_upload_etag)
         generate_thumbnails(source_img=img)
         return redirect(url_for("syncframe.index"))
     except Exception as e:
@@ -1016,10 +1045,12 @@ def upload_file():
 @requires_auth
 def serve_photo():
     if os.path.exists(WATCH_FILE):
-        return send_from_directory(
+        resp = send_from_directory(
             os.path.dirname(os.path.abspath(WATCH_FILE)) or ".",
             os.path.basename(WATCH_FILE),
         )
+        resp.headers["ETag"] = photo_upload_etag
+        return resp
     return "No photo available", 404
 
 
@@ -1030,20 +1061,24 @@ def serve_photo_variant(w, h):
         return "Resolution not supported", 404
     variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
     if os.path.exists(variant_file):
-        return send_from_directory(
+        resp = send_from_directory(
             os.path.dirname(os.path.abspath(variant_file)) or ".",
             os.path.basename(variant_file),
         )
+        resp.headers["ETag"] = photo_upload_etag
+        return resp
     if os.path.exists(WATCH_FILE):
         logging.info(
             "Variant %dx%d missing - generating all thumbnails on-the-fly", w, h
         )
         generate_thumbnails()
         if os.path.exists(variant_file):
-            return send_from_directory(
+            resp = send_from_directory(
                 os.path.dirname(os.path.abspath(variant_file)) or ".",
                 os.path.basename(variant_file),
             )
+            resp.headers["ETag"] = photo_upload_etag
+            return resp
     return "No photo available - upload an image first", 404
 
 
@@ -2355,6 +2390,9 @@ def upload_file():
         logging.info(
             "Uploaded image resized to max %s and saved to %s", max_size, target_path
         )
+        global photo_upload_etag
+        photo_upload_etag = secrets.token_hex(8)
+        _save_photo_etag(photo_upload_etag)
         generate_thumbnails(source_img=img)
         return redirect(url_for("syncframe.index"))
     except Exception as e:
@@ -2366,10 +2404,12 @@ def upload_file():
 @requires_auth
 def serve_photo():
     if os.path.exists(WATCH_FILE):
-        return send_from_directory(
+        resp = send_from_directory(
             os.path.dirname(os.path.abspath(WATCH_FILE)) or ".",
             os.path.basename(WATCH_FILE),
         )
+        resp.headers["ETag"] = photo_upload_etag
+        return resp
     return "No photo available", 404
 
 
@@ -2380,20 +2420,24 @@ def serve_photo_variant(w, h):
         return "Resolution not supported", 404
     variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
     if os.path.exists(variant_file):
-        return send_from_directory(
+        resp = send_from_directory(
             os.path.dirname(os.path.abspath(variant_file)) or ".",
             os.path.basename(variant_file),
         )
+        resp.headers["ETag"] = photo_upload_etag
+        return resp
     if os.path.exists(WATCH_FILE):
         logging.info(
             "Variant %dx%d missing - generating all thumbnails on-the-fly", w, h
         )
         generate_thumbnails()
         if os.path.exists(variant_file):
-            return send_from_directory(
+            resp = send_from_directory(
                 os.path.dirname(os.path.abspath(variant_file)) or ".",
                 os.path.basename(variant_file),
             )
+            resp.headers["ETag"] = photo_upload_etag
+            return resp
     return "No photo available - upload an image first", 404
 
 

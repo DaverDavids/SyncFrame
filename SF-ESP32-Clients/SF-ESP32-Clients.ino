@@ -145,6 +145,7 @@ uint8_t* lastJpg       = nullptr;
 size_t   lastJpgLen    = 0;
 bool showingLast        = false;
 bool wifiEverConnected  = false;
+char lastUploadEtag[32] = "";
 
 static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
@@ -687,6 +688,59 @@ static bool downloadAndShowPhoto() {
     lastDownloadOk  = true;
     lastDownloadErr = "";
     logEvent("PHOTO", "same image, no rotation bytes=%u", (unsigned)newLen);
+    showingLast = false;
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      board_draw_jpeg(currentJpg, currentJpgLen);
+      xSemaphoreGive(drawMutex);
+    }
+    return true;
+  }
+
+  bool shouldRotate = true;
+  if (lastUploadEtag[0] != '\0') {
+    String url = makePhotoUrl();
+    WiFiClientSecure* sec = nullptr;
+    WiFiClient* plain = nullptr;
+    HTTPClient* h = new HTTPClient();
+    if (url.startsWith("https://")) {
+      sec = new WiFiClientSecure();
+      sec->setTimeout(5);
+      if (cfg.httpsInsecure) sec->setInsecure();
+      h->begin(*sec, url);
+    } else {
+      plain = new WiFiClient();
+      plain->setTimeout(5);
+      h->begin(*plain, url);
+    }
+    if (cfg.httpUser.length() > 0)
+      h->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
+    int headCode = h->sendRequest("HEAD");
+    if (headCode == HTTP_CODE_OK) {
+      String etag = h->header("ETag");
+      if (etag.length() > 0) {
+        etag.replace("\"", "");
+        if (etag == lastUploadEtag) {
+          shouldRotate = false;
+          logEvent("PHOTO", "etag unchanged, no rotation");
+        } else {
+          strncpy(lastUploadEtag, etag.c_str(), sizeof(lastUploadEtag) - 1);
+          lastUploadEtag[sizeof(lastUploadEtag) - 1] = '\0';
+          logEvent("PHOTO", "etag changed to %s, rotating", lastUploadEtag);
+        }
+      }
+    }
+    h->end();
+    delete h;
+    delete sec;
+    delete plain;
+  } else {
+    strcpy(lastUploadEtag, "init");
+  }
+
+  if (!shouldRotate) {
+    free(newBuf);
+    lastDownloadOk = true;
+    lastDownloadErr = "";
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
