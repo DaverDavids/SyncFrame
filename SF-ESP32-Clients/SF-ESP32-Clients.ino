@@ -588,7 +588,8 @@ static void handlePortalLoop() {
     logEvent("PORTAL", "stopping done=%d timeout=%d", (int)portalDone, (int)timedOut);
     dnsServer.stop();
     server.stop();
-    server.clearAllHandlers();
+    // server.clearAllHandlers() is not available in WebServer — handlers are
+    // cleared automatically when the server is stopped and restarted.
     WiFi.softAPdisconnect(true);
     delay(100);
     WiFi.mode(WIFI_STA);
