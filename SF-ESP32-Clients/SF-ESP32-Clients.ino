@@ -684,7 +684,10 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 
   size_t allocSize = (total > 0) ? (size_t)total : MAX_JPG;
   uint8_t* buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!buf) buf = (uint8_t*)malloc(allocSize);
+  if (!buf) {
+    logEvent("PHOTO", "PSRAM malloc failed, falling back to DRAM");
+    buf = (uint8_t*)malloc(allocSize);
+  }
   if (!buf) {
     if (outErr) *outErr = "malloc failed";
     http->end(); delete http; delete secureClient; delete plainClient;
@@ -829,20 +832,19 @@ static bool downloadAndShowPhoto() {
     return true;
   }
 
-  freeBuf(lastJpg, lastJpgLen);
-  lastJpg       = currentJpg;
-  lastJpgLen    = currentJpgLen;
-  currentJpg    = newBuf;
-  currentJpgLen = newLen;
-  lastDownloadOk  = true;
-  lastDownloadErr = "";
-  showingLast = false;
-
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    freeBuf(lastJpg, lastJpgLen);
+    lastJpg       = currentJpg;
+    lastJpgLen    = currentJpgLen;
+    currentJpg    = newBuf;
+    currentJpgLen = newLen;
+    lastDownloadOk  = true;
+    lastDownloadErr = "";
+    showingLast = false;
     board_draw_jpeg(currentJpg, currentJpgLen);
     xSemaphoreGive(drawMutex);
   }
-  logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)currentJpgLen);
+  logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)newLen);
   return true;
 }
 
@@ -981,6 +983,7 @@ static void otaUpdateTask(void* pv) {
 
 static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
+  if (cfg.updateIntervalMin == 0) return;
   if (otaTaskHandle != nullptr) return;
   xTaskCreate(otaUpdateTask, "ota_check", 16384, nullptr, 1, &otaTaskHandle);
   logEvent("OTA", "task started interval=%umin url=%s compileId=%s",
@@ -1022,21 +1025,25 @@ static void mqttReconnectTask(void* pv) {
   strncpy(pass,  cfg.mqttPass.c_str(),  sizeof(pass)  - 1);
   strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
 
+  bool useTLS = cfg.mqttUseTLS;
+  bool tlsInsecure = cfg.mqttTlsInsecure;
+  uint16_t mqttPort = cfg.mqttPort;
+
   WiFiClient localPlain;
   WiFiClientSecure localSecure;
   localPlain.setTimeout(2);
   localSecure.setTimeout(2);
-  if (cfg.mqttTlsInsecure) localSecure.setInsecure();
+  if (tlsInsecure) localSecure.setInsecure();
 
   PubSubClient localMqtt;
   localMqtt.setCallback(mqttCallback);
-  if (cfg.mqttUseTLS)
+  if (useTLS)
     localMqtt.setClient(localSecure);
   else
     localMqtt.setClient(localPlain);
-  localMqtt.setServer(host, cfg.mqttPort);
+  localMqtt.setServer(host, mqttPort);
 
-  logEvent("MQTT", "connecting to %s:%u", host, (unsigned)cfg.mqttPort);
+  logEvent("MQTT", "connecting to %s:%u", host, (unsigned)mqttPort);
 
   bool ok = (user[0] != '\0')
     ? localMqtt.connect(HOSTNAME, user, pass)
@@ -1046,7 +1053,7 @@ static void mqttReconnectTask(void* pv) {
     bool subOk = localMqtt.subscribe(topic);
     logEvent("MQTT", "connected sub=%s topic=%s", subOk ? "ok" : "fail", topic);
     portENTER_CRITICAL(&logMux);
-    if (cfg.mqttUseTLS) {
+    if (useTLS) {
       mqtt.setClient(mqttNetSecure);
     } else {
       mqtt.setClient(mqttNetPlain);
@@ -1148,10 +1155,8 @@ static void ensureWifi() {
   if (portalActive) { handlePortalLoop(); return; }
 
   if (WiFi.status() == WL_CONNECTED) {
-    // FIX 1: Always call server.handleClient() when the web server is up,
-    // even if networkServicesStarted hasn't been re-set yet (e.g. during a
-    // transient drop/reconnect). startNetworkServicesOnce() is idempotent.
-    if (webServerStarted) server.handleClient();
+    // Don't call server.handleClient() here - loop() handles it after
+    // startNetworkServicesOnce() sets networkServicesStarted = true.
     return;
   }
 
@@ -1307,7 +1312,10 @@ static void handlePostConfig() {
   if (server.hasArg("mqttHost"))           cfg.mqttHost           = server.arg("mqttHost");
   if (server.hasArg("mqttTopic"))          cfg.mqttTopic          = server.arg("mqttTopic");
   if (server.hasArg("mqttUser"))           cfg.mqttUser           = server.arg("mqttUser");
-  if (server.hasArg("mqttPort"))           cfg.mqttPort           = (uint16_t)server.arg("mqttPort").toInt();
+  if (server.hasArg("mqttPort")) {
+    uint16_t port = (uint16_t)server.arg("mqttPort").toInt();
+    if (port > 0) cfg.mqttPort = port;
+  }
   if (server.hasArg("updateUrl"))          cfg.updateUrl          = server.arg("updateUrl");
   if (server.hasArg("updateIntervalMin"))  cfg.updateIntervalMin  = (uint32_t)server.arg("updateIntervalMin").toInt();
   if (server.hasArg("webUser") && server.arg("webUser").length() > 0)
@@ -1330,16 +1338,30 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  if (!currentJpg || !currentJpgLen) { server.send(404, "text/plain", "no image"); return; }
+  uint8_t* jpg = nullptr;
+  size_t jpgLen = 0;
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    jpg = currentJpg;
+    jpgLen = currentJpgLen;
+    xSemaphoreGive(drawMutex);
+  }
+  if (!jpg || !jpgLen) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)currentJpg, currentJpgLen);
+  server.send_P(200, "image/jpeg", (const char*)jpg, jpgLen);
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  if (!lastJpg || !lastJpgLen) { server.send(404, "text/plain", "no last image"); return; }
+  uint8_t* jpg = nullptr;
+  size_t jpgLen = 0;
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    jpg = lastJpg;
+    jpgLen = lastJpgLen;
+    xSemaphoreGive(drawMutex);
+  }
+  if (!jpg || !jpgLen) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)lastJpg, lastJpgLen);
+  server.send_P(200, "image/jpeg", (const char*)jpg, jpgLen);
 }
 
 static void handleActionRefresh() {
