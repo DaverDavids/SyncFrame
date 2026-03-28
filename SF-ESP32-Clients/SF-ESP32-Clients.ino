@@ -114,14 +114,9 @@ struct Config {
 
 // ---------------------------------------------------------------------------
 // OTA firmware tracking.
-//
-// installedFwToken (NVS key "fwtoken") now stores the compile ID string
-// in "YYYYMMDD-HHMMSS" format. Old tokens won't match and the device will
-// flash once, then store the new format.
-// installedFwFilename (NVS key "fwfile") is kept for /api/status display only.
 // ---------------------------------------------------------------------------
 static String installedFwToken    = "";
-static String installedFwFilename = "";  // kept for /api/status display only
+static String installedFwFilename = "";
 
 static const char* PREF_NS = "syncframe";
 static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
@@ -142,7 +137,11 @@ WiFiClient   mqttNetPlain;
 WiFiClientSecure mqttNetSecure;
 PubSubClient mqtt;
 
+// networkServicesStarted: set true once setupWeb()+mDNS+OTA are initialised.
+// webServerStarted: guards against calling server.begin() more than once.
 bool networkServicesStarted = false;
+static bool webServerStarted = false;
+
 unsigned long lastWifiAttemptMs  = 0;
 unsigned long lastMqttAttemptMs  = 0;
 
@@ -163,8 +162,9 @@ char lastUploadEtag[32] = "";
 static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 
-static TaskHandle_t photoTaskHandle = nullptr;
-static volatile bool photoDownloadPending = false;
+// photoTaskHandle is used only as a running-guard; set to nullptr after task
+// is created so the handle is not used for anything else.
+static volatile bool photoTaskRunning = false;
 
 // Flag to prevent spawning multiple concurrent MQTT connect tasks
 static volatile bool mqttConnectInProgress = false;
@@ -235,18 +235,14 @@ static void buildHostAndClientId() {
   snprintf(HOSTNAME, sizeof(HOSTNAME), "%s%03X", HOST_PREFIX, shortId);
 }
 
-// Build compileIdStr from __DATE__ and __TIME__ macros.
-// __DATE__ = "Mar 17 2026", __TIME__ = "13:49:05"
-// Result  = "20260317-134905"
 static void buildCompileId() {
   static const char* months[12] = {
     "Jan","Feb","Mar","Apr","May","Jun",
     "Jul","Aug","Sep","Oct","Nov","Dec"
   };
-  const char* dateStr = __DATE__; // "Mar 17 2026"
-  const char* timeStr = __TIME__; // "13:49:05"
+  const char* dateStr = __DATE__;
+  const char* timeStr = __TIME__;
 
-  // Find month number
   char monthBuf[4] = {};
   strncpy(monthBuf, dateStr, 3);
   int monthNum = 0;
@@ -254,7 +250,6 @@ static void buildCompileId() {
     if (strcmp(monthBuf, months[i]) == 0) { monthNum = i + 1; break; }
   }
 
-  // Parse day (chars 4-5), zero-pad if single digit
   int day = 0;
   if (dateStr[4] == ' ') {
     day = dateStr[5] - '0';
@@ -262,11 +257,9 @@ static void buildCompileId() {
     day = (dateStr[4] - '0') * 10 + (dateStr[5] - '0');
   }
 
-  // Parse year (chars 7-10)
   char yearBuf[5] = {};
   strncpy(yearBuf, dateStr + 7, 4);
 
-  // Strip colons from time: "13:49:05" -> "134905"
   char timeBuf[7] = {};
   int ti = 0;
   for (int i = 0; timeStr[i] && ti < 6; i++) {
@@ -425,7 +418,6 @@ static void saveConfig() {
   prefs.end();
 }
 
-// Save both the token (for change detection) and filename (for display)
 static void saveInstalledFw(const char* filename, const char* token) {
   installedFwFilename = filename;
   installedFwToken    = token;
@@ -572,24 +564,17 @@ static void setupPortalRoutes() {
     json += "]";
     server.send(200, "application/json", json);
   });
-  // ---------------------------------------------------------------------------
-  // Non-blocking WiFi scan: kick off an async scan on first call, return
-  // {scanning:true} while in progress; return results once complete.
-  // ---------------------------------------------------------------------------
   server.on("/scan", HTTP_GET, []() {
     int16_t n = WiFi.scanComplete();
     if (n == WIFI_SCAN_RUNNING) {
-      // Scan already in progress – tell the client to retry
       server.send(200, "application/json", "{\"scanning\":true}");
       return;
     }
     if (n == WIFI_SCAN_FAILED || n < 0) {
-      // No scan running yet (or previous scan failed) – start one asynchronously
       WiFi.scanNetworks(/*async=*/true);
       server.send(200, "application/json", "{\"scanning\":true}");
       return;
     }
-    // Scan finished – build and return results, then free the scan data
     String json = "[";
     for (int i = 0; i < n; i++) {
       if (i > 0) json += ",";
@@ -621,6 +606,7 @@ static void startPortalMode() {
 
   setupPortalRoutes();
   server.begin();
+  webServerStarted = true;
 
   ArduinoOTA.setHostname(HOSTNAME);
   if (ARDUINO_OTA_PASSWORD && strlen(ARDUINO_OTA_PASSWORD) > 0)
@@ -645,10 +631,15 @@ static void handlePortalLoop() {
     logEvent("PORTAL", "stopping done=%d timeout=%d", (int)portalDone, (int)timedOut);
     dnsServer.stop();
     server.stop();
+    server.clearAllHandlers();
     WiFi.softAPdisconnect(true);
-    portalActive      = false;
-    wifiEverConnected = false;
-    lastWifiAttemptMs = 0;
+    // Switch back to STA mode so ensureWifi() can connect normally
+    WiFi.mode(WIFI_STA);
+    portalActive         = false;
+    webServerStarted     = false;   // allow setupWeb() to run after reconnect
+    networkServicesStarted = false;
+    wifiEverConnected    = false;
+    lastWifiAttemptMs    = 0;
   }
 }
 
@@ -879,12 +870,7 @@ static bool downloadAndShowPhoto() {
 }
 
 // ============================================================
-// Background OTA update task  (stack 16384, no core pin)
-//
-// Single-request flow: GET cfg.updateUrl with device identity headers.
-// 204 -> no update. 200 -> stream binary directly to flash.
-// The server compares X-SF-Compiled against the assigned fw_compile_id
-// and either returns 204 (up to date) or the firmware binary.
+// Background OTA update task
 // ============================================================
 static void otaUpdateTask(void* pv) {
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
@@ -920,7 +906,6 @@ static void otaUpdateTask(void* pv) {
         }
 
         if (ok) {
-          // Strip colons from MAC_STR: "AA:BB:CC:DD:EE:FF" -> "AABBCCDDEEFF"
           char macNaked[13] = {};
           int mi = 0;
           for (int i = 0; MAC_STR[i] && mi < 12; i++) {
@@ -1008,7 +993,6 @@ static void otaUpdateTask(void* pv) {
 static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
   if (otaTaskHandle != nullptr) return;
-  // Use xTaskCreate (no core pin) so the scheduler decides placement
   xTaskCreate(
     otaUpdateTask, "ota_check", 16384, nullptr,
     1, &otaTaskHandle
@@ -1037,10 +1021,6 @@ static void mqttSetupClient() {
   mqtt.setSocketTimeout(1);
 }
 
-// ---------------------------------------------------------------------------
-// Non-blocking MQTT reconnect: spawns a short-lived task to do the TCP/TLS
-// connect so the web server loop is never stalled.
-// ---------------------------------------------------------------------------
 static void mqttConnectTask(void* pv) {
   mqttNetPlain.setTimeout(1);
   mqttNetSecure.setTimeout(1);
@@ -1071,31 +1051,64 @@ static void mqttMaybeReconnect() {
 
   addLog("MQTT connecting to: " + cfg.mqttHost + ":" + String(cfg.mqttPort));
   mqttConnectInProgress = true;
-  // Spawn a task (no core pin) to do the blocking TCP/TLS connect
   xTaskCreate(mqttConnectTask, "mqtt_conn", 8192, nullptr, 1, nullptr);
 }
 
 // ---------------------- WiFi / Network ----------------------
+
+// setupWeb() is called exactly once (guarded by webServerStarted).
+// It registers all STA-mode routes and calls server.begin().
+static void setupWeb() {
+  if (webServerStarted) return;
+  server.on("/",            HTTP_GET,  handleRoot);
+  server.on("/config",      HTTP_GET,  handleConfigPage);
+  server.on("/api/status",  HTTP_GET,  handleStatusJson);
+  server.on("/api/log",     HTTP_GET,  handleLogJson);
+  server.on("/api/config",  HTTP_POST, handlePostConfig);
+  server.on("/api/refresh", HTTP_POST, handleActionRefresh);
+  server.on("/img/current", HTTP_GET,  handleImgCurrent);
+  server.on("/img/last",    HTTP_GET,  handleImgLast);
+  server.begin();
+  webServerStarted = true;
+  logEvent("WEB", "server started");
+}
+
+// startNetworkServicesOnce() is called every loop() iteration while WiFi is
+// connected. On first call it sets up everything; subsequent calls are no-ops.
 static void startNetworkServicesOnce() {
   if (networkServicesStarted) return;
   if (WiFi.status() != WL_CONNECTED) return;
+
   bool mdnsOk = MDNS.begin(HOSTNAME);
   ArduinoOTA.setHostname(HOSTNAME);
   if (ARDUINO_OTA_PASSWORD && strlen(ARDUINO_OTA_PASSWORD) > 0)
     ArduinoOTA.setPassword(ARDUINO_OTA_PASSWORD);
   ArduinoOTA.begin();
+
+  setupWeb();   // safe: guarded by webServerStarted
+
+  mqttNetPlain.setTimeout(1);
+  mqttNetSecure.setTimeout(1);
+  mqttSetupClient();
+  lastMqttAttemptMs = 0;
+  mqttConnectInProgress = false;
+
   networkServicesStarted = true;
   wifiEverConnected      = true;
   logEvent("WIFI", "connected ip=%s mac=%s", WiFi.localIP().toString().c_str(), MAC_STR);
-  logEvent("NET", "services mdns=%s ota=on", mdnsOk ? "on" : "off");
+  logEvent("NET",  "services mdns=%s ota=on web=on", mdnsOk ? "on" : "off");
+
+  // Show the IP/MAC on screen briefly, then start the first photo download
+  String ipMac = "IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR);
+  board_draw_boot_status(ipMac.c_str());
+  delay(800);
+  board_draw_boot_status("Connecting to MQTT...");
+
+  startOtaTask();
+  mqttMaybeReconnect();
+  downloadAndShowPhoto();
 }
 
-// ---------------------------------------------------------------------------
-// Non-blocking ensureWifi:
-//   - Never busy-waits on the main loop thread.
-//   - Calls WiFi.begin() / WiFi.reconnect() then returns immediately.
-//   - Connection status is checked on the next loop() iteration.
-// ---------------------------------------------------------------------------
 static void ensureWifi() {
   if (portalActive) { handlePortalLoop(); return; }
 
@@ -1109,15 +1122,13 @@ static void ensureWifi() {
     logEvent("WIFI", "reconnect attempt");
     addLog("Reconnecting...");
     WiFi.reconnect();
-    return;  // Return immediately; loop() will call us again to check status
+    return;
   }
 
   if (cfg.wifiSsid.length() > 0) {
     logEvent("WIFI", "connect begin ssid=%s", cfg.wifiSsid.c_str());
     addLog("Connecting to: " + cfg.wifiSsid);
     WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
-    // Return immediately – do NOT busy-wait here. loop() will poll WL_CONNECTED.
-    // The 5-second cooldown on lastWifiAttemptMs prevents hammering WiFi.begin().
     return;
   }
 
@@ -1126,7 +1137,7 @@ static void ensureWifi() {
   startPortalMode();
 }
 
-// ---------------------- Web UI ----------------------
+// ---------------------- Web UI handlers ----------------------
 static void handleRoot() {
   if (!requireWebAuth()) return;
   server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML));
@@ -1299,19 +1310,6 @@ static void handleActionRefresh() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
-static void setupWeb() {
-  server.on("/",            HTTP_GET,  handleRoot);
-  server.on("/config",      HTTP_GET,  handleConfigPage);
-  server.on("/api/status",  HTTP_GET,  handleStatusJson);
-  server.on("/api/log",     HTTP_GET,  handleLogJson);
-  server.on("/api/config",  HTTP_POST, handlePostConfig);
-  server.on("/api/refresh", HTTP_POST, handleActionRefresh);
-  server.on("/img/current", HTTP_GET,  handleImgCurrent);
-  server.on("/img/last",    HTTP_GET,  handleImgLast);
-  server.begin();
-  logEvent("WEB", "server started");
-}
-
 // ---------------------- Main ----------------------
 void setup() {
   DBG_BEGIN(115200);
@@ -1331,24 +1329,18 @@ void setup() {
   board_draw_jpeg(splash_logo, splash_logo_len);
   board_draw_boot_status("Connecting to Wi-Fi...");
 
+  // Kick off WiFi connection (non-blocking).
+  // Do NOT check WL_CONNECTED here - WiFi.begin() returns before the
+  // association handshake completes. All service startup happens in loop()
+  // via startNetworkServicesOnce() once WL_CONNECTED is confirmed.
   applyWifiDefaults();
-  ensureWifi();
-
-  if (!portalActive && WiFi.status() == WL_CONNECTED) {
-    String ipMac = "IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR);
-    board_draw_boot_status(ipMac.c_str());
-    delay(800);
-    setupWeb();
-    board_draw_boot_status("Connecting to MQTT...");
-    mqttNetPlain.setTimeout(1);
-    mqttNetSecure.setTimeout(1);
-    mqttSetupClient();
-    mqttMaybeReconnect();
-    mqtt.setSocketTimeout(1);
-    downloadAndShowPhoto();
-    startOtaTask();
-  } else if (portalActive) {
-    logEvent("BOOT", "waiting for Wi-Fi credentials via portal");
+  if (cfg.wifiSsid.length() > 0) {
+    logEvent("WIFI", "connect begin ssid=%s", cfg.wifiSsid.c_str());
+    addLog("Connecting to: " + cfg.wifiSsid);
+    WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
+  } else {
+    logEvent("WIFI", "no saved credentials - starting portal");
+    startPortalMode();
   }
 }
 
@@ -1356,15 +1348,10 @@ void loop() {
   ensureWifi();
 
   if (WiFi.status() == WL_CONNECTED) {
-    if (!networkServicesStarted) {
-      setupWeb();
-      mqttNetPlain.setTimeout(1);
-      mqttNetSecure.setTimeout(1);
-      mqttSetupClient();
-      lastMqttAttemptMs = 0;
-      mqttConnectInProgress = false;
-      startOtaTask();
-    }
+    // startNetworkServicesOnce() is idempotent - handles web/mDNS/OTA/MQTT
+    // init on the first call after WiFi connects (or reconnects after portal).
+    startNetworkServicesOnce();
+
     if (networkServicesStarted) ArduinoOTA.handle();
 
     server.handleClient();
@@ -1377,21 +1364,20 @@ void loop() {
     if (!otaInProgress && (mqttRefreshPending || webRefreshPending)) {
       mqttRefreshPending = false;
       webRefreshPending  = false;
-      if (!photoDownloadPending && photoTaskHandle == nullptr) {
-        photoDownloadPending = true;
+      if (!photoTaskRunning) {
+        photoTaskRunning = true;
         xTaskCreate(
           [](void* param) {
             downloadAndShowPhoto();
-            photoDownloadPending = false;
+            photoTaskRunning = false;
             vTaskDelete(NULL);
           },
           "photoTask",
           16384,
           NULL,
           1,
-          &photoTaskHandle
+          NULL   // don't store handle - photoTaskRunning flag is the guard
         );
-        photoTaskHandle = nullptr;
       }
     }
   }
