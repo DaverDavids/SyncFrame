@@ -456,16 +456,20 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
  <h2>&#128247; SyncFrame</h2>
  <p style='text-align:center;color:#aaa'>Wi-Fi Setup</p>
  <form method='POST' action='/portal/save'>
-  <label for="ssid">WiFi SSID</label>
-  <div style="display:flex;gap:6px;align-items:center;">
-   <input type="text" id="ssid" name="ssid" placeholder="Network name" required style="flex:1;">
-   <button type="button" id="scanBtn" onclick="doScan()" title="Scan for networks"
-    style="padding:0 12px;height:38px;background:#444;color:#fff;border:1px solid #666;border-radius:4px;font-size:16px;cursor:pointer;white-space:nowrap;">
-    &#x1F50D;
-   </button>
+<label for="ssid">WiFi SSID</label>
+  <div style="display:flex;gap:6px;">
+    <input type="text" id="ssid" name="ssid" placeholder="Network name" required
+      style="flex:1;min-width:0;box-sizing:border-box;">
+    <button type="button" id="scanBtn" onclick="doScan()"
+      title="Scan for networks"
+      style="flex:0 0 auto;padding:8px 10px;font-size:14px;line-height:1;
+            background:#444;color:#fff;border:1px solid #666;border-radius:4px;
+            cursor:pointer;vertical-align:middle;">
+      &#x1F50D;
+    </button>
   </div>
   <select id="ssidPick" onchange="document.getElementById('ssid').value=this.value"
-   style="display:none;width:100%;margin-top:4px;padding:8px;background:#222;color:#fff;border:1px solid #555;border-radius:4px;">
+    style="display:none;width:100%;margin-top:4px;box-sizing:border-box;">
   </select>
   <label style="margin-top:12px">Password</label>
   <input type='password' name='pass' placeholder='Wi-Fi password'>
