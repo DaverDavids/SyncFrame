@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <esp_system.h>
 #include <deque>
+#include <coredump_handler.h>
 
 #define DEBUG_SERIAL 0
 #if DEBUG_SERIAL
@@ -552,6 +553,7 @@ static void setupPortalRoutes() {
     server.send(200, "application/json", json);
   });
   server.on("/config", HTTP_GET, handleConfigPage);
+  setupCoredumpRoute();
   server.onNotFound(handleCaptiveRedirect);
 }
 
