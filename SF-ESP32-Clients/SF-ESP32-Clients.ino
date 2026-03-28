@@ -163,6 +163,9 @@ char lastUploadEtag[32] = "";
 static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 
+static TaskHandle_t photoTaskHandle = nullptr;
+static volatile bool photoDownloadPending = false;
+
 static const uint8_t LOG_CAP = 48;
 static const size_t LOG_MSG_LEN = 96;
 struct LogEntry {
@@ -456,20 +459,20 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
  <h2>&#128247; SyncFrame</h2>
  <p style='text-align:center;color:#aaa'>Wi-Fi Setup</p>
  <form method='POST' action='/portal/save'>
-<label for="ssid">WiFi SSID</label>
-  <div style="display:flex;gap:6px;">
+  <label for="ssid">WiFi SSID</label>
+  <div style="display:grid;grid-template-columns:1fr 36px;gap:6px;align-items:stretch;">
     <input type="text" id="ssid" name="ssid" placeholder="Network name" required
-      style="flex:1;min-width:0;box-sizing:border-box;">
+      style="width:100%;margin:0;">
     <button type="button" id="scanBtn" onclick="doScan()"
       title="Scan for networks"
-      style="flex:0 0 auto;padding:8px 10px;font-size:14px;line-height:1;
+      style="width:36px;height:100%;padding:0;margin:0;font-size:13px;
             background:#444;color:#fff;border:1px solid #666;border-radius:4px;
-            cursor:pointer;vertical-align:middle;">
+            cursor:pointer;display:flex;align-items:center;justify-content:center;">
       &#x1F50D;
     </button>
   </div>
   <select id="ssidPick" onchange="document.getElementById('ssid').value=this.value"
-    style="display:none;width:100%;margin-top:4px;box-sizing:border-box;">
+    style="display:none;width:100%;margin-top:4px;">
   </select>
   <label style="margin-top:12px">Password</label>
   <input type='password' name='pass' placeholder='Wi-Fi password'>
@@ -1020,8 +1023,7 @@ static void mqttMaybeReconnect() {
 
   mqttNetPlain.setTimeout(1);
   mqttNetSecure.setTimeout(1);
-  logEvent("MQTT", "connect %s:%u tls=%s", cfg.mqttHost.c_str(), cfg.mqttPort,
-           cfg.mqttUseTLS ? "yes" : "no");
+  addLog("MQTT connecting to: " + cfg.mqttHost + ":" + String(cfg.mqttPort));
 
   bool ok = cfg.mqttUser.length()
     ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
@@ -1030,9 +1032,9 @@ static void mqttMaybeReconnect() {
   if (ok) {
     mqttConnected = true;
     bool subOk = mqtt.subscribe(cfg.mqttTopic.c_str());
-    logEvent("MQTT", "connected topic=%s sub=%s", cfg.mqttTopic.c_str(), subOk ? "ok" : "fail");
+    addLog("MQTT connected! topic=" + cfg.mqttTopic + " sub=" + String(subOk ? "ok" : "fail"));
   } else {
-    logEvent("MQTT", "connect failed state=%d", mqtt.state());
+    addLog("MQTT failed, rc=" + String(mqtt.state()));
   }
 }
 
@@ -1332,7 +1334,22 @@ void loop() {
     if (!otaInProgress && (mqttRefreshPending || webRefreshPending)) {
       mqttRefreshPending = false;
       webRefreshPending  = false;
-      downloadAndShowPhoto();
+      if (!photoDownloadPending && photoTaskHandle == nullptr) {
+        photoDownloadPending = true;
+        xTaskCreate(
+          [](void* param) {
+            downloadAndShowPhoto();
+            photoDownloadPending = false;
+            vTaskDelete(NULL);
+          },
+          "photoTask",
+          16384,
+          NULL,
+          1,
+          &photoTaskHandle
+        );
+        photoTaskHandle = nullptr;
+      }
     }
   }
 
