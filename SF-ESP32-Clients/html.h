@@ -322,6 +322,14 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span class="small">Polling runs while this page is open and console is enabled.</span>
   </div>
   <pre id="logBox" class="console">Console is idle. Enable polling to load recent events.</pre>
+
+  <hr>
+  <h3>Connection Log</h3>
+  <div id="connlog" style="background:#000;color:#0f0;font-family:monospace;font-size:12px;
+       padding:10px;height:200px;overflow-y:auto;border:1px solid #333;border-radius:4px;">
+  </div>
+  <div style="margin-top:6px;font-size:11px;color:#888" id="connlogstatus">Polling...</div>
+  <button onclick="document.getElementById('connlog').innerHTML=''">Clear log</button>
 </div>
 
 CFG_INJECT_PLACEHOLDER
@@ -508,6 +516,30 @@ document.addEventListener('visibilitychange', ()=>{
 
 loadStatus();
 setInterval(()=>{if(!document.hidden)loadStatus();}, 3000);
+
+// Connection Log polling
+(function(){
+  var connlog=document.getElementById('connlog');
+  var seen=[];
+  function poll(){
+    fetch('/logpoll').then(function(r){return r.json();}).then(function(arr){
+      document.getElementById('connlogstatus').textContent='Live';
+      arr.forEach(function(msg){
+        if(seen.indexOf(msg)===-1){
+          seen.push(msg);
+          var d=document.createElement('div');
+          d.style.color=msg.toLowerCase().indexOf('connect')>-1&&msg.toLowerCase().indexOf('fail')===-1?'#4f4':
+                         msg.toLowerCase().indexOf('fail')>-1||msg.toLowerCase().indexOf('err')>-1?'#f44':'#4af';
+          d.textContent=msg;
+          connlog.appendChild(d);
+          connlog.scrollTop=connlog.scrollHeight;
+        }
+      });
+    }).catch(function(){document.getElementById('connlogstatus').textContent='No response';});
+  }
+  poll();
+  setInterval(poll,2000);
+})();
 </script>
 </body>
 </html>

@@ -12,6 +12,7 @@
 #include <Update.h>
 #include <stdarg.h>
 #include <esp_system.h>
+#include <deque>
 
 #define DEBUG_SERIAL 0
 #if DEBUG_SERIAL
@@ -64,6 +65,18 @@ static volatile bool webRefreshPending  = false;
 // Log buffer spinlock
 // ---------------------------------------------------------------------------
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
+
+// ---------------------------------------------------------------------------
+// Config Console log buffer (for WiFi connect debugging)
+// ---------------------------------------------------------------------------
+static std::deque<String> logBuffer;
+
+static void addLog(const String& msg) {
+    String entry = "[" + String(millis() / 1000) + "s] " + msg;
+    if (logBuffer.size() >= 50) logBuffer.pop_front();
+    logBuffer.push_back(entry);
+    DBGLN(entry);
+}
 
 // ---------------------------------------------------------------------------
 // Captive Portal DNS + Web portal state
@@ -498,6 +511,17 @@ static void setupPortalRoutes() {
   server.on("/ncsi.txt",            HTTP_GET,  handleCaptiveRedirect);
   server.on("/connecttest.txt",     HTTP_GET,  handleCaptiveRedirect);
   server.on("/redirect",            HTTP_GET,  handleCaptiveRedirect);
+  server.on("/logpoll", HTTP_GET, []() {
+    String json = "[";
+    for (size_t i = 0; i < logBuffer.size(); i++) {
+      String entry = logBuffer[i];
+      entry.replace("\"", "'");
+      json += "\"" + entry + "\"";
+      if (i < logBuffer.size() - 1) json += ",";
+    }
+    json += "]";
+    server.send(200, "application/json", json);
+  });
   server.onNotFound(handleCaptiveRedirect);
 }
 
@@ -974,17 +998,24 @@ static void ensureWifi() {
 
   applyWifiDefaults();
 
-  if (wifiEverConnected) { logEvent("WIFI", "reconnect attempt"); WiFi.reconnect(); return; }
+  if (wifiEverConnected) { logEvent("WIFI", "reconnect attempt"); addLog("Reconnecting..."); WiFi.reconnect(); return; }
 
   if (cfg.wifiSsid.length() > 0) {
     logEvent("WIFI", "connect begin ssid=%s", cfg.wifiSsid.c_str());
+    addLog("Connecting to: " + cfg.wifiSsid);
     WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) delay(100);
-    if (WiFi.status() == WL_CONNECTED) { startNetworkServicesOnce(); return; }
+    if (WiFi.status() == WL_CONNECTED) {
+      addLog("Connected! IP: " + WiFi.localIP().toString());
+      startNetworkServicesOnce();
+      return;
+    }
     logEvent("WIFI", "connect timed out status=%d", WiFi.status());
+    addLog("Failed. Status=" + String(WiFi.status()) + " (1=no SSID, 4=wrong pass, 6=disconnected)");
   } else {
     logEvent("WIFI", "no saved credentials");
+    addLog("No saved credentials");
   }
 
   startPortalMode();
