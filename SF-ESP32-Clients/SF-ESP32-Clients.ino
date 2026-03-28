@@ -166,6 +166,9 @@ static volatile bool otaInProgress = false;
 static TaskHandle_t photoTaskHandle = nullptr;
 static volatile bool photoDownloadPending = false;
 
+// Flag to prevent spawning multiple concurrent MQTT connect tasks
+static volatile bool mqttConnectInProgress = false;
+
 static const uint8_t LOG_CAP = 48;
 static const size_t LOG_MSG_LEN = 96;
 struct LogEntry {
@@ -491,6 +494,10 @@ function doScan(){
   btn.disabled=true;
   sel.style.display='none';
   fetch('/scan').then(function(r){return r.json();}).then(function(nets){
+    if(nets.scanning){
+      setTimeout(doScan,1500);
+      return;
+    }
     sel.innerHTML='<option value="">-- select scanned network --</option>';
     nets.forEach(function(n){
       var o=document.createElement('option');
@@ -565,15 +572,31 @@ static void setupPortalRoutes() {
     json += "]";
     server.send(200, "application/json", json);
   });
+  // ---------------------------------------------------------------------------
+  // Non-blocking WiFi scan: kick off an async scan on first call, return
+  // {scanning:true} while in progress; return results once complete.
+  // ---------------------------------------------------------------------------
   server.on("/scan", HTTP_GET, []() {
-    int n = WiFi.scanNetworks();
+    int16_t n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) {
+      // Scan already in progress – tell the client to retry
+      server.send(200, "application/json", "{\"scanning\":true}");
+      return;
+    }
+    if (n == WIFI_SCAN_FAILED || n < 0) {
+      // No scan running yet (or previous scan failed) – start one asynchronously
+      WiFi.scanNetworks(/*async=*/true);
+      server.send(200, "application/json", "{\"scanning\":true}");
+      return;
+    }
+    // Scan finished – build and return results, then free the scan data
     String json = "[";
     for (int i = 0; i < n; i++) {
-        if (i > 0) json += ",";
-        String ssid = WiFi.SSID(i);
-        ssid.replace("\"", "\\\"");
-        json += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + String(WiFi.RSSI(i)) +
-                ",\"enc\":" + (WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
+      if (i > 0) json += ",";
+      String ssid = WiFi.SSID(i);
+      ssid.replace("\"", "\\\"");
+      json += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + String(WiFi.RSSI(i)) +
+              ",\"enc\":" + (WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
     }
     json += "]";
     WiFi.scanDelete();
@@ -856,7 +879,7 @@ static bool downloadAndShowPhoto() {
 }
 
 // ============================================================
-// Background OTA update task  (pinned Core 1, stack 16384)
+// Background OTA update task  (stack 16384, no core pin)
 //
 // Single-request flow: GET cfg.updateUrl with device identity headers.
 // 204 -> no update. 200 -> stream binary directly to flash.
@@ -985,9 +1008,10 @@ static void otaUpdateTask(void* pv) {
 static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
   if (otaTaskHandle != nullptr) return;
-  xTaskCreatePinnedToCore(
+  // Use xTaskCreate (no core pin) so the scheduler decides placement
+  xTaskCreate(
     otaUpdateTask, "ota_check", 16384, nullptr,
-    1, &otaTaskHandle, 1
+    1, &otaTaskHandle
   );
   logEvent("OTA", "task started interval=%umin url=%s compileId=%s",
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
@@ -1013,17 +1037,13 @@ static void mqttSetupClient() {
   mqtt.setSocketTimeout(1);
 }
 
-static void mqttMaybeReconnect() {
-  if (mqtt.connected()) { mqttConnected = true; return; }
-  mqttConnected = false;
-  if (WiFi.status() != WL_CONNECTED) return;
-  if (millis() - lastMqttAttemptMs < 15000) return;
-  lastMqttAttemptMs = millis();
-  if (cfg.mqttHost.length() == 0) return;
-
+// ---------------------------------------------------------------------------
+// Non-blocking MQTT reconnect: spawns a short-lived task to do the TCP/TLS
+// connect so the web server loop is never stalled.
+// ---------------------------------------------------------------------------
+static void mqttConnectTask(void* pv) {
   mqttNetPlain.setTimeout(1);
   mqttNetSecure.setTimeout(1);
-  addLog("MQTT connecting to: " + cfg.mqttHost + ":" + String(cfg.mqttPort));
 
   bool ok = cfg.mqttUser.length()
     ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
@@ -1036,6 +1056,23 @@ static void mqttMaybeReconnect() {
   } else {
     addLog("MQTT failed, rc=" + String(mqtt.state()));
   }
+  mqttConnectInProgress = false;
+  vTaskDelete(NULL);
+}
+
+static void mqttMaybeReconnect() {
+  if (mqtt.connected()) { mqttConnected = true; return; }
+  mqttConnected = false;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (mqttConnectInProgress) return;
+  if (millis() - lastMqttAttemptMs < 15000) return;
+  lastMqttAttemptMs = millis();
+  if (cfg.mqttHost.length() == 0) return;
+
+  addLog("MQTT connecting to: " + cfg.mqttHost + ":" + String(cfg.mqttPort));
+  mqttConnectInProgress = true;
+  // Spawn a task (no core pin) to do the blocking TCP/TLS connect
+  xTaskCreate(mqttConnectTask, "mqtt_conn", 8192, nullptr, 1, nullptr);
 }
 
 // ---------------------- WiFi / Network ----------------------
@@ -1053,6 +1090,12 @@ static void startNetworkServicesOnce() {
   logEvent("NET", "services mdns=%s ota=on", mdnsOk ? "on" : "off");
 }
 
+// ---------------------------------------------------------------------------
+// Non-blocking ensureWifi:
+//   - Never busy-waits on the main loop thread.
+//   - Calls WiFi.begin() / WiFi.reconnect() then returns immediately.
+//   - Connection status is checked on the next loop() iteration.
+// ---------------------------------------------------------------------------
 static void ensureWifi() {
   if (portalActive) { handlePortalLoop(); return; }
 
@@ -1062,26 +1105,24 @@ static void ensureWifi() {
 
   applyWifiDefaults();
 
-  if (wifiEverConnected) { logEvent("WIFI", "reconnect attempt"); addLog("Reconnecting..."); WiFi.reconnect(); return; }
+  if (wifiEverConnected) {
+    logEvent("WIFI", "reconnect attempt");
+    addLog("Reconnecting...");
+    WiFi.reconnect();
+    return;  // Return immediately; loop() will call us again to check status
+  }
 
   if (cfg.wifiSsid.length() > 0) {
     logEvent("WIFI", "connect begin ssid=%s", cfg.wifiSsid.c_str());
     addLog("Connecting to: " + cfg.wifiSsid);
     WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) delay(100);
-    if (WiFi.status() == WL_CONNECTED) {
-      addLog("Connected! IP: " + WiFi.localIP().toString());
-      startNetworkServicesOnce();
-      return;
-    }
-    logEvent("WIFI", "connect timed out status=%d", WiFi.status());
-    addLog("Failed. Status=" + String(WiFi.status()) + " (1=no SSID, 4=wrong pass, 6=disconnected)");
-  } else {
-    logEvent("WIFI", "no saved credentials");
-    addLog("No saved credentials");
+    // Return immediately – do NOT busy-wait here. loop() will poll WL_CONNECTED.
+    // The 5-second cooldown on lastWifiAttemptMs prevents hammering WiFi.begin().
+    return;
   }
 
+  logEvent("WIFI", "no saved credentials");
+  addLog("No saved credentials");
   startPortalMode();
 }
 
@@ -1227,6 +1268,7 @@ static void handlePostConfig() {
   mqtt.disconnect();
   mqttSetupClient();
   lastMqttAttemptMs = 0;
+  mqttConnectInProgress = false;
   startOtaTask();
   logEvent("WEB", "config saved");
   server.send(200, "application/json", "{\"ok\":true}");
@@ -1320,6 +1362,7 @@ void loop() {
       mqttNetSecure.setTimeout(1);
       mqttSetupClient();
       lastMqttAttemptMs = 0;
+      mqttConnectInProgress = false;
       startOtaTask();
     }
     if (networkServicesStarted) ArduinoOTA.handle();
