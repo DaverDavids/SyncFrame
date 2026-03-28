@@ -52,8 +52,14 @@ static volatile bool mqttRefreshPending = false;
 static volatile bool webRefreshPending  = false;
 
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
+// logBuffer is only ever touched from loop() (main task). addLog() is called
+// from mqttReconnectTask via logEvent — replaced all addLog() calls in that
+// task with logEvent() to avoid cross-task std::deque mutation.
 static std::deque<String> logBuffer;
 
+// Safe to call from any task — uses the ring-buffer (logBuf) which is
+// protected by logMux (portENTER/EXIT_CRITICAL), never the std::deque.
+// addLog() touches the deque and must only be called from loop() task.
 static void addLog(const String& msg) {
     String entry = "[" + String(millis() / 1000) + "s] " + msg;
     if (logBuffer.size() >= 50) logBuffer.pop_front();
@@ -599,7 +605,10 @@ static void handlePortalLoop() {
     portalActive           = false;
     webServerStarted       = false;
     networkServicesStarted = false;
-    wifiEverConnected      = false;
+    // FIX 3: Do NOT reset wifiEverConnected here. If we entered the portal
+    // because of a transient drop (not first boot), preserving wifiEverConnected
+    // lets ensureWifi() use WiFi.reconnect() instead of burning through the
+    // attempt counter and re-opening the portal unnecessarily.
     lastWifiAttemptMs      = 0;
     wifiAttemptCount       = 0;
   }
@@ -984,8 +993,9 @@ static void mqttSetupClient() {
 
 // MQTT reconnect task — runs entirely off the main loop so that a slow/failing
 // TCP connect to an unreachable broker can never block server.handleClient().
+// FIX 2: All logging uses logEvent() (ring-buffer, portENTER/EXIT_CRITICAL) —
+// never addLog() which touches the std::deque from the wrong task context.
 static void mqttReconnectTask(void* pv) {
-  // Take a snapshot of connection params so we don't read cfg mid-change
   char host[64]  = {};
   char user[64]  = {};
   char pass[64]  = {};
@@ -998,7 +1008,7 @@ static void mqttReconnectTask(void* pv) {
   mqttNetPlain.setTimeout(2);
   mqttNetSecure.setTimeout(2);
 
-  addLog(String("MQTT connecting to: ") + host + ":" + String(cfg.mqttPort));
+  logEvent("MQTT", "connecting to %s:%u", host, (unsigned)cfg.mqttPort);
 
   bool ok = (user[0] != '\0')
     ? mqtt.connect(HOSTNAME, user, pass)
@@ -1007,11 +1017,9 @@ static void mqttReconnectTask(void* pv) {
   if (ok) {
     mqttConnected = true;
     bool subOk = mqtt.subscribe(topic);
-    addLog(String("MQTT connected! topic=") + topic + " sub=" + (subOk ? "ok" : "fail"));
-    logEvent("MQTT", "connected sub=%s", subOk ? "ok" : "fail");
+    logEvent("MQTT", "connected sub=%s topic=%s", subOk ? "ok" : "fail", topic);
   } else {
-    addLog(String("MQTT failed, rc=") + String(mqtt.state()));
-    logEvent("MQTT", "connect failed rc=%d", mqtt.state());
+    logEvent("MQTT", "connect failed rc=%d host=%s", mqtt.state(), host);
   }
 
   mqttTaskRunning = false;
@@ -1096,7 +1104,15 @@ static void startNetworkServicesOnce() {
 // ---------------------------------------------------------------------------
 static void ensureWifi() {
   if (portalActive) { handlePortalLoop(); return; }
-  if (WiFi.status() == WL_CONNECTED) return;  // services started in loop()
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // FIX 1: Always call server.handleClient() when the web server is up,
+    // even if networkServicesStarted hasn't been re-set yet (e.g. during a
+    // transient drop/reconnect). startNetworkServicesOnce() is idempotent.
+    if (webServerStarted) server.handleClient();
+    return;
+  }
+
   if (lastWifiAttemptMs != 0 && (millis() - lastWifiAttemptMs) < 5000) return;
 
   lastWifiAttemptMs = millis();
