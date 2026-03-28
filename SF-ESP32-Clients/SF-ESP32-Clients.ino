@@ -778,30 +778,37 @@ static bool downloadAndShowPhoto() {
     WiFiClientSecure* sec = nullptr;
     WiFiClient* plain = nullptr;
     HTTPClient* h = new HTTPClient();
+    bool headBeginOk = false;
     if (url.startsWith("https://")) {
       sec = new WiFiClientSecure();
-      sec->setTimeout(5);
-      if (cfg.httpsInsecure) sec->setInsecure();
-      h->begin(*sec, url);
+      if (sec) {
+        sec->setTimeout(5);
+        if (cfg.httpsInsecure) sec->setInsecure();
+        headBeginOk = h->begin(*sec, url);
+      }
     } else {
       plain = new WiFiClient();
-      plain->setTimeout(5);
-      h->begin(*plain, url);
+      if (plain) {
+        plain->setTimeout(5);
+        headBeginOk = h->begin(*plain, url);
+      }
     }
-    if (cfg.httpUser.length() > 0)
-      h->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
-    int headCode = h->sendRequest("HEAD");
-    if (headCode == HTTP_CODE_OK) {
-      String etag = h->header("ETag");
-      if (etag.length() > 0) {
-        etag.replace("\"", "");
-        if (etag == lastUploadEtag) {
-          shouldRotate = false;
-          logEvent("PHOTO", "etag unchanged, no rotation");
-        } else {
-          strncpy(lastUploadEtag, etag.c_str(), sizeof(lastUploadEtag) - 1);
-          lastUploadEtag[sizeof(lastUploadEtag) - 1] = '\0';
-          logEvent("PHOTO", "etag changed to %s, rotating", lastUploadEtag);
+    if (headBeginOk) {
+      if (cfg.httpUser.length() > 0)
+        h->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
+      int headCode = h->sendRequest("HEAD");
+      if (headCode == HTTP_CODE_OK) {
+        String etag = h->header("ETag");
+        if (etag.length() > 0) {
+          etag.replace("\"", "");
+          if (etag == lastUploadEtag) {
+            shouldRotate = false;
+            logEvent("PHOTO", "etag unchanged, no rotation");
+          } else {
+            strncpy(lastUploadEtag, etag.c_str(), sizeof(lastUploadEtag) - 1);
+            lastUploadEtag[sizeof(lastUploadEtag) - 1] = '\0';
+            logEvent("PHOTO", "etag changed to %s, rotating", lastUploadEtag);
+          }
         }
       }
     }
@@ -841,12 +848,19 @@ static bool downloadAndShowPhoto() {
 
 // Helper: spawn a photo download task (used for both first-boot and MQTT/web triggers)
 static void spawnPhotoTask() {
-  if (photoTaskRunning || otaInProgress) return;
+  portENTER_CRITICAL(&logMux);
+  if (photoTaskRunning || otaInProgress) {
+    portEXIT_CRITICAL(&logMux);
+    return;
+  }
   photoTaskRunning = true;
+  portEXIT_CRITICAL(&logMux);
   xTaskCreate(
     [](void* param) {
       downloadAndShowPhoto();
+      portENTER_CRITICAL(&logMux);
       photoTaskRunning = false;
+      portEXIT_CRITICAL(&logMux);
       vTaskDelete(NULL);
     },
     "photoTask", 16384, NULL, 1, NULL
@@ -997,6 +1011,7 @@ static void mqttSetupClient() {
 // TCP connect to an unreachable broker can never block server.handleClient().
 // FIX 2: All logging uses logEvent() (ring-buffer, portENTER/EXIT_CRITICAL) —
 // never addLog() which touches the std::deque from the wrong task context.
+// Uses local stack-allocated WiFiClient/WiFiClientSecure instead of globals.
 static void mqttReconnectTask(void* pv) {
   char host[64]  = {};
   char user[64]  = {};
@@ -1007,21 +1022,40 @@ static void mqttReconnectTask(void* pv) {
   strncpy(pass,  cfg.mqttPass.c_str(),  sizeof(pass)  - 1);
   strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
 
-  mqttNetPlain.setTimeout(2);
-  mqttNetSecure.setTimeout(2);
+  WiFiClient localPlain;
+  WiFiClientSecure localSecure;
+  localPlain.setTimeout(2);
+  localSecure.setTimeout(2);
+  if (cfg.mqttTlsInsecure) localSecure.setInsecure();
+
+  PubSubClient localMqtt;
+  localMqtt.setCallback(mqttCallback);
+  if (cfg.mqttUseTLS)
+    localMqtt.setClient(localSecure);
+  else
+    localMqtt.setClient(localPlain);
+  localMqtt.setServer(host, cfg.mqttPort);
 
   logEvent("MQTT", "connecting to %s:%u", host, (unsigned)cfg.mqttPort);
 
   bool ok = (user[0] != '\0')
-    ? mqtt.connect(HOSTNAME, user, pass)
-    : mqtt.connect(HOSTNAME);
+    ? localMqtt.connect(HOSTNAME, user, pass)
+    : localMqtt.connect(HOSTNAME);
 
   if (ok) {
-    mqttConnected = true;
-    bool subOk = mqtt.subscribe(topic);
+    bool subOk = localMqtt.subscribe(topic);
     logEvent("MQTT", "connected sub=%s topic=%s", subOk ? "ok" : "fail", topic);
+    portENTER_CRITICAL(&logMux);
+    if (cfg.mqttUseTLS) {
+      mqtt.setClient(mqttNetSecure);
+    } else {
+      mqtt.setClient(mqttNetPlain);
+    }
+    mqtt.setCallback(mqttCallback);
+    mqttConnected = true;
+    portEXIT_CRITICAL(&logMux);
   } else {
-    logEvent("MQTT", "connect failed rc=%d host=%s", mqtt.state(), host);
+    logEvent("MQTT", "connect failed rc=%d host=%s", localMqtt.state(), host);
   }
 
   mqttTaskRunning = false;
