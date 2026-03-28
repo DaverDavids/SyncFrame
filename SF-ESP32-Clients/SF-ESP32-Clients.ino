@@ -456,14 +456,46 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
  <h2>&#128247; SyncFrame</h2>
  <p style='text-align:center;color:#aaa'>Wi-Fi Setup</p>
  <form method='POST' action='/portal/save'>
-  <label>Network (SSID)</label>
-  <input type='text' name='ssid' placeholder='Your Wi-Fi name' required>
-  <label>Password</label>
+  <label>WiFi Network</label>
+  <div style="display:flex;gap:6px;">
+   <select id="ssidSel" style="flex:1;padding:8px;background:#222;color:#fff;border:1px solid #555;border-radius:4px;">
+    <option value="">-- tap Scan --</option>
+   </select>
+   <button type="button" id="scanBtn" onclick="doScan()"
+    style="padding:8px 12px;background:#444;color:#fff;border:1px solid #555;border-radius:4px;">
+    &#x1F50D;
+   </button>
+  </div>
+  <input type="hidden" name="ssid" id="ssidHidden">
+  <label style="margin-top:12px">Password</label>
   <input type='password' name='pass' placeholder='Wi-Fi password'>
   <button type='submit'>Connect</button>
  </form>
+ <p style="margin-top:16px;text-align:center;font-size:13px;">
+  <a href="/config" style="color:#4af;">&#x1F4CB; Config & Log</a>
+ </p>
  <p class='note'>Device: HOSTNAME_PLACEHOLDER</p>
-</div></body></html>
+</div>
+<script>
+document.getElementById('ssidSel').addEventListener('change',function(){
+  document.getElementById('ssidHidden').value=this.value;
+});
+function doScan(){
+  var btn=document.getElementById('scanBtn');
+  var sel=document.getElementById('ssidSel');
+  btn.textContent='...';
+  btn.disabled=true;
+  fetch('/scan').then(function(r){return r.json();}).then(function(nets){
+    sel.innerHTML='<option value="">-- select --</option>';
+    nets.forEach(function(n){
+      var o=document.createElement('option');
+      o.value=n.ssid; o.textContent=n.ssid+' ('+n.rssi+'dBm)'+(n.enc?' 🔒':'');
+      sel.appendChild(o);
+    });
+    btn.textContent='&#x1F50D;'; btn.disabled=false;
+  }).catch(function(){ btn.textContent='&#x1F50D;'; btn.disabled=false; });
+}
+</script></body></html>
 )rawliteral";
 
 static const char PORTAL_SAVED_HTML[] PROGMEM = R"rawliteral(
@@ -522,6 +554,21 @@ static void setupPortalRoutes() {
     json += "]";
     server.send(200, "application/json", json);
   });
+  server.on("/scan", HTTP_GET, []() {
+    int n = WiFi.scanNetworks();
+    String json = "[";
+    for (int i = 0; i < n; i++) {
+        if (i > 0) json += ",";
+        String ssid = WiFi.SSID(i);
+        ssid.replace("\"", "\\\"");
+        json += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + String(WiFi.RSSI(i)) +
+                ",\"enc\":" + (WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
+    }
+    json += "]";
+    WiFi.scanDelete();
+    server.send(200, "application/json", json);
+  });
+  server.on("/config", HTTP_GET, handleConfigPage);
   server.onNotFound(handleCaptiveRedirect);
 }
 
