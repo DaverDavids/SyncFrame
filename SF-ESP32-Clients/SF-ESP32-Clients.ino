@@ -511,7 +511,13 @@ static void handlePortalSave() {
 static void setupPortalRoutes() {
   server.on("/portal",              HTTP_GET,  handlePortalPage);
   server.on("/portal/save",         HTTP_POST, handlePortalSave);
-  server.on("/hotspot-detect.html", HTTP_GET,  handleCaptiveRedirect);
+  server.on("/hotspot-detect.html", HTTP_GET, []() {
+    server.send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+  });
+  server.on("/library/test/success.html", HTTP_GET, []() {
+    server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
+    server.send(302, "text/plain", "");
+  });
   server.on("/generate_204",        HTTP_GET,  handleCaptiveRedirect);
   server.on("/gen_204",             HTTP_GET,  handleCaptiveRedirect);
   server.on("/ncsi.txt",            HTTP_GET,  handleCaptiveRedirect);
