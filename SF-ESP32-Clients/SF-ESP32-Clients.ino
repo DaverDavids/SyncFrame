@@ -135,6 +135,9 @@ static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 static volatile bool photoTaskRunning = false;
 
+// MQTT reconnect runs in its own task so mqtt.connect() can never block loop()
+static volatile bool mqttTaskRunning = false;
+
 // How many consecutive 5-second WiFi attempts before falling back to portal
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;  // ~30 seconds
 static uint8_t wifiAttemptCount = 0;
@@ -979,33 +982,55 @@ static void mqttSetupClient() {
   mqtt.setSocketTimeout(1);
 }
 
-// mqtt.connect() with setTimeout(1) on the socket returns quickly on failure
-// so this runs synchronously on the main loop without blocking it meaningfully.
+// MQTT reconnect task — runs entirely off the main loop so that a slow/failing
+// TCP connect to an unreachable broker can never block server.handleClient().
+static void mqttReconnectTask(void* pv) {
+  // Take a snapshot of connection params so we don't read cfg mid-change
+  char host[64]  = {};
+  char user[64]  = {};
+  char pass[64]  = {};
+  char topic[64] = {};
+  strncpy(host,  cfg.mqttHost.c_str(),  sizeof(host)  - 1);
+  strncpy(user,  cfg.mqttUser.c_str(),  sizeof(user)  - 1);
+  strncpy(pass,  cfg.mqttPass.c_str(),  sizeof(pass)  - 1);
+  strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
+
+  mqttNetPlain.setTimeout(2);
+  mqttNetSecure.setTimeout(2);
+
+  addLog(String("MQTT connecting to: ") + host + ":" + String(cfg.mqttPort));
+
+  bool ok = (user[0] != '\0')
+    ? mqtt.connect(HOSTNAME, user, pass)
+    : mqtt.connect(HOSTNAME);
+
+  if (ok) {
+    mqttConnected = true;
+    bool subOk = mqtt.subscribe(topic);
+    addLog(String("MQTT connected! topic=") + topic + " sub=" + (subOk ? "ok" : "fail"));
+    logEvent("MQTT", "connected sub=%s", subOk ? "ok" : "fail");
+  } else {
+    addLog(String("MQTT failed, rc=") + String(mqtt.state()));
+    logEvent("MQTT", "connect failed rc=%d", mqtt.state());
+  }
+
+  mqttTaskRunning = false;
+  vTaskDelete(NULL);
+}
+
+// Called from loop() — spawns a background task if it's time to try reconnecting.
+// Returns immediately; never blocks.
 static void mqttMaybeReconnect() {
   if (mqtt.connected()) { mqttConnected = true; return; }
   mqttConnected = false;
   if (WiFi.status() != WL_CONNECTED) return;
   if (millis() - lastMqttAttemptMs < 15000) return;
-  lastMqttAttemptMs = millis();
+  if (mqttTaskRunning) return;
   if (cfg.mqttHost.length() == 0) return;
 
-  mqttNetPlain.setTimeout(1);
-  mqttNetSecure.setTimeout(1);
-  addLog("MQTT connecting to: " + cfg.mqttHost + ":" + String(cfg.mqttPort));
-
-  bool ok = cfg.mqttUser.length()
-    ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
-    : mqtt.connect(HOSTNAME);
-
-  if (ok) {
-    mqttConnected = true;
-    bool subOk = mqtt.subscribe(cfg.mqttTopic.c_str());
-    addLog("MQTT connected! topic=" + cfg.mqttTopic + " sub=" + String(subOk ? "ok" : "fail"));
-    logEvent("MQTT", "connected sub=%s", subOk ? "ok" : "fail");
-  } else {
-    addLog("MQTT failed, rc=" + String(mqtt.state()));
-    logEvent("MQTT", "connect failed rc=%d", mqtt.state());
-  }
+  lastMqttAttemptMs = millis();
+  mqttTaskRunning   = true;
+  xTaskCreate(mqttReconnectTask, "mqttRecon", 8192, nullptr, 1, nullptr);
 }
 
 // ---------------------- Network services ----------------------
