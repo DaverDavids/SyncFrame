@@ -337,7 +337,7 @@ static void freeBuf(uint8_t*& p, size_t& n) {
 
 static void applyWifiDefaults() {
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_11dBm);
+  WiFi.setTxPower(WIFI_POWER_15dBm);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
   WiFi.setSleep(false);
@@ -456,17 +456,17 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
  <h2>&#128247; SyncFrame</h2>
  <p style='text-align:center;color:#aaa'>Wi-Fi Setup</p>
  <form method='POST' action='/portal/save'>
-  <label>WiFi Network</label>
-  <div style="display:flex;gap:6px;">
-   <select id="ssidSel" style="flex:1;padding:8px;background:#222;color:#fff;border:1px solid #555;border-radius:4px;">
-    <option value="">-- tap Scan --</option>
-   </select>
-   <button type="button" id="scanBtn" onclick="doScan()"
-    style="padding:8px 12px;background:#444;color:#fff;border:1px solid #555;border-radius:4px;">
+  <label for="ssid">WiFi SSID</label>
+  <div style="display:flex;gap:6px;align-items:center;">
+   <input type="text" id="ssid" name="ssid" placeholder="Network name" required style="flex:1;">
+   <button type="button" id="scanBtn" onclick="doScan()" title="Scan for networks"
+    style="padding:0 12px;height:38px;background:#444;color:#fff;border:1px solid #666;border-radius:4px;font-size:16px;cursor:pointer;white-space:nowrap;">
     &#x1F50D;
    </button>
   </div>
-  <input type="hidden" name="ssid" id="ssidHidden">
+  <select id="ssidPick" onchange="document.getElementById('ssid').value=this.value"
+   style="display:none;width:100%;margin-top:4px;padding:8px;background:#222;color:#fff;border:1px solid #555;border-radius:4px;">
+  </select>
   <label style="margin-top:12px">Password</label>
   <input type='password' name='pass' placeholder='Wi-Fi password'>
   <button type='submit'>Connect</button>
@@ -477,23 +477,27 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
  <p class='note'>Device: HOSTNAME_PLACEHOLDER</p>
 </div>
 <script>
-document.getElementById('ssidSel').addEventListener('change',function(){
-  document.getElementById('ssidHidden').value=this.value;
-});
 function doScan(){
   var btn=document.getElementById('scanBtn');
-  var sel=document.getElementById('ssidSel');
+  var sel=document.getElementById('ssidPick');
   btn.textContent='...';
   btn.disabled=true;
+  sel.style.display='none';
   fetch('/scan').then(function(r){return r.json();}).then(function(nets){
-    sel.innerHTML='<option value="">-- select --</option>';
+    sel.innerHTML='<option value="">-- select scanned network --</option>';
     nets.forEach(function(n){
       var o=document.createElement('option');
-      o.value=n.ssid; o.textContent=n.ssid+' ('+n.rssi+'dBm)'+(n.enc?' 🔒':'');
+      o.value=n.ssid;
+      o.textContent=n.ssid+(n.enc?' \uD83D\uDD12':'')+' ('+n.rssi+'dBm)';
       sel.appendChild(o);
     });
-    btn.textContent='&#x1F50D;'; btn.disabled=false;
-  }).catch(function(){ btn.textContent='&#x1F50D;'; btn.disabled=false; });
+    sel.style.display='block';
+    btn.textContent='\uD83D\uDD0D';
+    btn.disabled=false;
+  }).catch(function(){
+    btn.textContent='\uD83D\uDD0D';
+    btn.disabled=false;
+  });
 }
 </script></body></html>
 )rawliteral";
