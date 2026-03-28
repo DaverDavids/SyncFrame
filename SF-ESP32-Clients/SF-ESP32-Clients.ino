@@ -541,6 +541,12 @@ static void startPortalMode() {
   setupPortalRoutes();
   server.begin();
 
+  ArduinoOTA.setHostname(HOSTNAME);
+  if (ARDUINO_OTA_PASSWORD && strlen(ARDUINO_OTA_PASSWORD) > 0)
+    ArduinoOTA.setPassword(ARDUINO_OTA_PASSWORD);
+  ArduinoOTA.begin();
+  logEvent("NET", "ota enabled in AP mode");
+
   portalActive  = true;
   portalDone    = false;
   portalStartMs = millis();
@@ -551,6 +557,7 @@ static void handlePortalLoop() {
   if (!portalActive) return;
   dnsServer.processNextRequest();
   server.handleClient();
+  ArduinoOTA.handle();
 
   bool timedOut = (millis() - portalStartMs) > PORTAL_TIMEOUT_MS;
   if (portalDone || timedOut) {
