@@ -1066,6 +1066,12 @@ static void startNetworkServicesOnce() {
     server.on("/api/refresh", HTTP_POST, handleActionRefresh);
     server.on("/img/current", HTTP_GET,  handleImgCurrent);
     server.on("/img/last",    HTTP_GET,  handleImgLast);
+    setupCoredumpRoute();
+    server.on("/panic-test", HTTP_GET, []() {
+      server.send(200, "text/plain", "Crashing in 1s...");
+      delay(1000);
+      abort();
+    });
     server.begin();
     webServerStarted = true;
     logEvent("WEB", "server started");
