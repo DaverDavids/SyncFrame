@@ -52,23 +52,7 @@ static unsigned long bootTimeMs = 0;
 static volatile bool mqttRefreshPending = false;
 static volatile bool webRefreshPending  = false;
 
-static uint8_t* heapReserve = nullptr;
-
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
-// logBuffer is only ever touched from loop() (main task). addLog() is called
-// from mqttReconnectTask via logEvent — replaced all addLog() calls in that
-// task with logEvent() to avoid cross-task std::deque mutation.
-static std::deque<String> logBuffer;
-
-// Safe to call from any task — uses the ring-buffer (logBuf) which is
-// protected by logMux (portENTER/EXIT_CRITICAL), never the std::deque.
-// addLog() touches the deque and must only be called from loop() task.
-static void addLog(const String& msg) {
-    String entry = "[" + String(millis() / 1000) + "s] " + msg;
-    if (logBuffer.size() >= 50) logBuffer.pop_front();
-    logBuffer.push_back(entry);
-    DBGLN(entry);
-}
 
 DNSServer dnsServer;
 static bool portalActive = false;
@@ -181,8 +165,7 @@ static void handleActionRefresh();
 // ============================================================
 static bool requireWebAuth() {
   if (ESP.getFreeHeap() < 20000) {
-    if (heapReserve) { free(heapReserve); heapReserve = nullptr; }
-    server.send(503, "text/plain", "low memory");
+    server.send(503, "application/json", "{\"ok\":false,\"err\":\"low memory\"}");
     return false;
   }
   if (cfg.webPass.length() == 0) return true;
@@ -530,17 +513,6 @@ static void setupPortalRoutes() {
   server.on("/ncsi.txt",            HTTP_GET,  handleCaptiveRedirect);
   server.on("/connecttest.txt",     HTTP_GET,  handleCaptiveRedirect);
   server.on("/redirect",            HTTP_GET,  handleCaptiveRedirect);
-  server.on("/logpoll", HTTP_GET, []() {
-    String json = "[";
-    for (size_t i = 0; i < logBuffer.size(); i++) {
-      String entry = logBuffer[i];
-      entry.replace("\"", "'");
-      json += "\"" + entry + "\"";
-      if (i < logBuffer.size() - 1) json += ",";
-    }
-    json += "]";
-    server.send(200, "application/json", json);
-  });
   // Non-blocking async WiFi scan
   server.on("/scan", HTTP_GET, []() {
     int16_t n = WiFi.scanComplete();
@@ -698,11 +670,11 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   size_t allocSize = (total > 0) ? (size_t)total : MAX_JPG;
   uint8_t* buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buf) {
-    logEvent("PHOTO", "PSRAM malloc failed, falling back to DRAM");
+    logEvent("PHOTO", "SPIRAM alloc failed, free=%u", ESP.getFreePsram());
     buf = (uint8_t*)malloc(allocSize);
   }
   if (!buf) {
-    if (outErr) *outErr = "malloc failed";
+    if (outErr) *outErr = "out of memory";
     http->end(); delete http; delete secureClient; delete plainClient;
     return false;
   }
@@ -1003,29 +975,6 @@ static void startOtaTask() {
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
 
-static void webServerTask(void* param) {
-  (void)param;
-  for (;;) {
-    if (WiFi.status() == WL_CONNECTED) {
-      server.handleClient();
-    }
-    vTaskDelay(pdMS_TO_TICKS(5));
-  }
-}
-
-static void startWebServerTask() {
-  xTaskCreatePinnedToCore(
-    webServerTask,
-    "webSrv",
-    8192,
-    nullptr,
-    1,
-    nullptr,
-    0
-  );
-  logEvent("WEB", "task started");
-}
-
 // ---------------------- MQTT ----------------------
 static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   (void)payload;
@@ -1048,57 +997,39 @@ static void mqttSetupClient() {
 
 // MQTT reconnect task — runs entirely off the main loop so that a slow/failing
 // TCP connect to an unreachable broker can never block server.handleClient().
-// FIX 2: All logging uses logEvent() (ring-buffer, portENTER/EXIT_CRITICAL) —
-// never addLog() which touches the std::deque from the wrong task context.
-// Uses local stack-allocated WiFiClient/WiFiClientSecure instead of globals.
 static void mqttReconnectTask(void* pv) {
+  (void)pv;
   char host[64]  = {};
-  char user[64]  = {};
-  char pass[64]  = {};
   char topic[64] = {};
   strncpy(host,  cfg.mqttHost.c_str(),  sizeof(host)  - 1);
-  strncpy(user,  cfg.mqttUser.c_str(),  sizeof(user)  - 1);
-  strncpy(pass,  cfg.mqttPass.c_str(),  sizeof(pass)  - 1);
   strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
 
   bool useTLS = cfg.mqttUseTLS;
-  bool tlsInsecure = cfg.mqttTlsInsecure;
-  uint16_t mqttPort = cfg.mqttPort;
 
-  WiFiClient localPlain;
-  WiFiClientSecure localSecure;
-  localPlain.setTimeout(2);
-  localSecure.setTimeout(2);
-  if (tlsInsecure) localSecure.setInsecure();
+  if (useTLS) {
+    if (cfg.mqttTlsInsecure) mqttNetSecure.setInsecure();
+    mqttNetSecure.setTimeout(5);
+    mqtt.setClient(mqttNetSecure);
+  } else {
+    mqttNetPlain.setTimeout(5);
+    mqtt.setClient(mqttNetPlain);
+  }
+  mqtt.setServer(host, cfg.mqttPort);
+  mqtt.setSocketTimeout(5);
+  mqtt.setCallback(mqttCallback);
 
-  PubSubClient localMqtt;
-  localMqtt.setCallback(mqttCallback);
-  if (useTLS)
-    localMqtt.setClient(localSecure);
-  else
-    localMqtt.setClient(localPlain);
-  localMqtt.setServer(host, mqttPort);
+  logEvent("MQTT", "connecting to %s:%u", host, (unsigned)cfg.mqttPort);
 
-  logEvent("MQTT", "connecting to %s:%u", host, (unsigned)mqttPort);
-
-  bool ok = (user[0] != '\0')
-    ? localMqtt.connect(HOSTNAME, user, pass)
-    : localMqtt.connect(HOSTNAME);
+  bool ok = (cfg.mqttUser.length() > 0)
+    ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
+    : mqtt.connect(HOSTNAME);
 
   if (ok) {
-    bool subOk = localMqtt.subscribe(topic);
+    bool subOk = mqtt.subscribe(topic);
     logEvent("MQTT", "connected sub=%s topic=%s", subOk ? "ok" : "fail", topic);
-    portENTER_CRITICAL(&logMux);
-    if (useTLS) {
-      mqtt.setClient(mqttNetSecure);
-    } else {
-      mqtt.setClient(mqttNetPlain);
-    }
-    mqtt.setCallback(mqttCallback);
     mqttConnected = true;
-    portEXIT_CRITICAL(&logMux);
   } else {
-    logEvent("MQTT", "connect failed rc=%d host=%s", localMqtt.state(), host);
+    logEvent("MQTT", "connect failed rc=%d", mqtt.state());
   }
 
   mqttTaskRunning = false;
@@ -1117,7 +1048,7 @@ static void mqttMaybeReconnect() {
 
   lastMqttAttemptMs = millis();
   mqttTaskRunning   = true;
-  xTaskCreate(mqttReconnectTask, "mqttRecon", 8192, nullptr, 1, nullptr);
+  xTaskCreate(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr);
 }
 
 // ---------------------- Network services ----------------------
@@ -1151,11 +1082,11 @@ static void startNetworkServicesOnce() {
     });
     server.begin();
     webServerStarted = true;
-    startWebServerTask();
+    logEvent("WEB", "server started");
   }
 
-  mqttNetPlain.setTimeout(1);
-  mqttNetSecure.setTimeout(1);
+  mqttNetPlain.setTimeout(2);
+  mqttNetSecure.setTimeout(5);
   mqttSetupClient();
   lastMqttAttemptMs = 0;
 
@@ -1202,14 +1133,12 @@ static void ensureWifi() {
 
   if (cfg.wifiSsid.length() == 0) {
     logEvent("WIFI", "no saved credentials");
-    addLog("No saved credentials");
     startPortalMode();
     return;
   }
 
   if (wifiEverConnected) {
     logEvent("WIFI", "reconnect attempt");
-    addLog("Reconnecting...");
     WiFi.reconnect();
     return;
   }
@@ -1218,7 +1147,6 @@ static void ensureWifi() {
   wifiAttemptCount++;
   if (wifiAttemptCount > WIFI_MAX_ATTEMPTS) {
     logEvent("WIFI", "giving up after %u attempts, starting portal", (unsigned)wifiAttemptCount);
-    addLog("Could not connect. Starting Wi-Fi setup...");
     startPortalMode();
     return;
   }
@@ -1226,7 +1154,6 @@ static void ensureWifi() {
   applyWifiDefaults();
   logEvent("WIFI", "connect attempt %u/%u ssid=%s",
            (unsigned)wifiAttemptCount, (unsigned)WIFI_MAX_ATTEMPTS, cfg.wifiSsid.c_str());
-  addLog("Connecting to: " + cfg.wifiSsid + " (" + String(wifiAttemptCount) + "/" + String(WIFI_MAX_ATTEMPTS) + ")");
   WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
 }
 
@@ -1415,7 +1342,6 @@ static void handleActionRefresh() {
 void setup() {
   DBG_BEGIN(115200);
   delay(50);
-  heapReserve = (uint8_t*)malloc(8192);
   bootTimeMs = millis();
   buildHostAndClientId();
   buildCompileId();
@@ -1435,7 +1361,6 @@ void setup() {
   applyWifiDefaults();
   if (cfg.wifiSsid.length() > 0) {
     logEvent("WIFI", "connect begin ssid=%s", cfg.wifiSsid.c_str());
-    addLog("Connecting to: " + cfg.wifiSsid);
     WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
     wifiAttemptCount = 1;  // this counts as attempt #1
   } else {
@@ -1452,6 +1377,9 @@ void loop() {
 
     if (networkServicesStarted) {
       ArduinoOTA.handle();
+      if (WiFi.status() == WL_CONNECTED && ESP.getFreeHeap() > 20000) {
+        server.handleClient();
+      }
 
       if (!otaInProgress) {
         mqttMaybeReconnect();

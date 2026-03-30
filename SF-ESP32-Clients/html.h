@@ -520,21 +520,20 @@ setInterval(()=>{if(!document.hidden)loadStatus();}, 3000);
 // Connection Log polling
 (function(){
   var connlog=document.getElementById('connlog');
-  var seen=[];
+  var seenSeq=0;
   function poll(){
-    fetch('/logpoll').then(function(r){return r.json();}).then(function(arr){
+    fetch('/api/log?since='+seenSeq).then(function(r){return r.json();}).then(function(data){
       document.getElementById('connlogstatus').textContent='Live';
-      arr.forEach(function(msg){
-        if(seen.indexOf(msg)===-1){
-          seen.push(msg);
-          var d=document.createElement('div');
-          d.style.color=msg.toLowerCase().indexOf('connect')>-1&&msg.toLowerCase().indexOf('fail')===-1?'#4f4':
-                         msg.toLowerCase().indexOf('fail')>-1||msg.toLowerCase().indexOf('err')>-1?'#f44':'#4af';
-          d.textContent=msg;
-          connlog.appendChild(d);
-          connlog.scrollTop=connlog.scrollHeight;
-        }
+      data.items.forEach(function(item){
+        var msg='['+(item.ms/1000|0)+'s] ['+item.tag+'] '+item.msg;
+        var d=document.createElement('div');
+        d.style.color=msg.toLowerCase().indexOf('connect')>-1&&msg.toLowerCase().indexOf('fail')===-1?'#4f4':
+                       msg.toLowerCase().indexOf('fail')>-1||msg.toLowerCase().indexOf('err')>-1?'#f44':'#4af';
+        d.textContent=msg;
+        connlog.appendChild(d);
+        connlog.scrollTop=connlog.scrollHeight;
       });
+      seenSeq=data.nextSince;
     }).catch(function(){document.getElementById('connlogstatus').textContent='No response';});
   }
   poll();
