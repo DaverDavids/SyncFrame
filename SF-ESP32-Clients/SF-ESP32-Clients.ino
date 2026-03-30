@@ -52,6 +52,8 @@ static unsigned long bootTimeMs = 0;
 static volatile bool mqttRefreshPending = false;
 static volatile bool webRefreshPending  = false;
 
+static uint8_t* heapReserve = nullptr;
+
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 // logBuffer is only ever touched from loop() (main task). addLog() is called
 // from mqttReconnectTask via logEvent — replaced all addLog() calls in that
@@ -178,6 +180,11 @@ static void handleActionRefresh();
 // Web Authentication
 // ============================================================
 static bool requireWebAuth() {
+  if (ESP.getFreeHeap() < 20000) {
+    if (heapReserve) { free(heapReserve); heapReserve = nullptr; }
+    server.send(503, "text/plain", "low memory");
+    return false;
+  }
   if (cfg.webPass.length() == 0) return true;
   if (server.authenticate(cfg.webUser.c_str(), cfg.webPass.c_str())) return true;
   server.requestAuthentication(BASIC_AUTH, "SyncFrame", "Authentication required");
@@ -996,6 +1003,29 @@ static void startOtaTask() {
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
 
+static void webServerTask(void* param) {
+  (void)param;
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      server.handleClient();
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+static void startWebServerTask() {
+  xTaskCreatePinnedToCore(
+    webServerTask,
+    "webSrv",
+    8192,
+    nullptr,
+    1,
+    nullptr,
+    0
+  );
+  logEvent("WEB", "task started");
+}
+
 // ---------------------- MQTT ----------------------
 static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   (void)payload;
@@ -1121,7 +1151,7 @@ static void startNetworkServicesOnce() {
     });
     server.begin();
     webServerStarted = true;
-    logEvent("WEB", "server started");
+    startWebServerTask();
   }
 
   mqttNetPlain.setTimeout(1);
@@ -1385,6 +1415,7 @@ static void handleActionRefresh() {
 void setup() {
   DBG_BEGIN(115200);
   delay(50);
+  heapReserve = (uint8_t*)malloc(8192);
   bootTimeMs = millis();
   buildHostAndClientId();
   buildCompileId();
@@ -1421,7 +1452,6 @@ void loop() {
 
     if (networkServicesStarted) {
       ArduinoOTA.handle();
-      server.handleClient();
 
       if (!otaInProgress) {
         mqttMaybeReconnect();
