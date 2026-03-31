@@ -36,6 +36,7 @@ extern void showCurrentPhoto();
 extern void showLastPhoto();
 extern bool showingLast;
 extern bool hasLastPhoto();
+extern volatile bool boardDrawActive;
 
 void board_init() {
   pinMode(GFX_BL, OUTPUT);
@@ -50,6 +51,7 @@ void board_init() {
 }
 
 void board_loop() {
+  if (boardDrawActive) return;
   ts.read();
   bool pressed = ts.isTouched;
 

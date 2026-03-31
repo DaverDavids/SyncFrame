@@ -12,6 +12,9 @@
 // Install: Arduino IDE -> Library Manager -> search "TJpg_Decoder" by Bodmer
 #include <TJpg_Decoder.h>
 
+// Flag to guard board_loop() during JPEG decode
+volatile bool boardDrawActive = false;
+
 // Target identification
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV)
   #include "config_c3.h"
@@ -98,8 +101,10 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(jpegDrawCallback);
 
-  gfx->fillScreen(0x0000);
+  // Guard board_loop() during decode
+  boardDrawActive = true;
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
+  boardDrawActive = false;
 }
 
 // ---------------------------------------------------------------------------
