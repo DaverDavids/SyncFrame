@@ -842,7 +842,7 @@ static void spawnPhotoTask() {
   }
   photoTaskRunning = true;
   portEXIT_CRITICAL(&logMux);
-  xTaskCreate(
+  xTaskCreatePinnedToCore(
     [](void* param) {
       downloadAndShowPhoto();
       portENTER_CRITICAL(&logMux);
@@ -850,7 +850,7 @@ static void spawnPhotoTask() {
       portEXIT_CRITICAL(&logMux);
       vTaskDelete(NULL);
     },
-    "photoTask", 16384, NULL, 1, NULL
+    "photoTask", 16384, NULL, 1, NULL, 1
   );
 }
 
@@ -970,7 +970,7 @@ static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
   if (cfg.updateIntervalMin == 0) return;
   if (otaTaskHandle != nullptr) return;
-  xTaskCreate(otaUpdateTask, "ota_check", 16384, nullptr, 1, &otaTaskHandle);
+  xTaskCreatePinnedToCore(otaUpdateTask, "ota_check", 16384, nullptr, 1, &otaTaskHandle, 1);
   logEvent("OTA", "task started interval=%umin url=%s compileId=%s",
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
@@ -1048,7 +1048,7 @@ static void mqttMaybeReconnect() {
 
   lastMqttAttemptMs = millis();
   mqttTaskRunning   = true;
-  xTaskCreate(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr);
+  xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, 1);
 }
 
 // ---------------------- Network services ----------------------
@@ -1395,5 +1395,5 @@ void loop() {
   }
 
   board_loop();
-  delay(10);
+  delay(1);
 }
