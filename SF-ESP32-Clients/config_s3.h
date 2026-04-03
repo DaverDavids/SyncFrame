@@ -17,7 +17,11 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   0, 8, 4, 24,
   0, 8, 4, 16,
   1, 16000000,        // pclk = 16 MHz (stable, no line shimmer)
-  true, 0, 0, 800*20  // bounce buffer = 800*20 (required for stable DMA transfer)
+  true, 0, 0, 800*40  // bounce buffer = 800*40 rows — doubled from 20 to prevent
+                      // DMA under-run glitches when JPEG decode stalls the CPU.
+                      // The RGB panel DMA continuously scans out pixels; if the
+                      // bounce buffer drains before the CPU refills it the panel
+                      // re-scans stale lines, producing the visible line-shift artifact.
 );
 
 // Single-buffer mode: writes go directly to the panel DMA FIFO.
