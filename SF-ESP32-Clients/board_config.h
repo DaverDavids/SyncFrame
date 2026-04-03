@@ -52,7 +52,10 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 // board_draw_jpeg
 // Decodes a JPEG from a RAM buffer and draws it centred on the display.
 // Scaling is power-of-2 only (1x, 1/2, 1/4, 1/8).
-// No flush() needed - single-buffer mode writes directly to panel DMA FIFO.
+//
+// Letterbox bars (the black regions above/below or left/right of the image
+// when it does not fill the full panel) are explicitly cleared with fillRect
+// so that splash screen or previous image pixels do not bleed through.
 // ---------------------------------------------------------------------------
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   if (!jpg || !len) return;
@@ -96,7 +99,23 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   int x = (SCREEN_W - scaledW) / 2;  if (x < 0) x = 0;
   int y = (SCREEN_H - scaledH) / 2;  if (y < 0) y = 0;
 
-  // ---- Step 4: configure decoder and draw --------------------------------
+  // ---- Step 4: clear letterbox bars so previous image/splash doesn't bleed through --
+  // Only fill the regions the JPEG will NOT cover. This avoids a full-screen
+  // fillScreen() (which causes tearing) while still erasing stale pixels.
+  if (y > 0) {
+    // top bar
+    gfx->fillRect(0, 0, SCREEN_W, y, 0x0000);
+    // bottom bar
+    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH), 0x0000);
+  }
+  if (x > 0) {
+    // left bar
+    gfx->fillRect(0, y, x, scaledH, 0x0000);
+    // right bar
+    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH, 0x0000);
+  }
+
+  // ---- Step 5: configure decoder and draw --------------------------------
   TJpgDec.setJpgScale((uint8_t)bestScale);
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(jpegDrawCallback);
