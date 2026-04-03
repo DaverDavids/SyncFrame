@@ -12,7 +12,14 @@
 // Install: Arduino IDE -> Library Manager -> search "TJpg_Decoder" by Bodmer
 #include <TJpg_Decoder.h>
 
-// Flag to guard board_loop() during JPEG decode
+// ---------------------------------------------------------------------------
+// boardDrawActive
+// Set true during board_draw_jpeg() to block board_loop() from triggering
+// a re-entrant draw (showCurrentPhoto / showLastPhoto) while the panel DMA
+// is being written. A concurrent full-screen write races the DMA scanner
+// and produces a wrap-around line-shift artifact (always same height at
+// bottom that should be at top) - this flag is the primary fix for that.
+// ---------------------------------------------------------------------------
 volatile bool boardDrawActive = false;
 
 // Target identification
@@ -26,14 +33,12 @@ volatile bool boardDrawActive = false;
 #endif
 
 // ---------------------------------------------------------------------------
-// TJpg_Decoder callback - called for each decoded block.
-// x/y are already absolute screen coordinates (TJpgDec adds the drawJpg
-// origin offset automatically). We just pass the block straight to GFX.
-// Clipping guards are retained in case a block overhangs the screen edge.
+// TJpg_Decoder callback - called for each 16x16 decoded MCU block.
+// x/y are absolute screen coordinates (TJpgDec adds the drawJpg origin).
 // ---------------------------------------------------------------------------
 static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* data) {
-  if (x >= SCREEN_W || y >= SCREEN_H) return true;  // fully off-screen
-  if (x < 0 || y < 0) return true;                  // shouldn't happen
+  if (x >= SCREEN_W || y >= SCREEN_H) return true;
+  if (x < 0 || y < 0) return true;
 
   int clipW = ((int)x + (int)w > SCREEN_W) ? (SCREEN_W - (int)x) : (int)w;
   int clipH = ((int)y + (int)h > SCREEN_H) ? (SCREEN_H - (int)y) : (int)h;
@@ -53,17 +58,29 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 // Decodes a JPEG from a RAM buffer and draws it centred on the display.
 // Scaling is power-of-2 only (1x, 1/2, 1/4, 1/8).
 //
-// Letterbox bars (the black regions above/below or left/right of the image
-// when it does not fill the full panel) are explicitly cleared with fillRect
-// so that splash screen or previous image pixels do not bleed through.
+// THE GLITCH FIX:
+// We must NEVER call fillScreen() while the RGB panel DMA is scanning.
+// The DMA runs continuously at 16 MHz pixel clock regardless of CPU activity.
+// fillScreen writes 384,000 pixels sequentially; if the DMA read pointer
+// laps the CPU write pointer (or vice versa) you get a scanline wrap:
+// the bottom N rows appear at the top - always the same height because the
+// DMA period is fixed. The fix is to only fill the letterbox bars (the
+// regions the JPEG does NOT paint), which are small, fast, and don't
+// race the scanner because they complete before the DMA reaches them.
+// For a full 800x480 image, x==0 and y==0 so NO fillRect fires at all.
 // ---------------------------------------------------------------------------
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   if (!jpg || !len) return;
 
+  boardDrawActive = true;
+
   // ---- Step 1: read image dimensions without full decode -----------------
   uint16_t imgW = 0, imgH = 0;
   TJpgDec.getJpgSize(&imgW, &imgH, jpg, (uint32_t)len);
-  if (imgW == 0 || imgH == 0) return;
+  if (imgW == 0 || imgH == 0) {
+    boardDrawActive = false;
+    return;
+  }
 
   // ---- Step 2: choose best power-of-2 downscale --------------------------
   float aspectSrc = (float)imgW / (float)imgH;
@@ -99,37 +116,31 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   int x = (SCREEN_W - scaledW) / 2;  if (x < 0) x = 0;
   int y = (SCREEN_H - scaledH) / 2;  if (y < 0) y = 0;
 
-  // ---- Step 4: clear letterbox bars so previous image/splash doesn't bleed through --
-  // Only fill the regions the JPEG will NOT cover. This avoids a full-screen
-  // fillScreen() (which causes tearing) while still erasing stale pixels.
+  // ---- Step 4: fill ONLY the letterbox bars (not the whole screen) -------
+  // Each fillRect covers a small strip; it completes before the DMA scanner
+  // reaches that region, so there is no race. For full-frame images (y==0,
+  // x==0) none of these fire.
   if (y > 0) {
-    // top bar
-    gfx->fillRect(0, 0, SCREEN_W, y, 0x0000);
-    // bottom bar
-    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH), 0x0000);
+    gfx->fillRect(0, 0,          SCREEN_W, y,                        0x0000); // top bar
+    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH), 0x0000); // bottom bar
   }
   if (x > 0) {
-    // left bar
-    gfx->fillRect(0, y, x, scaledH, 0x0000);
-    // right bar
-    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH, 0x0000);
+    gfx->fillRect(0,          y, x,                        scaledH, 0x0000); // left bar
+    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH, 0x0000); // right bar
   }
 
   // ---- Step 5: configure decoder and draw --------------------------------
   TJpgDec.setJpgScale((uint8_t)bestScale);
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(jpegDrawCallback);
-
-  // Guard board_loop() during decode
-  boardDrawActive = true;
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
+
   boardDrawActive = false;
 }
 
 // ---------------------------------------------------------------------------
 // board_draw_boot_status
-// Draws a status bar at the bottom of the screen.
-// No flush() needed - single-buffer mode.
+// Draws a status bar at the bottom of the screen during setup.
 // ---------------------------------------------------------------------------
 void board_draw_boot_status(const char* text) {
   gfx->setTextSize(2);
