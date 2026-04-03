@@ -16,18 +16,12 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   8,  3,  46, 9,  1,
   0, 8, 4, 24,
   0, 8, 4, 16,
-  1, 16000000,        // pclk = 16 MHz (stable, no line shimmer)
-  true, 0, 0, 800*40  // bounce buffer = 800*40 rows — doubled from 20 to prevent
-                      // DMA under-run glitches when JPEG decode stalls the CPU.
-                      // The RGB panel DMA continuously scans out pixels; if the
-                      // bounce buffer drains before the CPU refills it the panel
-                      // re-scans stale lines, producing the visible line-shift artifact.
+  1, 16000000,
+  true, 0, 0, 800*20  // bounce buffer: 800*20 is correct; larger values cause boot failures
 );
 
-// Single-buffer mode: writes go directly to the panel DMA FIFO.
-// Double-buffer (true) was removed because it requires manual flush() calls;
-// a flush() arriving mid-JPEG-render caused partial frames (pixel-shift artifacts)
-// and reentrant GFX access from Core 0 caused watchdog reboots.
+// Single-buffer mode. Double-buffer was removed: flush() mid-JPEG-render
+// caused partial frames, and reentrant GFX from Core 0 caused watchdog reboots.
 Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, false);
 
 #define TOUCH_SDA 19
@@ -47,7 +41,7 @@ void board_init() {
   digitalWrite(GFX_BL, HIGH);
 
   gfx->begin();
-  gfx->fillScreen(0x0000);
+  gfx->fillScreen(0x0000);  // safe here: DMA not scanning content yet
 
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();
@@ -55,7 +49,11 @@ void board_init() {
 }
 
 void board_loop() {
+  // Do not touch the display while a JPEG decode/draw is in progress.
+  // The RGB panel DMA is live; an unsynchronised fillScreen here would
+  // race the scanner and produce the wrap-around line-shift artifact.
   if (boardDrawActive) return;
+
   ts.read();
   bool pressed = ts.isTouched;
 
