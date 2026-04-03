@@ -128,6 +128,7 @@ static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 static volatile bool photoTaskRunning = false;
 static volatile bool forceRedraw = false;
+static volatile bool networkBusy = false;
 
 // MQTT reconnect runs in its own task so mqtt.connect() can never block loop()
 static volatile bool mqttTaskRunning = false;
@@ -685,6 +686,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   WiFiClient* stream = http->getStreamPtr();
   size_t readTotal = 0;
   unsigned long lastProgressMs = millis();
+  networkBusy = true;
 
   while ((http->connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
     size_t avail = stream->available();
@@ -692,6 +694,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     size_t toRead = avail;
     if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
     if (toRead == 0) {
+      networkBusy = false;
       free(buf); if (outErr) *outErr = "image too large";
       http->end(); delete http; delete secureClient; delete plainClient;
       return false;
@@ -706,6 +709,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   http->end(); delete http; delete secureClient; delete plainClient;
 
   if ((total > 0 && readTotal != (size_t)total) || readTotal < 16) {
+    networkBusy = false;
     free(buf); if (outErr) *outErr = "short read";
     logEvent("PHOTO", "short read %u/%u", (unsigned)readTotal, (unsigned)((total > 0) ? total : 0));
     return false;
@@ -713,6 +717,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 
   *outBuf = buf;
   *outLen = readTotal;
+  networkBusy = false;
   logEvent("PHOTO", "download ok bytes=%u", (unsigned)readTotal);
   return true;
 }
