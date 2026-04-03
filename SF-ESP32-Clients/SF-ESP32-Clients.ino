@@ -183,6 +183,7 @@ void showCurrentPhoto() {
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
+      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
   }
@@ -193,6 +194,7 @@ void showLastPhoto() {
     showingLast = true;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(lastJpg, lastJpgLen);
+      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
   }
@@ -745,6 +747,7 @@ static bool downloadAndShowPhoto() {
       if (currentJpg && currentJpgLen)  board_draw_jpeg(currentJpg, currentJpgLen);
       else if (lastJpg && lastJpgLen)   board_draw_jpeg(lastJpg, lastJpgLen);
       else board_draw_boot_status((String("Download failed: ") + err).c_str());
+      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
     return false;
@@ -759,6 +762,7 @@ static bool downloadAndShowPhoto() {
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
+      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
     return true;
@@ -816,6 +820,7 @@ static bool downloadAndShowPhoto() {
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
+      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
     return true;
@@ -831,6 +836,7 @@ static bool downloadAndShowPhoto() {
     lastDownloadErr = "";
     showingLast = false;
     board_draw_jpeg(currentJpg, currentJpgLen);
+    boardDrawActive = false;
     xSemaphoreGive(drawMutex);
   }
   logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)newLen);
@@ -862,6 +868,7 @@ static void spawnPhotoTask() {
 // Background OTA update task (no core pin)
 // ============================================================
 static void otaUpdateTask(void* pv) {
+  boardDrawActive = true;
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
   vTaskDelay(pdMS_TO_TICKS(30000));
 
@@ -968,6 +975,7 @@ static void otaUpdateTask(void* pv) {
       if (cfg.updateIntervalMin * 60UL * 1000UL != intervalMs) break;
     }
   }
+  boardDrawActive = false;
 }
 
 static void startOtaTask() {

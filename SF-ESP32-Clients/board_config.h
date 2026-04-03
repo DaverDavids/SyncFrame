@@ -135,7 +135,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   TJpgDec.setCallback(jpegDrawCallback);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
 
-  boardDrawActive = false;
+  //boardDrawActive = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +143,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
 // Draws a status bar at the bottom of the screen during setup.
 // ---------------------------------------------------------------------------
 void board_draw_boot_status(const char* text) {
+  if (boardDrawActive) return;
   gfx->setTextSize(2);
 
   int16_t  x1, y1;
