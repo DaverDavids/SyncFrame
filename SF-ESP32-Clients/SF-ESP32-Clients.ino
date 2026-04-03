@@ -15,7 +15,7 @@
 #include <deque>
 #include <coredump_handler.h>
 
-#define DEBUG_SERIAL 1
+#define DEBUG_SERIAL 0
 #if DEBUG_SERIAL
   #define DBG_BEGIN(x) Serial.begin(x)
   #define DBG(...)     Serial.printf(__VA_ARGS__)
@@ -127,6 +127,7 @@ char lastUploadEtag[32] = "";
 static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 static volatile bool photoTaskRunning = false;
+static volatile bool forceRedraw = false;
 
 // MQTT reconnect runs in its own task so mqtt.connect() can never block loop()
 static volatile bool mqttTaskRunning = false;
@@ -717,6 +718,9 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 static bool downloadAndShowPhoto() {
   if (otaInProgress) return false;
 
+  bool isForced = forceRedraw;
+  forceRedraw = false;
+
   uint8_t* newBuf = nullptr;
   size_t   newLen = 0;
   String   err;
@@ -746,7 +750,7 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
-  if (currentJpg && newLen == currentJpgLen &&
+  if (!isForced && currentJpg && newLen == currentJpgLen &&
       memcmp(newBuf, currentJpg, newLen) == 0) {
     free(newBuf);
     lastDownloadOk  = true;
@@ -761,7 +765,7 @@ static bool downloadAndShowPhoto() {
   }
 
   bool shouldRotate = true;
-  if (lastUploadEtag[0] != '\0') {
+  if (!isForced && lastUploadEtag[0] != '\0') {
     String url = makePhotoUrl();
     WiFiClientSecure* sec = nullptr;
     WiFiClient* plain = nullptr;
@@ -801,7 +805,7 @@ static bool downloadAndShowPhoto() {
       }
     }
     h->end(); delete h; delete sec; delete plain;
-  } else {
+  } else if (!isForced) {
     strcpy(lastUploadEtag, "init");
   }
 
@@ -1333,7 +1337,8 @@ static void handleActionRefresh() {
     server.send(503, "application/json", "{\"ok\":false,\"err\":\"ota in progress\"}");
     return;
   }
-  logEvent("WEB", "manual refresh requested");
+  logEvent("WEB", "manual refresh requested (force)");
+  forceRedraw = true;
   webRefreshPending = true;
   server.send(200, "application/json", "{\"ok\":true}");
 }
