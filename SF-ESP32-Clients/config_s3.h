@@ -51,8 +51,9 @@ void board_init() {
 
 void board_loop() {
   // Do not touch the display while a JPEG decode/draw is in progress.
-  // The RGB panel DMA is live; an unsynchronised fillScreen here would
-  // race the scanner and produce the wrap-around line-shift artifact.
+  // boardDrawActive is set true at the top of board_draw_jpeg() and cleared
+  // at the bottom - showCurrentPhoto/showLastPhoto both acquire drawMutex
+  // internally, so no mutex access is needed here.
   if (boardDrawActive) return;
   if (networkBusy) return;
 
@@ -60,15 +61,8 @@ void board_loop() {
   bool pressed = ts.isTouched;
 
   if (pressed && !showingLast && hasLastPhoto()) {
-    // Take mutex so we don't race the photo task
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      showLastPhoto();          // boardDrawActive cleared inside board_draw_jpeg now
-      xSemaphoreGive(drawMutex);
-    }
+    showLastPhoto();
   } else if (!pressed && showingLast) {
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      showCurrentPhoto();
-      xSemaphoreGive(drawMutex);
-    }
+    showCurrentPhoto();
   }
 }
