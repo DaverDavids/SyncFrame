@@ -51,27 +51,33 @@ void board_init() {
 
 void board_loop() {
   // Do not touch the display while a JPEG decode/draw is in progress.
-  // boardDrawActive is set true at the top of board_draw_jpeg() and cleared
-  // at the bottom - showCurrentPhoto/showLastPhoto both acquire drawMutex
-  // internally, so no mutex access is needed here.
   if (boardDrawActive) return;
   if (networkBusy) return;
 
   ts.read();
   bool pressed = ts.isTouched;
 
-  // Edge detection: only act on transitions, not continuous held state.
-  // Without this, every board_loop() call while the finger is held fires
-  // showLastPhoto() → board_draw_jpeg() → boardDrawActive blocks loop() →
-  // stale latch reads on unblock → flicker back and forth.
+  // Edge detection: only act on transitions (press-down, lift-up).
+  //
+  // CRITICAL: lastPressed must be updated to 'pressed' BEFORE calling
+  // showLastPhoto() / showCurrentPhoto(), because those call board_draw_jpeg()
+  // which sets boardDrawActive=true and blocks this function for ~300ms.
+  // If lastPressed is updated AFTER the draw (the naive pattern), it is still
+  // 'false' when board_loop() unblocks with the finger still held, so
+  // pressStart fires again → infinite redraw loop while touching.
   static bool lastPressed = false;
-  bool pressStart   = pressed && !lastPressed;   // finger just went down
-  bool releaseStart = !pressed && lastPressed;    // finger just lifted
-  lastPressed = pressed;
 
-  if (pressStart && !showingLast && hasLastPhoto()) {
+  if (pressed && !lastPressed && hasLastPhoto() && !showingLast) {
+    lastPressed = true;       // update BEFORE the draw blocks us
     showLastPhoto();
-  } else if (releaseStart && showingLast) {
+  } else if (!pressed && lastPressed && showingLast) {
+    lastPressed = false;      // update BEFORE the draw blocks us
     showCurrentPhoto();
+  } else {
+    // No transition: just keep lastPressed in sync with reality.
+    // This handles the case where boardDrawActive caused us to miss a
+    // transition (e.g. a very quick tap) - we re-sync here so we don't
+    // get permanently stuck.
+    lastPressed = pressed;
   }
 }
