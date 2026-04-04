@@ -60,16 +60,18 @@ void board_loop() {
   ts.read();
   bool pressed = ts.isTouched;
 
+  // Edge detection: only act on transitions, not continuous held state.
+  // Without this, every board_loop() call while the finger is held fires
+  // showLastPhoto() → board_draw_jpeg() → boardDrawActive blocks loop() →
+  // stale latch reads on unblock → flicker back and forth.
   static bool lastPressed = false;
-
   bool pressStart   = pressed && !lastPressed;   // finger just went down
   bool releaseStart = !pressed && lastPressed;    // finger just lifted
-
   lastPressed = pressed;
 
-  if (pressed && !showingLast && hasLastPhoto()) {
+  if (pressStart && !showingLast && hasLastPhoto()) {
     showLastPhoto();
-  } else if (!pressed && showingLast) {
+  } else if (releaseStart && showingLast) {
     showCurrentPhoto();
   }
 }
