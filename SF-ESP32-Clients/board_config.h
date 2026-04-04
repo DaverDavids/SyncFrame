@@ -27,6 +27,10 @@ volatile bool boardDrawActive = false;
 // without a local redeclaration inside the function body.
 extern volatile bool networkBusy;
 
+// drawMutex is defined in SF-ESP32-Clients.ino. Declared extern here so
+// board_loop() can use it to guard touch-triggered redraws.
+extern SemaphoreHandle_t drawMutex;
+
 // Portable compiler memory barrier - prevents the compiler from reordering
 // stores/loads across the boardDrawActive flag transitions. Works on
 // Xtensa (S3), RISC-V (C3), and ARM without any ISA-specific assembly.
@@ -68,6 +72,16 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 // Decodes a JPEG from a RAM buffer and draws it centred on the display.
 // Scaling is power-of-2 only (1x, 1/2, 1/4, 1/8).
 //
+// CONCURRENCY CONTRACT:
+// This function MUST be called with drawMutex already held by the caller.
+// All call sites (showCurrentPhoto, showLastPhoto, downloadAndShowPhoto)
+// take drawMutex before calling here and release it afterward.
+//
+// networkBusy is NOT checked here. The old wait-loop at the top of this
+// function caused a 3-second deadlock: every caller sets networkBusy=true
+// before calling board_draw_jpeg(), so the function would spin waiting for
+// a flag it could never see clear. The mutex is the correct guard.
+//
 // THE GLITCH FIX:
 // We must NEVER call fillScreen() while the RGB panel DMA is scanning.
 // The DMA runs continuously at 16 MHz pixel clock regardless of CPU activity.
@@ -82,12 +96,9 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   if (!jpg || !len) return;
 
-  // Wait up to 3 s for any in-progress network I/O to finish before drawing.
-  // networkBusy is declared extern at the top of this file.
-  unsigned long waitStart = millis();
-  while (networkBusy && (millis() - waitStart < 3000)) {
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
+  // NOTE: Do NOT wait on networkBusy here. All callers set networkBusy=true
+  // before calling this function, so waiting here would deadlock for 3 s.
+  // drawMutex (held by the caller) is the correct mutual-exclusion guard.
 
   boardDrawActive = true;
   SF_MEMORY_BARRIER();  // compiler barrier: ensure flag write is visible before DMA writes begin
@@ -155,7 +166,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
 
   SF_MEMORY_BARRIER();  // compiler barrier: ensure all DMA writes complete before flag is cleared
   boardDrawActive = false;
-  }
+}
 
 // ---------------------------------------------------------------------------
 // board_draw_boot_status
