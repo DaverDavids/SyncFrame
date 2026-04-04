@@ -27,6 +27,11 @@ volatile bool boardDrawActive = false;
 // without a local redeclaration inside the function body.
 extern volatile bool networkBusy;
 
+// Portable compiler memory barrier - prevents the compiler from reordering
+// stores/loads across the boardDrawActive flag transitions. Works on
+// Xtensa (S3), RISC-V (C3), and ARM without any ISA-specific assembly.
+#define SF_MEMORY_BARRIER() __atomic_signal_fence(__ATOMIC_SEQ_CST)
+
 // Target identification
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV)
   #include "config_c3.h"
@@ -85,7 +90,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   }
 
   boardDrawActive = true;
-  __asm__ __volatile__("memw" ::: "memory");   // memory write barrier
+  SF_MEMORY_BARRIER();  // compiler barrier: ensure flag write is visible before DMA writes begin
 
   // ---- Step 1: read image dimensions without full decode -----------------
   uint16_t imgW = 0, imgH = 0;
@@ -134,12 +139,12 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   // reaches that region, so there is no race. For full-frame images (y==0,
   // x==0) none of these fire.
   if (y > 0) {
-    gfx->fillRect(0, 0,          SCREEN_W, y,                        0x0000); // top bar
-    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH), 0x0000); // bottom bar
+    gfx->fillRect(0, 0,           SCREEN_W, y,                         0x0000); // top bar
+    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH),  0x0000); // bottom bar
   }
   if (x > 0) {
-    gfx->fillRect(0,          y, x,                        scaledH, 0x0000); // left bar
-    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH, 0x0000); // right bar
+    gfx->fillRect(0,           y, x,                         scaledH, 0x0000); // left bar
+    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH,  0x0000); // right bar
   }
 
   // ---- Step 5: configure decoder and draw --------------------------------
@@ -148,7 +153,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   TJpgDec.setCallback(jpegDrawCallback);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
 
-  __asm__ __volatile__("memw" ::: "memory");
+  SF_MEMORY_BARRIER();  // compiler barrier: ensure all DMA writes complete before flag is cleared
   boardDrawActive = false;
 }
 
