@@ -60,8 +60,15 @@ void board_loop() {
   bool pressed = ts.isTouched;
 
   if (pressed && !showingLast && hasLastPhoto()) {
-    showLastPhoto();
+    // Take mutex so we don't race the photo task
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      showLastPhoto();          // boardDrawActive cleared inside board_draw_jpeg now
+      xSemaphoreGive(drawMutex);
+    }
   } else if (!pressed && showingLast) {
-    showCurrentPhoto();
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      showCurrentPhoto();
+      xSemaphoreGive(drawMutex);
+    }
   }
 }

@@ -184,7 +184,6 @@ void showCurrentPhoto() {
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
-      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
   }
@@ -195,7 +194,6 @@ void showLastPhoto() {
     showingLast = true;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(lastJpg, lastJpgLen);
-      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
   }
@@ -752,7 +750,6 @@ static bool downloadAndShowPhoto() {
       if (currentJpg && currentJpgLen)  board_draw_jpeg(currentJpg, currentJpgLen);
       else if (lastJpg && lastJpgLen)   board_draw_jpeg(lastJpg, lastJpgLen);
       else board_draw_boot_status((String("Download failed: ") + err).c_str());
-      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
     return false;
@@ -767,7 +764,6 @@ static bool downloadAndShowPhoto() {
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
-      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
     return true;
@@ -825,7 +821,6 @@ static bool downloadAndShowPhoto() {
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
-      boardDrawActive = false;
       xSemaphoreGive(drawMutex);
     }
     return true;
@@ -841,7 +836,6 @@ static bool downloadAndShowPhoto() {
     lastDownloadErr = "";
     showingLast = false;
     board_draw_jpeg(currentJpg, currentJpgLen);
-    boardDrawActive = false;
     xSemaphoreGive(drawMutex);
   }
   logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)newLen);

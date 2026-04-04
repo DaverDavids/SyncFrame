@@ -77,8 +77,9 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   while (networkBusy && (millis() - waitStart < 3000)) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
-
+  
   boardDrawActive = true;
+  __asm__ __volatile__("memw" ::: "memory");   // Xtensa memory write barrier
 
   // ---- Step 1: read image dimensions without full decode -----------------
   uint16_t imgW = 0, imgH = 0;
@@ -141,7 +142,8 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   TJpgDec.setCallback(jpegDrawCallback);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
 
-  //boardDrawActive = false;
+  __asm__ __volatile__("memw" ::: "memory");
+  boardDrawActive = false;
 }
 
 // ---------------------------------------------------------------------------
