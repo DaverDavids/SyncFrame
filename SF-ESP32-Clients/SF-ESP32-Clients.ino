@@ -746,12 +746,17 @@ static bool downloadAndShowPhoto() {
     lastDownloadOk  = false;
     lastDownloadErr = err;
     logEvent("PHOTO", "download failed %s", err.c_str());
+    // networkBusy is already false here (cleared in httpDownloadToBuffer on
+    // error paths). Set it true around the draw call so board_loop() and any
+    // MQTT/web callback cannot race a concurrent draw while we hold the mutex.
+    networkBusy = true;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       if (currentJpg && currentJpgLen)  board_draw_jpeg(currentJpg, currentJpgLen);
       else if (lastJpg && lastJpgLen)   board_draw_jpeg(lastJpg, lastJpgLen);
       else board_draw_boot_status((String("Download failed: ") + err).c_str());
       xSemaphoreGive(drawMutex);
     }
+    networkBusy = false;
     return false;
   }
 
@@ -762,10 +767,12 @@ static bool downloadAndShowPhoto() {
     lastDownloadErr = "";
     logEvent("PHOTO", "same image, no rotation bytes=%u", (unsigned)newLen);
     showingLast = false;
+    networkBusy = true;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
       xSemaphoreGive(drawMutex);
     }
+    networkBusy = false;
     return true;
   }
 
@@ -819,13 +826,20 @@ static bool downloadAndShowPhoto() {
     lastDownloadOk = true;
     lastDownloadErr = "";
     showingLast = false;
+    networkBusy = true;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
       xSemaphoreGive(drawMutex);
     }
+    networkBusy = false;
     return true;
   }
 
+  // FIX: Set networkBusy=true before acquiring drawMutex for the final
+  // photo rotation draw. This closes the race window where an MQTT callback
+  // or web refresh handler sees networkBusy=false + boardDrawActive=false
+  // simultaneously and spawns a second concurrent draw task.
+  networkBusy = true;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     freeBuf(lastJpg, lastJpgLen);
     lastJpg       = currentJpg;
@@ -838,6 +852,7 @@ static bool downloadAndShowPhoto() {
     board_draw_jpeg(currentJpg, currentJpgLen);
     xSemaphoreGive(drawMutex);
   }
+  networkBusy = false;
   logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)newLen);
   return true;
 }
@@ -867,7 +882,11 @@ static void spawnPhotoTask() {
 // Background OTA update task (no core pin)
 // ============================================================
 static void otaUpdateTask(void* pv) {
-  boardDrawActive = true;
+  // FIX: Do NOT set boardDrawActive=true here. The old code set this flag at
+  // task entry and never cleared it, permanently blocking touch-triggered
+  // redraws in board_loop() after the first OTA check interval elapsed.
+  // drawMutex is held during actual flash writes below, which is the correct
+  // guard against concurrent DMA draws during OTA.
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
   vTaskDelay(pdMS_TO_TICKS(30000));
 
