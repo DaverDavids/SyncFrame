@@ -155,7 +155,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
 
   SF_MEMORY_BARRIER();  // compiler barrier: ensure all DMA writes complete before flag is cleared
   boardDrawActive = false;
-}
+  }
 
 // ---------------------------------------------------------------------------
 // board_draw_boot_status

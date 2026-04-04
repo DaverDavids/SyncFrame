@@ -58,6 +58,7 @@ void board_loop() {
   if (networkBusy) return;
 
   ts.read();
+  ts.read();
   bool pressed = ts.isTouched;
 
   if (pressed && !showingLast && hasLastPhoto()) {
