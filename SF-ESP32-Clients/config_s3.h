@@ -58,8 +58,14 @@ void board_loop() {
   if (networkBusy) return;
 
   ts.read();
-  ts.read();
   bool pressed = ts.isTouched;
+
+  static bool lastPressed = false;
+
+  bool pressStart   = pressed && !lastPressed;   // finger just went down
+  bool releaseStart = !pressed && lastPressed;    // finger just lifted
+
+  lastPressed = pressed;
 
   if (pressed && !showingLast && hasLastPhoto()) {
     showLastPhoto();
