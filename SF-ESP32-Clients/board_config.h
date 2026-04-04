@@ -22,6 +22,11 @@
 // ---------------------------------------------------------------------------
 volatile bool boardDrawActive = false;
 
+// networkBusy is defined in SF-ESP32-Clients.ino (NOT static so it has
+// external linkage). Declared extern here so board_draw_jpeg() can see it
+// without a local redeclaration inside the function body.
+extern volatile bool networkBusy;
+
 // Target identification
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV)
   #include "config_c3.h"
@@ -72,14 +77,15 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   if (!jpg || !len) return;
 
-  extern volatile bool networkBusy;
+  // Wait up to 3 s for any in-progress network I/O to finish before drawing.
+  // networkBusy is declared extern at the top of this file.
   unsigned long waitStart = millis();
   while (networkBusy && (millis() - waitStart < 3000)) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
-  
+
   boardDrawActive = true;
-  __asm__ __volatile__("memw" ::: "memory");   // Xtensa memory write barrier
+  __asm__ __volatile__("memw" ::: "memory");   // memory write barrier
 
   // ---- Step 1: read image dimensions without full decode -----------------
   uint16_t imgW = 0, imgH = 0;
