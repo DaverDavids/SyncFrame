@@ -128,7 +128,7 @@ static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 static volatile bool photoTaskRunning = false;
 static volatile bool forceRedraw = false;
-static volatile bool networkBusy = false;
+volatile bool networkBusy = false;
 
 // MQTT reconnect runs in its own task so mqtt.connect() can never block loop()
 static volatile bool mqttTaskRunning = false;
