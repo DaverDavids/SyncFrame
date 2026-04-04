@@ -35,7 +35,6 @@ extern void showLastPhoto();
 extern bool showingLast;
 extern bool hasLastPhoto();
 extern volatile bool boardDrawActive;
-extern volatile bool networkBusy;
 
 void board_init() {
   pinMode(GFX_BL, OUTPUT);
@@ -54,7 +53,6 @@ void board_loop() {
   // The RGB panel DMA is live; an unsynchronised fillScreen here would
   // race the scanner and produce the wrap-around line-shift artifact.
   if (boardDrawActive) return;
-  if (networkBusy) return;
 
   ts.read();
   bool pressed = ts.isTouched;

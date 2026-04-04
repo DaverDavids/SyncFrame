@@ -72,12 +72,6 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   if (!jpg || !len) return;
 
-  extern volatile bool networkBusy;
-  unsigned long waitStart = millis();
-  while (networkBusy && (millis() - waitStart < 3000)) {
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-
   boardDrawActive = true;
 
   // ---- Step 1: read image dimensions without full decode -----------------
