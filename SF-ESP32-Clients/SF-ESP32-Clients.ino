@@ -974,7 +974,6 @@ static void otaUpdateTask(void* pv) {
       if (cfg.updateIntervalMin * 60UL * 1000UL != intervalMs) break;
     }
   }
-  boardDrawActive = false;
 }
 
 static void startOtaTask() {
