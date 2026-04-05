@@ -15,7 +15,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   5,  6,  7,  15, 16, 4,
   8,  3,  46, 9,  1,
   0, 8, 4, 24,
-  0, 8, 4, 16,
+  0, 8, 4, 24,
   1, 16000000,
   true, 0, 0, 800*20  // bounce buffer: 800*20 is correct; larger values cause boot failures
 );
