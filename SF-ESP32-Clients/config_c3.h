@@ -13,6 +13,7 @@ static const int SCREEN_H = 240;
 #define TFT_RST  2
 #define TFT_CS   4
 
+#define JPEG_SWAP_BYTES false
 #define splash_logo logo_240 
 const size_t splash_logo_len = sizeof(logo_240);
 #define MAX_JPG (280UL * 240UL * 2UL)
@@ -20,7 +21,7 @@ const size_t splash_logo_len = sizeof(logo_240);
 #define APP_CORE 0
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED);
-Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 1 /* rotation */, true /* IPS */, 240, 280);
+Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 1 /* rotation */, true /* IPS */, 240, 280, 0, 20, 0, 20);
 
 extern void showCurrentPhoto();
 extern void showLastPhoto();

@@ -131,7 +131,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
 
   // ---- Step 5: configure decoder and draw --------------------------------
   TJpgDec.setJpgScale((uint8_t)bestScale);
-  TJpgDec.setSwapBytes(true);
+  TJpgDec.setSwapBytes(JPEG_SWAP_BYTES);
   TJpgDec.setCallback(jpegDrawCallback);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
 

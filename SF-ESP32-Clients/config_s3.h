@@ -8,6 +8,7 @@
 static const int SCREEN_W = 800;
 static const int SCREEN_H = 480;
 
+#define JPEG_SWAP_BYTES true
 #define splash_logo logo_480
 const size_t splash_logo_len = sizeof(logo_480);
 #define MAX_JPG (800UL * 480UL * 2UL)
