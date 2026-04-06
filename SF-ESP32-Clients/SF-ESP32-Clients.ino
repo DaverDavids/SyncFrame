@@ -860,7 +860,7 @@ static void spawnPhotoTask() {
       portEXIT_CRITICAL(&logMux);
       vTaskDelete(NULL);
     },
-    "photoTask", 16384, NULL, 1, NULL, 1
+    "photoTask", 16384, NULL, 1, NULL, APP_CORE
   );
 }
 
@@ -982,7 +982,7 @@ static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
   if (cfg.updateIntervalMin == 0) return;
   if (otaTaskHandle != nullptr) return;
-  xTaskCreatePinnedToCore(otaUpdateTask, "ota_check", 16384, nullptr, 1, &otaTaskHandle, 1);
+  xTaskCreatePinnedToCore(otaUpdateTask, "ota_check", 16384, nullptr, 1, &otaTaskHandle, APP_CORE);
   logEvent("OTA", "task started interval=%umin url=%s compileId=%s",
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
@@ -1060,7 +1060,7 @@ static void mqttMaybeReconnect() {
 
   lastMqttAttemptMs = millis();
   mqttTaskRunning   = true;
-  xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, APP_CORE);
 }
 
 // ---------------------- Network services ----------------------

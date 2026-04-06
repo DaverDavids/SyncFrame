@@ -12,6 +12,8 @@ static const int SCREEN_H = 240;
 #define TFT_RST  2
 #define TFT_CS   4
 
+#define APP_CORE 0
+
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED);
 Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 1 /* rotation */, true /* IPS */, 240, 280);
 

@@ -7,6 +7,8 @@
 static const int SCREEN_W = 800;
 static const int SCREEN_H = 480;
 
+#define APP_CORE 1
+
 #define GFX_BL 2
 
 Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
