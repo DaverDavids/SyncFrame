@@ -16,7 +16,7 @@ static const int SCREEN_H = 240;
 #define splash_logo logo_240 
 const size_t splash_logo_len = sizeof(logo_240);
 #define MAX_JPG (280UL * 240UL * 2UL)
-#define DEFAULT_PHOTO_FILENAME "photo.280x240.jpg"
+#define DEFAULT_PHOTO_FILE "photo.280x240.jpg"
 #define APP_CORE 0
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED);

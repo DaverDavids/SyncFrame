@@ -86,14 +86,14 @@ static String installedFwFilename = "";
 
 static const char* PREF_NS = "syncframe";
 static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
-static const char* DEFAULT_PHOTO_FILE          = "photo.800x480.jpg";
+//static const char* DEFAULT_PHOTO_FILE          = "photo.800x480.jpg";
 static const char* DEFAULT_HTTP_USER           = "david";
 static const char* DEFAULT_MQTT_USER           = "david";
 static const char* DEFAULT_MQTT_HOST           = "192.168.6.202";
 static const uint16_t DEFAULT_MQTT_PORT        = 8368;
 static const char* DEFAULT_MQTT_TOPIC          = "photos";
 static const char* DEFAULT_UPDATE_URL          = "";
-static const uint32_t DEFAULT_UPDATE_INTERVAL_MIN = 60;
+static const uint32_t DEFAULT_UPDATE_INTERVAL_MIN = 10;
 static const char* DEFAULT_WEB_USER            = "admin";
 static const char* DEFAULT_WEB_PASS            = "";
 

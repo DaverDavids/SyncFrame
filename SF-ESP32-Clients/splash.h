@@ -13,6 +13,8 @@
 //   GIMP: File > Export As > JPEG > uncheck "Progressive"
 //   ImageMagick: convert input.jpg -interlace None -strip output.jpg
 
+// https://notisrac.github.io/FileToCArray/ hex 0x00, binary, const, uint8_t, progmem
+
 // array size is 13993
 const uint8_t logo_240[] PROGMEM  = {
   0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x02, 0x00, 0x1c, 
