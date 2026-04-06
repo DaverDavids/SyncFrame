@@ -6,11 +6,11 @@
 static const int SCREEN_W = 280;
 static const int SCREEN_H = 240;
 
-#define TFT_SCLK 4
-#define TFT_MOSI 6
-#define TFT_DC   8
-#define TFT_RST  9
-#define TFT_CS   21
+#define TFT_SCLK 0
+#define TFT_MOSI 1
+#define TFT_DC   3
+#define TFT_RST  2
+#define TFT_CS   4
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED);
 Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 1 /* rotation */, true /* IPS */, 240, 280);
