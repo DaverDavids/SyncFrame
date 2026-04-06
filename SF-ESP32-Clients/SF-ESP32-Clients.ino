@@ -13,7 +13,7 @@
 #include <stdarg.h>
 #include <esp_system.h>
 #include <deque>
-#include <coredump_handler.h>
+#include "coredump_handler.h"
 
 #define DEBUG_SERIAL 1
 #if DEBUG_SERIAL
