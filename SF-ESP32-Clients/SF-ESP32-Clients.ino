@@ -37,7 +37,6 @@
 
 #include "board_config.h"
 #include "html.h"
-#include "splash.h"
 
 char HOSTNAME[32];
 char MAC_STR[18];
@@ -97,7 +96,6 @@ static const char* DEFAULT_UPDATE_URL          = "";
 static const uint32_t DEFAULT_UPDATE_INTERVAL_MIN = 60;
 static const char* DEFAULT_WEB_USER            = "admin";
 static const char* DEFAULT_WEB_PASS            = "";
-static const size_t MAX_JPG = 1200 * 1024;
 
 WebServer server(80);
 WiFiClient   mqttNetPlain;

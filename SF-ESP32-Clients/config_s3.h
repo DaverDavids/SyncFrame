@@ -3,10 +3,15 @@
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
 #include <TAMC_GT911.h>
+#include "splash.h"
 
 static const int SCREEN_W = 800;
 static const int SCREEN_H = 480;
 
+#define splash_logo logo_480
+const size_t splash_logo_len = sizeof(logo_480);
+#define MAX_JPG (800UL * 480UL * 2UL)
+#define DEFAULT_PHOTO_FILE "photo.800x480.jpg"
 #define APP_CORE 1
 
 #define GFX_BL 2
