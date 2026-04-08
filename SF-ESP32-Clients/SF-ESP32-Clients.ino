@@ -129,6 +129,7 @@ static volatile bool forceRedraw = false;
 
 // MQTT reconnect runs in its own task so mqtt.connect() can never block loop()
 static volatile bool mqttTaskRunning = false;
+static SemaphoreHandle_t mqttMutex = nullptr;
 
 // How many consecutive 5-second WiFi attempts before falling back to portal
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;  // ~30 seconds
@@ -1016,8 +1017,20 @@ static void mqttReconnectTask(void* pv) {
 
   bool useTLS = cfg.mqttUseTLS;
 
+  // Take mutex before touching socket
+  xSemaphoreTake(mqttMutex, portMAX_DELAY);
+
+  // Explicit stop before reconnect while we hold the mutex
+  mqtt.disconnect();       // sends MQTT DISCONNECT if connected
   if (useTLS) {
-    if (cfg.mqttTlsInsecure) mqttNetSecure.setInsecure();
+    mqttNetSecure.stop();  // tears down TLS cleanly under mutex protection
+  } else {
+    mqttNetPlain.stop();
+  }
+  delay(50);
+
+  if (useTLS) {
+    mqttNetSecure.setInsecure();
     mqttNetSecure.setTimeout(5);
     mqtt.setClient(mqttNetSecure);
   } else {
@@ -1028,16 +1041,20 @@ static void mqttReconnectTask(void* pv) {
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(mqttCallback);
 
-  logEvent("MQTT", "connecting to %s:%u", host, (unsigned)cfg.mqttPort);
-
   bool ok = (cfg.mqttUser.length() > 0)
     ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
     : mqtt.connect(HOSTNAME);
 
+  xSemaphoreGive(mqttMutex);  // release after connect() completes
+
   if (ok) {
-    bool subOk = mqtt.subscribe(topic);
-    logEvent("MQTT", "connected sub=%s topic=%s", subOk ? "ok" : "fail", topic);
-    mqttConnected = true;
+    // subscribe after giving mutex back (subscribe also uses the socket)
+    if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+      bool subOk = mqtt.subscribe(topic);
+      xSemaphoreGive(mqttMutex);
+      logEvent("MQTT", "connected sub=%s topic=%s", subOk ? "ok" : "fail", topic);
+      mqttConnected = true;
+    }
   } else {
     logEvent("MQTT", "connect failed rc=%d", mqtt.state());
   }
@@ -1049,7 +1066,12 @@ static void mqttReconnectTask(void* pv) {
 // Called from loop() — spawns a background task if it's time to try reconnecting.
 // Returns immediately; never blocks.
 static void mqttMaybeReconnect() {
-  if (mqtt.connected()) { mqttConnected = true; return; }
+  // Take mutex before touching mqtt.connected() — it calls into NetworkClientSecure
+  if (xSemaphoreTake(mqttMutex, 0) != pdTRUE) return; // skip this tick if busy
+  bool connected = mqtt.connected();
+  xSemaphoreGive(mqttMutex);
+
+  if (connected) { mqttConnected = true; return; }
   mqttConnected = false;
   if (WiFi.status() != WL_CONNECTED) return;
   if (millis() - lastMqttAttemptMs < 15000) return;
@@ -1361,6 +1383,7 @@ void setup() {
 
   drawMutex = xSemaphoreCreateBinary();
   xSemaphoreGive(drawMutex);
+  mqttMutex = xSemaphoreCreateMutex();
 
   loadConfig();
   board_init();
@@ -1392,10 +1415,15 @@ void loop() {
         server.handleClient();
       }
 
-      if (!otaInProgress) {
-        mqttMaybeReconnect();
-        if (mqtt.connected()) mqtt.loop();
-      }
+       if (!otaInProgress) {
+         mqttMaybeReconnect();
+         if (mqtt.connected()) {
+           if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+             mqtt.loop();
+             xSemaphoreGive(mqttMutex);
+           }
+         }
+       }
 
       if (!otaInProgress && (mqttRefreshPending || webRefreshPending)) {
         mqttRefreshPending = false;

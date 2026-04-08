@@ -115,4 +115,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
 
 ---
 
+## 2026-04-08 -- Arduino 3.1.1
+Changed to Arduino core 3.1.1 and seeing if it fixes.
+
 *Append new entries below this line with date/timestamp heading.*

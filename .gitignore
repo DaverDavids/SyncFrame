@@ -2,3 +2,4 @@ SF-Server/data/
 SF-Server/data-alt/
 SF-ESP32-Clients/build
 /SF-Server/__pycache__
+/SF-ESP32-Clients/SF-ESP32C3/build
