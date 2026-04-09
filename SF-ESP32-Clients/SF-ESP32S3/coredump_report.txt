@@ -1,0 +1,305 @@
+WARNING: C:\Users\rawdr\Documents\GitHub\SyncFrame\SF-ESP32-Clients\SF-ESP32S3\build\project_description.json does not exist. Please build the app with "idf.py build"
+===============================================================
+==================== ESP32 CORE DUMP START ====================
+
+Crashed task handle: 0x3fcdf46c, name: 'mqttRecon', GDB name: 'process 1070462060'
+Crashed task is not in the interrupt context
+
+================== CURRENT THREAD REGISTERS ===================
+exccause       0x1c (LoadProhibitedCause)
+excvaddr       0x9
+epc1           0x4037951b
+epc2           0x0
+epc3           0x0
+epc4           0x0
+epc5           0x0
+epc6           0x0
+eps2           0x0
+eps3           0x0
+eps4           0x0
+eps5           0x0
+eps6           0x0
+pc             0x4206d05b          0x4206d05b <ssl_parse_record_header+7>
+lbeg           0x40056f5c          1074098012
+lend           0x40056f72          1074098034
+lcount         0xffffffff          4294967295
+sar            0x11                17
+ps             0x60620             394784
+threadptr      <unavailable>
+br             <unavailable>
+scompare1      <unavailable>
+acclo          <unavailable>
+acchi          <unavailable>
+m0             <unavailable>
+m1             <unavailable>
+m2             <unavailable>
+m3             <unavailable>
+fcr            <unavailable>
+fsr            <unavailable>
+pwrctl         <unavailable>
+pwrstat        <unavailable>
+eristat        <unavailable>
+cs_itctrl      <unavailable>
+cs_claimset    <unavailable>
+cs_claimclr    <unavailable>
+cs_lockaccess  <unavailable>
+cs_lockstatus  <unavailable>
+cs_authstatus  <unavailable>
+fault_info     <unavailable>
+trax_id        <unavailable>
+trax_control   <unavailable>
+trax_status    <unavailable>
+trax_data      <unavailable>
+trax_address   <unavailable>
+trax_pctrigger <unavailable>
+trax_pcmatch   <unavailable>
+trax_delay     <unavailable>
+trax_memstart  <unavailable>
+trax_memend    <unavailable>
+pmg            <unavailable>
+pmpc           <unavailable>
+pm0            <unavailable>
+pm1            <unavailable>
+pmctrl0        <unavailable>
+pmctrl1        <unavailable>
+pmstat0        <unavailable>
+pmstat1        <unavailable>
+ocdid          <unavailable>
+ocd_dcrclr     <unavailable>
+ocd_dcrset     <unavailable>
+ocd_dsr        <unavailable>
+a0             0x8206d3a4          -2113481820
+a1             0x3fcdf000          1070460928
+a2             0x3fca8428          1070236712
+a3             0x0                 0
+a4             0x5                 5
+a5             0x3fcdf060          1070461024
+a6             0x3                 3
+a7             0x3fca8428          1070236712
+a8             0x5                 5
+a9             0x3fcdeff0          1070460912
+a10            0x5                 5
+a11            0x3fcdf6d4          1070462676
+a12            0x0                 0
+a13            0x3fc9aed0          1070182096
+a14            0x60023             393251
+a15            0x1                 1
+
+==================== CURRENT THREAD STACK =====================
+#0  0x4206d05b in ssl_parse_record_header (ssl=0x3fca8428, buf=0x0, len=5, rec=0x3fcdf060 <g_shared_buffers+29276>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:3746
+#1  0x4206d3a4 in ssl_get_next_record (ssl=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:4865
+#2  mbedtls_ssl_read_record (ssl=0x3fca8428, update_hs_digest=1) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:4214
+#3  0x4206dae5 in mbedtls_ssl_read (ssl=0x3fca8428, buf=0x0, len=0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:5846
+#4  0x42010e12 in data_to_read (ssl_client=0x3fca8420) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\NetworkClientSecure\src\ssl_client.cpp:400
+#5  0x42010288 in NetworkClientSecure::available (this=0x3fc9e6c4 <mqttNetSecure>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\NetworkClientSecure\src\NetworkClientSecure.cpp:305
+#6  NetworkClientSecure::available (this=0x3fc9e6c4 <mqttNetSecure>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\NetworkClientSecure\src\NetworkClientSecure.cpp:296
+#7  0x4200aad5 in PubSubClient::connect (cleanSession=true, willMessage=0x0, willRetain=false, willQos=0 '\000', willTopic=<optimized out>, pass=0x3fcdf28c <g_shared_buffers+29832> "raws", user=0x3fcdf24c <g_shared_buffers+29768> "david", id=<optimized out>, this=0x3fc9e664 <mqtt>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\PubSubClient_2.8.0_61c8a47debd6e04e\PubSubClient\src\PubSubClient.cpp:257
+#8  PubSubClient::connect (this=0x3fc9e664 <mqtt>, id=<optimized out>, user=0x3fcdf24c <g_shared_buffers+29768> "david", pass=0x3fcdf28c <g_shared_buffers+29832> "raws", willTopic=<optimized out>, willQos=<optimized out>, willRetain=false, willMessage=0x0, cleanSession=true) at C:\Users\rawdr\AppData\Local\Arduino15\internal\PubSubClient_2.8.0_61c8a47debd6e04e\PubSubClient\src\PubSubClient.cpp:181
+#9  0x4200ab7c in PubSubClient::connect (this=0x3fc9e664 <mqtt>, id=0x3fc9ea66 <HOSTNAME> "", user=0x3fcdf24c <g_shared_buffers+29768> "david", pass=0x3fcdf28c <g_shared_buffers+29832> "raws") at C:\Users\rawdr\AppData\Local\Arduino15\internal\PubSubClient_2.8.0_61c8a47debd6e04e\PubSubClient\src\PubSubClient.cpp:170
+#10 0x42008b60 in mqttReconnectTask (pv=<optimized out>) at C:/Users/rawdr/Documents/GitHub/SyncFrame/SF-ESP32-Clients/SF-ESP32-Clients.ino:1051
+#11 0x4037f935 in vPortTaskWrapper (pxCode=0x420089a8 <mqttReconnectTask(void*)>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+======================== THREADS INFO =========================
+  Id   Target Id          Frame 
+* 1    process 1070462060 0x4206d05b in ssl_parse_record_header (ssl=0x3fca8428, buf=0x0, len=5, rec=0x3fcdf060 <g_shared_buffers+29276>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:3746
+  2    process 1070270740 0x400559e0 in _xtos_set_intlevel ()
+  3    process 1070256836 0x4037bc36 in esp_cpu_wait_for_intr () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_hw_support/cpu.c:64
+  4    process 1070255368 0x4037bc36 in esp_cpu_wait_for_intr () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_hw_support/cpu.c:64
+  5    process 1070251888 0x400559e0 in _xtos_set_intlevel ()
+  6    process 1070393060 otaUpdateTask (pv=<optimized out>) at C:/Users/rawdr/Documents/GitHub/SyncFrame/SF-ESP32-Clients/SF-ESP32-Clients.ino:867
+  7    process 1070260340 prvProcessReceivedCommands () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/timers.c:856
+  8    process 1070234116 0x400559e0 in _xtos_set_intlevel ()
+  9    process 1070235524 0x400559e0 in _xtos_set_intlevel ()
+  10   process 1070253220 0x400559e0 in _xtos_set_intlevel ()
+  11   process 1070253588 0x400559e0 in _xtos_set_intlevel ()
+  12   process 1070376024 0x400559e0 in _xtos_set_intlevel ()
+  13   process 1070247892 0x400559e0 in _xtos_set_intlevel ()
+  14   process 1070358408 0x400559e0 in _xtos_set_intlevel ()
+
+
+       TCB             NAME PRIO C/B  STACK USED/FREE
+---------- ---------------- -------- ----------------
+0x3fcdf46c        mqttRecon      1/1        1664/6516
+0x3fcb0914         loopTask      1/1        1232/6956
+0x3fcad2c4            IDLE1      0/0          640/440
+0x3fcacd08            IDLE0      0/0          640/436
+0x3fcabf70              tiT    18/18         752/3852
+0x3fcce6e4        ota_check      1/1         928/7260
+0x3fcae074          Tmr Svc      1/1         608/2508
+0x3fca7a04             ipc0    24/24          672/348
+0x3fca7f84             ipc1    24/24          672/348
+0x3fcac4a4          sys_evt    20/20         768/3836
+0x3fcac614   arduino_events    19/19         912/3180
+0x3fcca458             mdns      1/1         736/3356
+0x3fcaafd4        esp_timer    22/22         672/8028
+0x3fcc5f88             wifi    23/23         736/5912
+
+==================== THREAD 1 (TCB: 0x3fcdf46c, name: 'mqttRecon') =====================
+#0  0x4206d05b in ssl_parse_record_header (ssl=0x3fca8428, buf=0x0, len=5, rec=0x3fcdf060 <g_shared_buffers+29276>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:3746
+#1  0x4206d3a4 in ssl_get_next_record (ssl=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:4865
+#2  mbedtls_ssl_read_record (ssl=0x3fca8428, update_hs_digest=1) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:4214
+#3  0x4206dae5 in mbedtls_ssl_read (ssl=0x3fca8428, buf=0x0, len=0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/mbedtls/mbedtls/library/ssl_msg.c:5846
+#4  0x42010e12 in data_to_read (ssl_client=0x3fca8420) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\NetworkClientSecure\src\ssl_client.cpp:400
+#5  0x42010288 in NetworkClientSecure::available (this=0x3fc9e6c4 <mqttNetSecure>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\NetworkClientSecure\src\NetworkClientSecure.cpp:305
+#6  NetworkClientSecure::available (this=0x3fc9e6c4 <mqttNetSecure>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\NetworkClientSecure\src\NetworkClientSecure.cpp:296
+#7  0x4200aad5 in PubSubClient::connect (cleanSession=true, willMessage=0x0, willRetain=false, willQos=0 '\000', willTopic=<optimized out>, pass=0x3fcdf28c <g_shared_buffers+29832> "raws", user=0x3fcdf24c <g_shared_buffers+29768> "david", id=<optimized out>, this=0x3fc9e664 <mqtt>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\PubSubClient_2.8.0_61c8a47debd6e04e\PubSubClient\src\PubSubClient.cpp:257
+#8  PubSubClient::connect (this=0x3fc9e664 <mqtt>, id=<optimized out>, user=0x3fcdf24c <g_shared_buffers+29768> "david", pass=0x3fcdf28c <g_shared_buffers+29832> "raws", willTopic=<optimized out>, willQos=<optimized out>, willRetain=false, willMessage=0x0, cleanSession=true) at C:\Users\rawdr\AppData\Local\Arduino15\internal\PubSubClient_2.8.0_61c8a47debd6e04e\PubSubClient\src\PubSubClient.cpp:181
+#9  0x4200ab7c in PubSubClient::connect (this=0x3fc9e664 <mqtt>, id=0x3fc9ea66 <HOSTNAME> "", user=0x3fcdf24c <g_shared_buffers+29768> "david", pass=0x3fcdf28c <g_shared_buffers+29832> "raws") at C:\Users\rawdr\AppData\Local\Arduino15\internal\PubSubClient_2.8.0_61c8a47debd6e04e\PubSubClient\src\PubSubClient.cpp:170
+#10 0x42008b60 in mqttReconnectTask (pv=<optimized out>) at C:/Users/rawdr/Documents/GitHub/SyncFrame/SF-ESP32-Clients/SF-ESP32-Clients.ino:1051
+#11 0x4037f935 in vPortTaskWrapper (pxCode=0x420089a8 <mqttReconnectTask(void*)>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 2 (TCB: 0x3fcb0914, name: 'loopTask') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3c1ecec4) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x4037f42f in xQueueReceive (xQueue=0x3c1ece70, pvBuffer=0x3fcb058c, xTicksToWait=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/queue.c:1632
+#4  0x42031d14 in i2c_master_cmd_begin (i2c_num=I2C_NUM_0, cmd_handle=<optimized out>, ticks_to_wait=50) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/driver/i2c/i2c.c:1603
+#5  0x4201f1ca in i2cWrite (i2c_num=0 '\000', address=<optimized out>, buff=<optimized out>, size=2, timeOutMillis=<optimized out>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\cores\esp32\esp32-hal-i2c.c:242
+#6  0x4201b5ee in TwoWire::endTransmission (this=0x3fca02c4 <Wire>, sendStop=true) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\Wire\src\Wire.cpp:454
+#7  0x420c93d0 in TwoWire::endTransmission (this=0x3fca02c4 <Wire>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\Wire\src\Wire.cpp:474
+#8  0x4200b018 in TAMC_GT911::readByteData (this=0x3fc9ea86 <ts>, reg=33102) at C:\Users\rawdr\AppData\Local\Arduino15\internal\TAMC_GT911_1.0.2_6d550750643d015f\TAMC_GT911\TAMC_GT911.cpp:131
+#9  0x4200b143 in TAMC_GT911::read (this=0x3fc9ea86 <ts>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\TAMC_GT911_1.0.2_6d550750643d015f\TAMC_GT911\TAMC_GT911.cpp:69
+#10 0x42006e3b in board_loop () at C:/Users/rawdr/Documents/GitHub/SyncFrame/SF-ESP32-Clients/config_s3.h:65
+#11 0x42008854 in loop () at C:/Users/rawdr/Documents/GitHub/SyncFrame/SF-ESP32-Clients/SF-ESP32-Clients.ino:1422
+#12 0x42021063 in loopTask (pvParameters=0x0) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\cores\esp32\main.cpp:74
+#13 0x4037f935 in vPortTaskWrapper (pxCode=0x42021028 <loopTask(void*)>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 3 (TCB: 0x3fcad2c4, name: 'IDLE1') =====================
+#0  0x4037bc36 in esp_cpu_wait_for_intr () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_hw_support/cpu.c:64
+#1  0x420257d8 in esp_vApplicationIdleHook () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_system/freertos_hooks.c:58
+#2  0x40380ab2 in prvIdleTask (pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/tasks.c:4353
+#3  0x4037f935 in vPortTaskWrapper (pxCode=0x40380a34 <prvIdleTask>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 4 (TCB: 0x3fcacd08, name: 'IDLE0') =====================
+#0  0x4037bc36 in esp_cpu_wait_for_intr () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_hw_support/cpu.c:64
+#1  0x420257d8 in esp_vApplicationIdleHook () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_system/freertos_hooks.c:58
+#2  0x40380ab2 in prvIdleTask (pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/tasks.c:4353
+#3  0x4037f935 in vPortTaskWrapper (pxCode=0x40380a34 <prvIdleTask>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 5 (TCB: 0x3fcabf70, name: 'tiT') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fcabe6c) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x4037f42f in xQueueReceive (xQueue=0x3fcabe18, pvBuffer=0x3fcc151c, xTicksToWait=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/queue.c:1632
+#4  0x42048f66 in sys_arch_mbox_fetch (mbox=0x3fca1740 <tcpip_mbox>, msg=0x3fcc151c, timeout=245) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/lwip/port/freertos/sys_arch.c:317
+#5  0x42035c98 in tcpip_timeouts_mbox_fetch (mbox=<optimized out>, msg=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/lwip/lwip/src/api/tcpip.c:104
+#6  tcpip_thread (arg=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/lwip/lwip/src/api/tcpip.c:142
+#7  0x4037f935 in vPortTaskWrapper (pxCode=0x42035c00 <tcpip_thread>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 6 (TCB: 0x3fcce6e4, name: 'ota_check') =====================
+#0  otaUpdateTask (pv=<optimized out>) at C:/Users/rawdr/Documents/GitHub/SyncFrame/SF-ESP32-Clients/SF-ESP32-Clients.ino:867
+#1  0x4037f935 in vPortTaskWrapper (pxCode=0x4200370c <otaUpdateTask(void*)>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 7 (TCB: 0x3fcae074, name: 'Tmr Svc') =====================
+#0  prvProcessReceivedCommands () at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/timers.c:856
+#1  prvTimerTask (pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/timers.c:688
+#2  0x4037f935 in vPortTaskWrapper (pxCode=0x403802d8 <prvTimerTask>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 8 (TCB: 0x3fca7a04, name: 'ipc0') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fc97a8c <xKernelLock>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x40381fa1 in ulTaskGenericNotifyTake (uxIndexToWait=0, xClearCountOnExit=1, xTicksToWait=4294967295) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/tasks.c:5765
+#4  0x403765dd in ipc_task (arg=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_system/esp_ipc.c:62
+#5  0x4037f935 in vPortTaskWrapper (pxCode=0x4037659c <ipc_task>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 9 (TCB: 0x3fca7f84, name: 'ipc1') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fc97a8c <xKernelLock>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x40381fa1 in ulTaskGenericNotifyTake (uxIndexToWait=0, xClearCountOnExit=1, xTicksToWait=4294967295) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/tasks.c:5765
+#4  0x403765dd in ipc_task (arg=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_system/esp_ipc.c:62
+#5  0x4037f935 in vPortTaskWrapper (pxCode=0x4037659c <ipc_task>, pvParameters=0x1) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 10 (TCB: 0x3fcac4a4, name: 'sys_evt') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fcac220) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x4037f42f in xQueueReceive (xQueue=0x3fcac1cc, pvBuffer=0x3fcc26f0, xTicksToWait=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/queue.c:1632
+#4  0x420d2f65 in esp_event_loop_run (event_loop=0x3fcabcf0, ticks_to_run=4294967295) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_event/esp_event.c:560
+#5  0x420d30d4 in esp_event_loop_run_task (args=0x3fcabcf0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_event/esp_event.c:105
+#6  0x4037f935 in vPortTaskWrapper (pxCode=0x420d30c8 <esp_event_loop_run_task>, pvParameters=0x3fcabcf0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 11 (TCB: 0x3fcac614, name: 'arduino_events') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fcac134) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x4037f42f in xQueueReceive (xQueue=0x3fcac0e0, pvBuffer=0x3fcc3660, xTicksToWait=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/queue.c:1632
+#4  0x4200e209 in NetworkEvents::_checkForEvent (this=<optimized out>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\Network\src\NetworkEvents.cpp:107
+#5  NetworkEvents::_checkForEvent (this=0x3fc9fa34 <Network+4>) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\Network\src\NetworkEvents.cpp:96
+#6  0x4200e2e8 in operator() (self=0x3fc9fa34 <Network+4>, __closure=0x0) at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\Network\src\NetworkEvents.cpp:62
+#7  _FUN () at C:\Users\rawdr\AppData\Local\Arduino15\internal\esp32_esp32_3.1.1_c339c0951ff018c2\libraries\Network\src\NetworkEvents.cpp:63
+#8  0x4037f935 in vPortTaskWrapper (pxCode=0x4200e2e0 <_FUN(void*)>, pvParameters=0x3fc9fa34 <Network+4>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 12 (TCB: 0x3fcca458, name: 'mdns') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fcc9f20) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x4037f42f in xQueueReceive (xQueue=0x3fcc9ecc, pvBuffer=0x3fccb7f8, xTicksToWait=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/queue.c:1632
+#4  0x4206752c in _mdns_service_task (pvParameters=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/managed_components/espressif__mdns/mdns.c:5345
+#5  0x4037f935 in vPortTaskWrapper (pxCode=0x4206750c <_mdns_service_task>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 13 (TCB: 0x3fcaafd4, name: 'esp_timer') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fc97a8c <xKernelLock>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x40381fa1 in ulTaskGenericNotifyTake (uxIndexToWait=0, xClearCountOnExit=1, xTicksToWait=4294967295) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/tasks.c:5765
+#4  0x4206aae4 in timer_task (arg=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_timer/src/esp_timer.c:480
+#5  0x4037f935 in vPortTaskWrapper (pxCode=0x4206aad4 <timer_task>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+==================== THREAD 14 (TCB: 0x3fcc5f88, name: 'wifi') =====================
+#0  0x400559e0 in _xtos_set_intlevel ()
+#1  0x4037fbd2 in vPortClearInterruptMaskFromISR (prev_level=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/include/freertos/portmacro.h:560
+#2  vPortExitCritical (mux=0x3fcc3eb4) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:514
+#3  0x4037f42f in xQueueReceive (xQueue=0x3fcc3e60, pvBuffer=0x3fcc5de0, xTicksToWait=<optimized out>) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/queue.c:1632
+#4  0x4205df3c in queue_recv_wrapper (queue=0x3fcc3e60, item=0x3fcc5de0, block_time_tick=4294967295) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/esp_wifi/esp32s3/esp_adapter.c:317
+#5  0x420ce720 in ppTask ()
+#6  0x4037f935 in vPortTaskWrapper (pxCode=0x420ce6f4 <ppTask>, pvParameters=0x0) at /home/runner/work/esp32-arduino-lib-builder/esp32-arduino-lib-builder/esp-idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:139
+
+
+======================= ALL MEMORY REGIONS ========================
+Name   Address   Size   Attrs
+.rtc.force_fast 0x600fe100 0x0 RW  
+.rtc_noinit 0x50000200 0x0 RW  
+.rtc.force_slow 0x50000200 0x0 RW  
+.iram0.vectors 0x40374000 0x403 R XA
+.iram0.text 0x40374404 0x13357 R XA
+.dram0.data 0x3fc97800 0x5914 RW A
+.flash.text 0x42000020 0xd5d32 R XA
+.flash.appdesc 0x3c0e0020 0x100 R  A
+.flash.rodata 0x3c0e0120 0x4bd18 RW A
+.iram0.data 0x40387800 0x0 RW  
+.iram0.bss 0x40387800 0x0 RW  
+.dram0.heap_start 0x3fca64f0 0x0 RW  
+.coredump.tasks.data 0x3fcdf46c 0x160 RW 
+.coredump.tasks.data 0x3fcdef40 0x510 RW 
+.coredump.tasks.data 0x3fcb0914 0x160 RW 
+.coredump.tasks.data 0x3fcb0430 0x4d0 RW 
+.coredump.tasks.data 0x3fcad2c4 0x160 RW 
+.coredump.tasks.data 0x3fcad030 0x280 RW 
+.coredump.tasks.data 0x3fcacd08 0x160 RW 
+.coredump.tasks.data 0x3fcaca70 0x280 RW 
+.coredump.tasks.data 0x3fcabf70 0x160 RW 
+.coredump.tasks.data 0x3fcc13b0 0x2f0 RW 
+.coredump.tasks.data 0x3fcce6e4 0x160 RW 
+.coredump.tasks.data 0x3fcce330 0x3a0 RW 
+.coredump.tasks.data 0x3fcae074 0x160 RW 
+.coredump.tasks.data 0x3fcade00 0x260 RW 
+.coredump.tasks.data 0x3fca7a04 0x160 RW 
+.coredump.tasks.data 0x3fca7750 0x2a0 RW 
+.coredump.tasks.data 0x3fca7f84 0x160 RW 
+.coredump.tasks.data 0x3fca7cd0 0x2a0 RW 
+.coredump.tasks.data 0x3fcac4a4 0x160 RW 
+.coredump.tasks.data 0x3fcc25b0 0x300 RW 
+.coredump.tasks.data 0x3fcac614 0x160 RW 
+.coredump.tasks.data 0x3fcc3530 0x390 RW 
+.coredump.tasks.data 0x3fcca458 0x160 RW 
+.coredump.tasks.data 0x3fccb6a0 0x2e0 RW 
+.coredump.tasks.data 0x3fcaafd4 0x160 RW 
+.coredump.tasks.data 0x3fcaad20 0x2a0 RW 
+.coredump.tasks.data 0x3fcc5f88 0x160 RW 
+.coredump.tasks.data 0x3fcc5c90 0x2e0 RW 
+
+===================== ESP32 CORE DUMP END =====================
+===============================================================
+Done!

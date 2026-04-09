@@ -1,15 +1,9 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-if "%~1"=="" (
-    echo Usage: drag coredump.bin onto this file.
-    pause
-    exit /b 1
-)
-
 pushd "%~dp0"
 
-set "BIN_FILE=%~1"
+set "BIN_FILE=build\coredump.bin"
 set "APP_ELF=%cd%\build\SF-ESP32S3.ino.elf"
 set "IDF_PATH=C:\esp\v6.0\esp-idf"
 set "TOOLS_ROOT=%USERPROFILE%\.espressif\tools"
