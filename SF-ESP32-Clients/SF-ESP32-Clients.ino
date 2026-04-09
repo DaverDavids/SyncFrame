@@ -1008,27 +1008,29 @@ static void mqttSetupClient() {
 
 // MQTT reconnect task — runs entirely off the main loop so that a slow/failing
 // TCP connect to an unreachable broker can never block server.handleClient().
+//
+// Mutex strategy:
+//   1. Hold mutex only for socket teardown + client reconfiguration (fast).
+//   2. Release mutex BEFORE mqtt.connect() so the lwIP/TCP stack can run
+//      freely on single-core devices during the blocking TLS handshake.
+//   3. Re-acquire briefly for mqtt.subscribe() after a successful connect.
 static void mqttReconnectTask(void* pv) {
   (void)pv;
   char host[64]  = {};
   char topic[64] = {};
   strncpy(host,  cfg.mqttHost.c_str(),  sizeof(host)  - 1);
   strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
-
   bool useTLS = cfg.mqttUseTLS;
 
-  // Take mutex before touching socket
+  // Hold mutex only for socket teardown + client reconfiguration
   xSemaphoreTake(mqttMutex, portMAX_DELAY);
-
-  // Explicit stop before reconnect while we hold the mutex
-  mqtt.disconnect();       // sends MQTT DISCONNECT if connected
+  mqtt.disconnect();
   if (useTLS) {
-    mqttNetSecure.stop();  // tears down TLS cleanly under mutex protection
+    mqttNetSecure.stop();
   } else {
     mqttNetPlain.stop();
   }
   delay(50);
-
   if (useTLS) {
     mqttNetSecure.setInsecure();
     mqttNetSecure.setTimeout(5);
@@ -1040,15 +1042,15 @@ static void mqttReconnectTask(void* pv) {
   mqtt.setServer(host, cfg.mqttPort);
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(mqttCallback);
+  xSemaphoreGive(mqttMutex);  // release BEFORE connect() so TCP stack can run
 
+  // mqtt.connect() may block for several seconds during TLS handshake.
+  // On single-core (C3) this must NOT hold the mutex or lwIP starves.
   bool ok = (cfg.mqttUser.length() > 0)
     ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
     : mqtt.connect(HOSTNAME);
 
-  xSemaphoreGive(mqttMutex);  // release after connect() completes
-
   if (ok) {
-    // subscribe after giving mutex back (subscribe also uses the socket)
     if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
       bool subOk = mqtt.subscribe(topic);
       xSemaphoreGive(mqttMutex);
@@ -1080,8 +1082,17 @@ static void mqttMaybeReconnect() {
 
   lastMqttAttemptMs = millis();
   mqttTaskRunning   = true;
-  // BUG4 FIX: if task creation fails, clear the flag so reconnects aren't stuck
-  BaseType_t created = xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, APP_CORE);
+
+  // On single-core builds (APP_CORE==0, e.g. ESP32-C3) do NOT pin the task.
+  // Pinning to core 0 alongside loopTask at the same priority can starve the
+  // lwIP TCP/IP stack during mqtt.connect(), causing rc=-4 timeouts.
+  // On dual-core builds (APP_CORE==1, e.g. ESP32-S3) pin as before.
+  BaseType_t created;
+#if APP_CORE == 0
+  created = xTaskCreate(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr);
+#else
+  created = xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, APP_CORE);
+#endif
   if (created != pdPASS) {
     mqttTaskRunning = false;
     logEvent("MQTT", "task create failed");
