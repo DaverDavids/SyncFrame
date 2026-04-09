@@ -1,0 +1,1 @@
+curl syncframe-05d.local/coredump -o coredump.bin
