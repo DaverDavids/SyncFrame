@@ -1076,36 +1076,6 @@ static void mqttReconnectTask(void* pv) {
   mqttTaskRunning = false;
   vTaskDelete(NULL);
 }
-  delay(50); // allow socket resources to fully release
-
-  // Setup fresh connection under mutex protection
-  mqtt.setServer(host, cfg.mqttPort);
-  mqtt.setSocketTimeout(5);
-  mqtt.setCallback(mqttCallback);
-
-  bool ok = hasCredentials
-    ? mqtt.connect(HOSTNAME, user, pass)
-    : mqtt.connect(HOSTNAME);
-
-  // Only hold mutex for subscribe if connect succeeded (subscribe also uses socket)
-  if (ok) {
-    bool subOk = mqtt.subscribe(topic);
-    if (subOk) {
-      logEvent("MQTT", "connected sub=ok topic=%s", topic);
-      mqttConnected = true;
-    } else {
-      logEvent("MQTT", "connected sub=fail topic=%s", topic);
-      mqttConnected = false;
-    }
-  } else {
-    logEvent("MQTT", "connect failed rc=%d", mqtt.state());
-    mqttConnected = false;
-  }
-
-  xSemaphoreGive(mqttMutex); // release mutex before blocking delete
-  mqttTaskRunning = false;
-  vTaskDelete(NULL);
-}
 
 static void mqttMaybeReconnect() {
   if (mqttTaskRunning) return; // Moved to top per fixes.md

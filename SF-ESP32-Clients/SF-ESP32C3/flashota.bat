@@ -1,0 +1,1 @@
+python C:\Users\rawdr\Documents\Arduino\hardware\esp32\3.1.1\tools\espota.py -i syncframe-1c1.local -a asdf1qwer -f .\build\SF-ESP32C3.ino.bin

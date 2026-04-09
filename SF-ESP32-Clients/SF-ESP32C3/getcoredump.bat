@@ -1,0 +1,1 @@
+curl syncframe-1c1.local/coredump -o build/coredump.bin
