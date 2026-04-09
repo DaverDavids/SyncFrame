@@ -46,10 +46,11 @@ static char compileIdStr[16];
 const char SF_COMPILE_ID[] __attribute__((used, section(".rodata"))) = "SFID:" __DATE__ " " __TIME__;
 
 static SemaphoreHandle_t drawMutex = nullptr;
+static SemaphoreHandle_t mqttMutex = nullptr;
 static unsigned long bootTimeMs = 0;
 
-static volatile bool mqttRefreshPending = false;
-static volatile bool webRefreshPending  = false;
+// Single pending-refresh flag replaces mqttRefreshPending + webRefreshPending + forceRedraw
+static volatile bool refreshPending = false;
 
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -86,7 +87,6 @@ static String installedFwFilename = "";
 
 static const char* PREF_NS = "syncframe";
 static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
-//static const char* DEFAULT_PHOTO_FILE          = "photo.800x480.jpg";
 static const char* DEFAULT_HTTP_USER           = "david";
 static const char* DEFAULT_MQTT_USER           = "david";
 static const char* DEFAULT_MQTT_HOST           = "192.168.6.202";
@@ -120,19 +120,13 @@ uint8_t* lastJpg       = nullptr;
 size_t   lastJpgLen    = 0;
 bool showingLast        = false;
 bool wifiEverConnected  = false;
-char lastUploadEtag[32] = "";
 
 static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 static volatile bool photoTaskRunning = false;
-static volatile bool forceRedraw = false;
+static volatile bool mqttTaskRunning  = false;
 
-// MQTT reconnect runs in its own task so mqtt.connect() can never block loop()
-static volatile bool mqttTaskRunning = false;
-static SemaphoreHandle_t mqttMutex = nullptr;
-
-// How many consecutive 5-second WiFi attempts before falling back to portal
-static const uint8_t WIFI_MAX_ATTEMPTS = 6;  // ~30 seconds
+static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
 
 static const uint8_t LOG_CAP = 48;
@@ -198,9 +192,6 @@ void showLastPhoto() {
     }
   }
 }
-
-static bool downloadAndShowPhoto();
-void triggerPhotoDownload() { downloadAndShowPhoto(); }
 
 // ---------------------- Helpers ----------------------
 static void buildHostAndClientId() {
@@ -515,7 +506,6 @@ static void setupPortalRoutes() {
   server.on("/ncsi.txt",            HTTP_GET,  handleCaptiveRedirect);
   server.on("/connecttest.txt",     HTTP_GET,  handleCaptiveRedirect);
   server.on("/redirect",            HTTP_GET,  handleCaptiveRedirect);
-  // Non-blocking async WiFi scan
   server.on("/scan", HTTP_GET, []() {
     int16_t n = WiFi.scanComplete();
     if (n == WIFI_SCAN_RUNNING) {
@@ -586,18 +576,12 @@ static void handlePortalLoop() {
     logEvent("PORTAL", "stopping done=%d timeout=%d", (int)portalDone, (int)timedOut);
     dnsServer.stop();
     server.stop();
-    // server.clearAllHandlers() is not available in WebServer — handlers are
-    // cleared automatically when the server is stopped and restarted.
     WiFi.softAPdisconnect(true);
     delay(100);
     WiFi.mode(WIFI_STA);
     portalActive           = false;
     webServerStarted       = false;
     networkServicesStarted = false;
-    // FIX 3: Do NOT reset wifiEverConnected here. If we entered the portal
-    // because of a transient drop (not first boot), preserving wifiEverConnected
-    // lets ensureWifi() use WiFi.reconnect() instead of burning through the
-    // attempt counter and re-opening the portal unnecessarily.
     lastWifiAttemptMs      = 0;
     wifiAttemptCount       = 0;
   }
@@ -716,15 +700,11 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
   return true;
 }
 
+// Single-GET download + show.
+// If the new image bytes are identical to what is already displayed: redraw in place (no rotation).
+// If different: rotate buffers and show new image.
 static bool downloadAndShowPhoto() {
   if (otaInProgress) return false;
-
-  bool isForced = forceRedraw;
-  forceRedraw = false;
-
-  uint8_t* newBuf = nullptr;
-  size_t   newLen = 0;
-  String   err;
 
   if (WiFi.status() != WL_CONNECTED) {
     lastDownloadOk  = false;
@@ -735,6 +715,10 @@ static bool downloadAndShowPhoto() {
 
   if (!currentJpg && !lastJpg) board_draw_boot_status("Downloading Photo...");
 
+  uint8_t* newBuf = nullptr;
+  size_t   newLen = 0;
+  String   err;
+
   bool ok = httpDownloadToBuffer(&newBuf, &newLen, &err);
   lastDownloadMs = millis();
 
@@ -743,8 +727,8 @@ static bool downloadAndShowPhoto() {
     lastDownloadErr = err;
     logEvent("PHOTO", "download failed %s", err.c_str());
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      if (currentJpg && currentJpgLen)  board_draw_jpeg(currentJpg, currentJpgLen);
-      else if (lastJpg && lastJpgLen)   board_draw_jpeg(lastJpg, lastJpgLen);
+      if (currentJpg && currentJpgLen)       board_draw_jpeg(currentJpg, currentJpgLen);
+      else if (lastJpg && lastJpgLen)         board_draw_jpeg(lastJpg, lastJpgLen);
       else board_draw_boot_status((String("Download failed: ") + err).c_str());
       boardDrawActive = false;
       xSemaphoreGive(drawMutex);
@@ -752,12 +736,12 @@ static bool downloadAndShowPhoto() {
     return false;
   }
 
-  if (!isForced && currentJpg && newLen == currentJpgLen &&
-      memcmp(newBuf, currentJpg, newLen) == 0) {
+  // Same image already on screen — just redraw, no rotation
+  if (currentJpg && newLen == currentJpgLen && memcmp(newBuf, currentJpg, newLen) == 0) {
     free(newBuf);
     lastDownloadOk  = true;
     lastDownloadErr = "";
-    logEvent("PHOTO", "same image, no rotation bytes=%u", (unsigned)newLen);
+    logEvent("PHOTO", "same image, redraw bytes=%u", (unsigned)newLen);
     showingLast = false;
     if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       board_draw_jpeg(currentJpg, currentJpgLen);
@@ -767,64 +751,7 @@ static bool downloadAndShowPhoto() {
     return true;
   }
 
-  bool shouldRotate = true;
-  if (!isForced && lastUploadEtag[0] != '\0') {
-    String url = makePhotoUrl();
-    WiFiClientSecure* sec = nullptr;
-    WiFiClient* plain = nullptr;
-    HTTPClient* h = new HTTPClient();
-    bool headBeginOk = false;
-    if (url.startsWith("https://")) {
-      sec = new WiFiClientSecure();
-      if (sec) {
-        sec->setTimeout(5);
-        if (cfg.httpsInsecure) sec->setInsecure();
-        headBeginOk = h->begin(*sec, url);
-      }
-    } else {
-      plain = new WiFiClient();
-      if (plain) {
-        plain->setTimeout(5);
-        headBeginOk = h->begin(*plain, url);
-      }
-    }
-    if (headBeginOk) {
-      if (cfg.httpUser.length() > 0)
-        h->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
-      int headCode = h->sendRequest("HEAD");
-      if (headCode == HTTP_CODE_OK) {
-        String etag = h->header("ETag");
-        if (etag.length() > 0) {
-          etag.replace("\"", "");
-          if (etag == lastUploadEtag) {
-            shouldRotate = false;
-            logEvent("PHOTO", "etag unchanged, no rotation");
-          } else {
-            strncpy(lastUploadEtag, etag.c_str(), sizeof(lastUploadEtag) - 1);
-            lastUploadEtag[sizeof(lastUploadEtag) - 1] = '\0';
-            logEvent("PHOTO", "etag changed to %s, rotating", lastUploadEtag);
-          }
-        }
-      }
-    }
-    h->end(); delete h; delete sec; delete plain;
-  } else if (!isForced) {
-    strcpy(lastUploadEtag, "init");
-  }
-
-  if (!shouldRotate) {
-    free(newBuf);
-    lastDownloadOk = true;
-    lastDownloadErr = "";
-    showingLast = false;
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      board_draw_jpeg(currentJpg, currentJpgLen);
-      boardDrawActive = false;
-      xSemaphoreGive(drawMutex);
-    }
-    return true;
-  }
-
+  // New image — rotate buffers and display
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     freeBuf(lastJpg, lastJpgLen);
     lastJpg       = currentJpg;
@@ -842,7 +769,6 @@ static bool downloadAndShowPhoto() {
   return true;
 }
 
-// Helper: spawn a photo download task (used for both first-boot and MQTT/web triggers)
 static void spawnPhotoTask() {
   portENTER_CRITICAL(&logMux);
   if (photoTaskRunning || otaInProgress) {
@@ -864,7 +790,7 @@ static void spawnPhotoTask() {
 }
 
 // ============================================================
-// Background OTA update task (no core pin)
+// Background OTA update task
 // ============================================================
 static void otaUpdateTask(void* pv) {
   boardDrawActive = true;
@@ -981,7 +907,7 @@ static void startOtaTask() {
   if (cfg.updateUrl.length() == 0) return;
   if (cfg.updateIntervalMin == 0) return;
   if (otaTaskHandle != nullptr) return;
-  xTaskCreatePinnedToCore(otaUpdateTask, "ota_check", 16384, nullptr, 1, &otaTaskHandle, APP_CORE);
+  xTaskCreatePinnedToCore(otaUpdateTask, "ota_check", 8192, nullptr, 1, &otaTaskHandle, APP_CORE);
   logEvent("OTA", "task started interval=%umin url=%s compileId=%s",
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
@@ -989,9 +915,9 @@ static void startOtaTask() {
 // ---------------------- MQTT ----------------------
 static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
   (void)payload;
-  lastMqttMsgMs = millis();
+  lastMqttMsgMs  = millis();
+  refreshPending = true;
   logEvent("MQTT", "message topic=%s bytes=%u", topic ? topic : "", length);
-  mqttRefreshPending = true;
 }
 
 static void mqttSetupClient() {
@@ -1006,14 +932,9 @@ static void mqttSetupClient() {
   mqtt.setSocketTimeout(1);
 }
 
-// MQTT reconnect task — runs entirely off the main loop so that a slow/failing
-// TCP connect to an unreachable broker can never block server.handleClient().
-//
-// Mutex strategy:
-//   1. Hold mutex only for socket teardown + client reconfiguration (fast).
-//   2. Release mutex BEFORE mqtt.connect() so the lwIP/TCP stack can run
-//      freely on single-core devices during the blocking TLS handshake.
-//   3. Re-acquire briefly for mqtt.subscribe() after a successful connect.
+// MQTT reconnect runs in its own task so mqtt.connect() never blocks loop().
+// Mutex held only for socket teardown/reconfiguration; released before
+// connect() so the lwIP TCP stack can run freely on single-core (C3) devices.
 static void mqttReconnectTask(void* pv) {
   (void)pv;
   char host[64]  = {};
@@ -1022,14 +943,9 @@ static void mqttReconnectTask(void* pv) {
   strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
   bool useTLS = cfg.mqttUseTLS;
 
-  // Hold mutex only for socket teardown + client reconfiguration
   xSemaphoreTake(mqttMutex, portMAX_DELAY);
   mqtt.disconnect();
-  if (useTLS) {
-    mqttNetSecure.stop();
-  } else {
-    mqttNetPlain.stop();
-  }
+  if (useTLS) { mqttNetSecure.stop(); } else { mqttNetPlain.stop(); }
   delay(50);
   if (useTLS) {
     mqttNetSecure.setInsecure();
@@ -1042,10 +958,8 @@ static void mqttReconnectTask(void* pv) {
   mqtt.setServer(host, cfg.mqttPort);
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(mqttCallback);
-  xSemaphoreGive(mqttMutex);  // release BEFORE connect() so TCP stack can run
+  xSemaphoreGive(mqttMutex);  // release BEFORE connect()
 
-  // mqtt.connect() may block for several seconds during TLS handshake.
-  // On single-core (C3) this must NOT hold the mutex or lwIP starves.
   bool ok = (cfg.mqttUser.length() > 0)
     ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
     : mqtt.connect(HOSTNAME);
@@ -1065,11 +979,8 @@ static void mqttReconnectTask(void* pv) {
   vTaskDelete(NULL);
 }
 
-// Called from loop() — spawns a background task if it's time to try reconnecting.
-// Returns immediately; never blocks.
 static void mqttMaybeReconnect() {
-  // Take mutex before touching mqtt.connected() — it calls into NetworkClientSecure
-  if (xSemaphoreTake(mqttMutex, 0) != pdTRUE) return; // skip this tick if busy
+  if (xSemaphoreTake(mqttMutex, 0) != pdTRUE) return;
   bool connected = mqtt.connected();
   xSemaphoreGive(mqttMutex);
 
@@ -1083,15 +994,12 @@ static void mqttMaybeReconnect() {
   lastMqttAttemptMs = millis();
   mqttTaskRunning   = true;
 
-  // On single-core builds (APP_CORE==0, e.g. ESP32-C3) do NOT pin the task.
-  // Pinning to core 0 alongside loopTask at the same priority can starve the
-  // lwIP TCP/IP stack during mqtt.connect(), causing rc=-4 timeouts.
-  // On dual-core builds (APP_CORE==1, e.g. ESP32-S3) pin as before.
   BaseType_t created;
 #if APP_CORE == 0
-  created = xTaskCreate(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr);
+  // C3: do NOT pin — pinning alongside loopTask starves lwIP during connect()
+  created = xTaskCreate(mqttReconnectTask, "mqttRecon", 8192, nullptr, 1, nullptr);
 #else
-  created = xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, APP_CORE);
+  created = xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 8192, nullptr, 1, nullptr, APP_CORE);
 #endif
   if (created != pdPASS) {
     mqttTaskRunning = false;
@@ -1100,8 +1008,6 @@ static void mqttMaybeReconnect() {
 }
 
 // ---------------------- Network services ----------------------
-// Called once when WiFi first connects (or reconnects after portal).
-// Idempotent - subsequent calls are no-ops.
 static void startNetworkServicesOnce() {
   if (networkServicesStarted) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -1112,7 +1018,6 @@ static void startNetworkServicesOnce() {
     ArduinoOTA.setPassword(ARDUINO_OTA_PASSWORD);
   ArduinoOTA.begin();
 
-  // Start web server (guarded against double-start)
   if (!webServerStarted) {
     server.on("/",            HTTP_GET,  handleRoot);
     server.on("/config",      HTTP_GET,  handleConfigPage);
@@ -1133,7 +1038,6 @@ static void startNetworkServicesOnce() {
     logEvent("WEB", "server started");
   }
 
-  // BUG3 FIX: guard socket config with mqttMutex
   if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
     mqttNetPlain.setTimeout(2);
     mqttNetSecure.setTimeout(5);
@@ -1149,36 +1053,15 @@ static void startNetworkServicesOnce() {
   logEvent("WIFI", "connected ip=%s mac=%s", WiFi.localIP().toString().c_str(), MAC_STR);
   logEvent("NET",  "mdns=%s ota=on web=on", mdnsOk ? "on" : "off");
 
-  String ipMac = "IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR);
-  board_draw_boot_status(ipMac.c_str());
+  board_draw_boot_status(("IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR)).c_str());
 
   startOtaTask();
-
-  // Kick off first photo download in a task - keeps main loop free
   spawnPhotoTask();
 }
 
-// ---------------------------------------------------------------------------
-// ensureWifi - called every loop() iteration.
-//
-// State machine:
-//   portalActive              -> run portal loop
-//   WL_CONNECTED              -> startNetworkServicesOnce (idempotent)
-//   not connected, cooldown   -> wait
-//   not connected, cooldown elapsed, wifiEverConnected -> reconnect
-//   not connected, cooldown elapsed, !wifiEverConnected, ssid set -> WiFi.begin()
-//   too many failed attempts  -> start portal
-//   no ssid                   -> start portal immediately
-// ---------------------------------------------------------------------------
 static void ensureWifi() {
   if (portalActive) { handlePortalLoop(); return; }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    // Don't call server.handleClient() here - loop() handles it after
-    // startNetworkServicesOnce() sets networkServicesStarted = true.
-    return;
-  }
-
+  if (WiFi.status() == WL_CONNECTED) return;
   if (lastWifiAttemptMs != 0 && (millis() - lastWifiAttemptMs) < 5000) return;
 
   lastWifiAttemptMs = millis();
@@ -1195,7 +1078,6 @@ static void ensureWifi() {
     return;
   }
 
-  // Count attempts; fall back to portal after WIFI_MAX_ATTEMPTS failures
   wifiAttemptCount++;
   if (wifiAttemptCount > WIFI_MAX_ATTEMPTS) {
     logEvent("WIFI", "giving up after %u attempts, starting portal", (unsigned)wifiAttemptCount);
@@ -1343,7 +1225,6 @@ static void handlePostConfig() {
   cfg.mqttUseTLS      = server.hasArg("mqttUseTLS");
   cfg.mqttTlsInsecure = server.hasArg("mqttTlsInsecure");
   saveConfig();
-  // BUG2 FIX: guard mqtt.disconnect()/mqttSetupClient() with mqttMutex
   if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
     mqtt.disconnect();
     mqttSetupClient();
@@ -1360,8 +1241,7 @@ static void handleImgCurrent() {
   uint8_t* jpg = nullptr;
   size_t jpgLen = 0;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    jpg = currentJpg;
-    jpgLen = currentJpgLen;
+    jpg = currentJpg; jpgLen = currentJpgLen;
     xSemaphoreGive(drawMutex);
   }
   if (!jpg || !jpgLen) { server.send(404, "text/plain", "no image"); return; }
@@ -1374,8 +1254,7 @@ static void handleImgLast() {
   uint8_t* jpg = nullptr;
   size_t jpgLen = 0;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    jpg = lastJpg;
-    jpgLen = lastJpgLen;
+    jpg = lastJpg; jpgLen = lastJpgLen;
     xSemaphoreGive(drawMutex);
   }
   if (!jpg || !jpgLen) { server.send(404, "text/plain", "no last image"); return; }
@@ -1389,9 +1268,8 @@ static void handleActionRefresh() {
     server.send(503, "application/json", "{\"ok\":false,\"err\":\"ota in progress\"}");
     return;
   }
-  logEvent("WEB", "manual refresh requested (force)");
-  forceRedraw = true;
-  webRefreshPending = true;
+  logEvent("WEB", "manual refresh requested");
+  refreshPending = true;
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -1415,12 +1293,11 @@ void setup() {
   board_draw_jpeg(splash_logo, splash_logo_len);
   board_draw_boot_status("Connecting to Wi-Fi...");
 
-  // Start WiFi; everything else happens in loop() once connected.
   applyWifiDefaults();
   if (cfg.wifiSsid.length() > 0) {
     logEvent("WIFI", "connect begin ssid=%s", cfg.wifiSsid.c_str());
     WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
-    wifiAttemptCount = 1;  // this counts as attempt #1
+    wifiAttemptCount = 1;
   } else {
     logEvent("WIFI", "no saved credentials - starting portal");
     startPortalMode();
@@ -1435,24 +1312,18 @@ void loop() {
 
     if (networkServicesStarted) {
       ArduinoOTA.handle();
-      if (WiFi.status() == WL_CONNECTED && ESP.getFreeHeap() > 20000) {
-        server.handleClient();
-      }
+      if (ESP.getFreeHeap() > 20000) server.handleClient();
 
       if (!otaInProgress) {
         mqttMaybeReconnect();
-        // BUG1 FIX: mqtt.connected() moved inside the mutex to prevent
-        // NetworkClientSecure::available() racing with mqttReconnectTask
         if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
           if (mqtt.connected()) mqtt.loop();
           xSemaphoreGive(mqttMutex);
         }
-      }
-
-      if (!otaInProgress && (mqttRefreshPending || webRefreshPending)) {
-        mqttRefreshPending = false;
-        webRefreshPending  = false;
-        spawnPhotoTask();
+        if (refreshPending) {
+          refreshPending = false;
+          spawnPhotoTask();
+        }
       }
     }
   }
