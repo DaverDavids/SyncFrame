@@ -1080,7 +1080,12 @@ static void mqttMaybeReconnect() {
 
   lastMqttAttemptMs = millis();
   mqttTaskRunning   = true;
-  xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, APP_CORE);
+  // BUG4 FIX: if task creation fails, clear the flag so reconnects aren't stuck
+  BaseType_t created = xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 16384, nullptr, 1, nullptr, APP_CORE);
+  if (created != pdPASS) {
+    mqttTaskRunning = false;
+    logEvent("MQTT", "task create failed");
+  }
 }
 
 // ---------------------- Network services ----------------------
@@ -1117,9 +1122,13 @@ static void startNetworkServicesOnce() {
     logEvent("WEB", "server started");
   }
 
-  mqttNetPlain.setTimeout(2);
-  mqttNetSecure.setTimeout(5);
-  mqttSetupClient();
+  // BUG3 FIX: guard socket config with mqttMutex
+  if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+    mqttNetPlain.setTimeout(2);
+    mqttNetSecure.setTimeout(5);
+    mqttSetupClient();
+    xSemaphoreGive(mqttMutex);
+  }
   lastMqttAttemptMs = 0;
 
   networkServicesStarted = true;
@@ -1323,8 +1332,12 @@ static void handlePostConfig() {
   cfg.mqttUseTLS      = server.hasArg("mqttUseTLS");
   cfg.mqttTlsInsecure = server.hasArg("mqttTlsInsecure");
   saveConfig();
-  mqtt.disconnect();
-  mqttSetupClient();
+  // BUG2 FIX: guard mqtt.disconnect()/mqttSetupClient() with mqttMutex
+  if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+    mqtt.disconnect();
+    mqttSetupClient();
+    xSemaphoreGive(mqttMutex);
+  }
   lastMqttAttemptMs = 0;
   startOtaTask();
   logEvent("WEB", "config saved");
@@ -1415,15 +1428,15 @@ void loop() {
         server.handleClient();
       }
 
-       if (!otaInProgress) {
-         mqttMaybeReconnect();
-         if (mqtt.connected()) {
-           if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-             mqtt.loop();
-             xSemaphoreGive(mqttMutex);
-           }
-         }
-       }
+      if (!otaInProgress) {
+        mqttMaybeReconnect();
+        // BUG1 FIX: mqtt.connected() moved inside the mutex to prevent
+        // NetworkClientSecure::available() racing with mqttReconnectTask
+        if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          if (mqtt.connected()) mqtt.loop();
+          xSemaphoreGive(mqttMutex);
+        }
+      }
 
       if (!otaInProgress && (mqttRefreshPending || webRefreshPending)) {
         mqttRefreshPending = false;
