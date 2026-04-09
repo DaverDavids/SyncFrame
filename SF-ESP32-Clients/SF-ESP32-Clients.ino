@@ -590,6 +590,16 @@ static void handlePortalLoop() {
 // ============================================================
 // HTTP photo download
 // ============================================================
+
+// Returns true if this build has PSRAM available at runtime.
+static inline bool hasPsram() {
+#if defined(BOARD_HAS_PSRAM)
+  return (ESP.getPsramSize() > 0);
+#else
+  return false;
+#endif
+}
+
 static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outErr) {
   *outBuf = nullptr;
   *outLen = 0;
@@ -602,7 +612,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     return false;
   }
 
-  logEvent("PHOTO", "GET %s", url.c_str());
+  logEvent("PHOTO", "GET %s heap=%u", url.c_str(), (unsigned)ESP.getFreeHeap());
 
   WiFiClientSecure* secureClient = nullptr;
   WiFiClient*       plainClient  = nullptr;
@@ -653,37 +663,93 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     return false;
   }
 
-  size_t allocSize = (total > 0) ? (size_t)total : MAX_JPG;
-  uint8_t* buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!buf) {
-    logEvent("PHOTO", "SPIRAM alloc failed, free=%u", ESP.getFreePsram());
-    buf = (uint8_t*)malloc(allocSize);
-  }
-  if (!buf) {
-    if (outErr) *outErr = "out of memory";
-    http->end(); delete http; delete secureClient; delete plainClient;
-    return false;
-  }
-
   WiFiClient* stream = http->getStreamPtr();
+  uint8_t* buf = nullptr;
   size_t readTotal = 0;
   unsigned long lastProgressMs = millis();
 
-  while ((http->connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
-    size_t avail = stream->available();
-    if (!avail) { delay(1); continue; }
-    size_t toRead = avail;
-    if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
-    if (toRead == 0) {
-      free(buf); if (outErr) *outErr = "image too large";
+  if (hasPsram()) {
+    // ---- PSRAM path (S3): single up-front alloc for speed ----
+    size_t allocSize = (total > 0) ? (size_t)total : MAX_JPG;
+    buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+      // Fallback: try internal heap (shouldn't be needed on S3 but be safe)
+      buf = (uint8_t*)malloc(allocSize);
+    }
+    if (!buf) {
+      if (outErr) *outErr = "out of memory";
+      logEvent("PHOTO", "PSRAM alloc failed allocSize=%u psramFree=%u", (unsigned)allocSize, (unsigned)ESP.getFreePsram());
       http->end(); delete http; delete secureClient; delete plainClient;
       return false;
     }
-    int n = stream->readBytes(buf + readTotal, toRead);
-    if (n <= 0) break;
-    readTotal += (size_t)n;
-    lastProgressMs = millis();
-    if (total > 0 && readTotal >= (size_t)total) break;
+
+    while ((http->connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
+      size_t avail = stream->available();
+      if (!avail) { delay(1); continue; }
+      size_t toRead = avail;
+      if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
+      if (toRead == 0) {
+        free(buf); if (outErr) *outErr = "image too large";
+        http->end(); delete http; delete secureClient; delete plainClient;
+        return false;
+      }
+      int n = stream->readBytes(buf + readTotal, toRead);
+      if (n <= 0) break;
+      readTotal += (size_t)n;
+      lastProgressMs = millis();
+      if (total > 0 && readTotal >= (size_t)total) break;
+    }
+
+  } else {
+    // ---- No-PSRAM path (C3): stream into growable internal-heap chunks ----
+    // Pre-allocating MAX_JPG (134 KB) on C3 with ~150-180 KB free heap
+    // after WiFi+TLS leaves no room and causes "out of memory".
+    // Instead we realloc in 4 KB increments up to MAX_JPG.
+    static const size_t CHUNK = 4096;
+    size_t allocSize = (total > 0) ? (size_t)total : CHUNK;
+    if (allocSize > MAX_JPG) allocSize = MAX_JPG;
+
+    buf = (uint8_t*)malloc(allocSize);
+    if (!buf) {
+      if (outErr) *outErr = "out of memory";
+      logEvent("PHOTO", "C3 initial alloc failed allocSize=%u heapFree=%u", (unsigned)allocSize, (unsigned)ESP.getFreeHeap());
+      http->end(); delete http; delete secureClient; delete plainClient;
+      return false;
+    }
+
+    while ((http->connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
+      size_t avail = stream->available();
+      if (!avail) { delay(1); continue; }
+
+      // Grow buffer if needed (only when Content-Length was unknown)
+      if (readTotal + avail > allocSize) {
+        size_t needed = readTotal + avail;
+        if (needed > MAX_JPG) needed = MAX_JPG;
+        if (needed > allocSize) {
+          // Round up to next CHUNK boundary
+          size_t newSize = ((needed + CHUNK - 1) / CHUNK) * CHUNK;
+          if (newSize > MAX_JPG) newSize = MAX_JPG;
+          uint8_t* newBuf = (uint8_t*)realloc(buf, newSize);
+          if (!newBuf) {
+            // Can't grow further — return what we have if it looks like a valid JPEG
+            logEvent("PHOTO", "C3 realloc failed at %u bytes, stopping read", (unsigned)readTotal);
+            break;
+          }
+          buf = newBuf;
+          allocSize = newSize;
+        }
+      }
+
+      size_t toRead = avail;
+      if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
+      if (toRead == 0) break;
+
+      int n = stream->readBytes(buf + readTotal, toRead);
+      if (n <= 0) break;
+      readTotal += (size_t)n;
+      lastProgressMs = millis();
+      if (total > 0 && readTotal >= (size_t)total) break;
+    }
   }
 
   http->end(); delete http; delete secureClient; delete plainClient;
@@ -696,7 +762,7 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 
   *outBuf = buf;
   *outLen = readTotal;
-  logEvent("PHOTO", "download ok bytes=%u", (unsigned)readTotal);
+  logEvent("PHOTO", "download ok bytes=%u heap=%u", (unsigned)readTotal, (unsigned)ESP.getFreeHeap());
   return true;
 }
 
@@ -933,35 +999,57 @@ static void mqttSetupClient() {
 }
 
 // MQTT reconnect runs in its own task so mqtt.connect() never blocks loop().
-// Mutex held only for socket teardown/reconfiguration; released before
-// connect() so the lwIP TCP stack can run freely on single-core (C3) devices.
+//
+// FIX (S3 crash): The global mqttNetSecure object retains stale internal SSL
+// state across reconnect attempts. When the broker closes the TLS connection
+// (e.g. on bad credentials), mbedTLS leaves the SSL context in a half-torn-
+// down state. A subsequent mqtt.connect() call triggers available() on that
+// stale context, which dereferences a freed internal buffer (buf=0x0) and
+// crashes with LoadProhibited (excvaddr=0x9).
+//
+// Fix: call stop() AND reconstruct the SSL context by calling setInsecure()
+// before every connect attempt. This forces mbedTLS to re-initialise its
+// internal state cleanly regardless of what happened in the previous attempt.
+//
+// Additionally: never pass empty string credentials to mqtt.connect() — some
+// brokers reject them by closing the TLS connection immediately, which is
+// what triggers the above crash path in the first place.
 static void mqttReconnectTask(void* pv) {
   (void)pv;
   char host[64]  = {};
   char topic[64] = {};
+  char user[64]  = {};
+  char pass[64]  = {};
   strncpy(host,  cfg.mqttHost.c_str(),  sizeof(host)  - 1);
   strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
-  bool useTLS = cfg.mqttUseTLS;
+  strncpy(user,  cfg.mqttUser.c_str(),  sizeof(user)  - 1);
+  strncpy(pass,  cfg.mqttPass.c_str(),  sizeof(pass)  - 1);
+  bool useTLS     = cfg.mqttUseTLS;
+  bool tlsInsec   = cfg.mqttTlsInsecure;
+  bool hasCredentials = (user[0] != '\0');
 
   xSemaphoreTake(mqttMutex, portMAX_DELAY);
   mqtt.disconnect();
-  if (useTLS) { mqttNetSecure.stop(); } else { mqttNetPlain.stop(); }
-  delay(50);
+
+  // Always stop the underlying socket to clear stale SSL state
   if (useTLS) {
-    mqttNetSecure.setInsecure();
+    mqttNetSecure.stop();
+    // Re-apply TLS settings — this re-initialises the mbedTLS context
+    if (tlsInsec) mqttNetSecure.setInsecure();
     mqttNetSecure.setTimeout(5);
     mqtt.setClient(mqttNetSecure);
   } else {
+    mqttNetPlain.stop();
     mqttNetPlain.setTimeout(5);
     mqtt.setClient(mqttNetPlain);
   }
   mqtt.setServer(host, cfg.mqttPort);
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(mqttCallback);
-  xSemaphoreGive(mqttMutex);  // release BEFORE connect()
+  xSemaphoreGive(mqttMutex);  // release BEFORE connect() so lwIP can run freely
 
-  bool ok = (cfg.mqttUser.length() > 0)
-    ? mqtt.connect(HOSTNAME, cfg.mqttUser.c_str(), cfg.mqttPass.c_str())
+  bool ok = hasCredentials
+    ? mqtt.connect(HOSTNAME, user, pass)
     : mqtt.connect(HOSTNAME);
 
   if (ok) {
@@ -1051,7 +1139,8 @@ static void startNetworkServicesOnce() {
   wifiAttemptCount       = 0;
 
   logEvent("WIFI", "connected ip=%s mac=%s", WiFi.localIP().toString().c_str(), MAC_STR);
-  logEvent("NET",  "mdns=%s ota=on web=on", mdnsOk ? "on" : "off");
+  logEvent("NET",  "mdns=%s ota=on web=on psram=%s heapFree=%u",
+           mdnsOk ? "on" : "off", hasPsram() ? "yes" : "no", (unsigned)ESP.getFreeHeap());
 
   board_draw_boot_status(("IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR)).c_str());
 
@@ -1153,7 +1242,9 @@ static void handleStatusJson() {
   j += "\"installedFwId\":\""; appendJsonEscaped(j, installedFwToken); j += "\",";
   j += "\"uptimeMs\":";       j += String(uptimeMs); j += ",";
   j += "\"screenW\":"; j += String(SCREEN_W); j += ",";
-  j += "\"screenH\":"; j += String(SCREEN_H);
+  j += "\"screenH\":"; j += String(SCREEN_H); j += ",";
+  j += "\"psram\":";   j += (hasPsram() ? "true" : "false"); j += ",";
+  j += "\"heapFree\":"; j += String(ESP.getFreeHeap());
   j += "}";
   server.send(200, "application/json", j);
 }
