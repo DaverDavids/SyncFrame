@@ -19,6 +19,12 @@
 // is being written. A concurrent full-screen write races the DMA scanner
 // and produces a wrap-around line-shift artifact (always same height at
 // bottom that should be at top) - this flag is the primary fix for that.
+//
+// The flag is set at entry and cleared at exit of board_draw_jpeg() on
+// every code path (including early-return on bad dimensions). The caller
+// (.ino) must NOT clear it after calling board_draw_jpeg(); that was the
+// previous arrangement but it left a window where the flag stayed true
+// between the function returning and the caller's boardDrawActive=false line.
 // ---------------------------------------------------------------------------
 volatile bool boardDrawActive = false;
 
@@ -121,12 +127,12 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   // reaches that region, so there is no race. For full-frame images (y==0,
   // x==0) none of these fire.
   if (y > 0) {
-    gfx->fillRect(0, 0,          SCREEN_W, y,                        0x0000); // top bar
-    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH), 0x0000); // bottom bar
+    gfx->fillRect(0, 0,           SCREEN_W, y,                         0x0000); // top bar
+    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH),  0x0000); // bottom bar
   }
   if (x > 0) {
-    gfx->fillRect(0,          y, x,                        scaledH, 0x0000); // left bar
-    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH, 0x0000); // right bar
+    gfx->fillRect(0,           y, x,                         scaledH, 0x0000); // left bar
+    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH,  0x0000); // right bar
   }
 
   // ---- Step 5: configure decoder and draw --------------------------------
@@ -135,7 +141,8 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   TJpgDec.setCallback(jpegDrawCallback);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
 
-  //boardDrawActive = false;
+  // Clear flag here - ownership is inside this function, not the caller.
+  boardDrawActive = false;
 }
 
 // ---------------------------------------------------------------------------
