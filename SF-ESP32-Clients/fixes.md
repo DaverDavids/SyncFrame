@@ -119,3 +119,46 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
 Changed to Arduino core 3.1.1 and seeing if it fixes.
 
 *Append new entries below this line with date/timestamp heading.*
+
+---
+
+## 2026-04-09 — MQTT Double-Free Crash (separate crash, now fixed)
+
+### Crash Summary
+
+**Panic:** `assert failed: multi_heap_free multi_heap_poisoning.c:279 (head != NULL)`
+**Crashed task:** `loopTask`
+**Exception:** `StoreProhibitedCause` (excvaddr=0x0)
+
+This is a **separate crash from the pixel-shift bug** — a heap corruption triggered by a concurrent double-free of the same mbedTLS buffer.
+
+### Root Cause (confirmed by coredump)
+
+Two threads were simultaneously inside `mbedtls_ssl_free()` on the **same SSL context** (`ssl=0x3fca8428`):
+
+- **Thread 1 (`loopTask`):** `loop()` → `mqttMaybeReconnect()` → `mqtt.connected()` → `NetworkClientSecure::connected()` → `NetworkClientSecure::available()` → `NetworkClientSecure::stop()` → `mbedtls_ssl_free(ptr=0x3fcd4fe4)`
+- **Thread 2 (`mqttRecon`):** `mqttReconnectTask()` → `mqtt.connect()` → `PubSubClient::connect()` → `NetworkClientSecure::stop()` → `mbedtls_ssl_free(ptr=0x3fcd4fe4)`
+
+Both threads freed the **same internal TLS record buffer** (`ptr=0x3fcd4fe4`, len=16717). The second free corrupted the heap block header (`head != NULL` assert).
+
+**Why it happened:** `mqttReconnectTask` intentionally releases `mqttMutex` *before* calling `mqtt.connect()` to avoid blocking lwIP. This is correct. However, `mqttMaybeReconnect()` in `loop()` then called `mqtt.connected()` (which probes the SSL socket state and can trigger an internal `stop()`) without verifying that the reconnect task had actually finished. The `mqttTaskRunning` guard that prevents spawning a new task was checked **after** the mutex try and the `mqtt.connected()` call — too late to block the race.
+
+### Fix Applied
+
+Moved the `mqttTaskRunning` check to the **very top** of `mqttMaybeReconnect()`, before any mutex or `mqtt.connected()` call:
+
+```cpp
+static void mqttMaybeReconnect() {
+  if (mqttTaskRunning) return;                    // NEW: bail before any SSL access
+  if (xSemaphoreTake(mqttMutex, 0) != pdTRUE) return;
+  bool connected = mqtt.connected();
+  xSemaphoreGive(mqttMutex);
+  ...
+  // removed: if (mqttTaskRunning) return;  (was checked too late)
+```
+
+This ensures `loop()` never touches `mqtt.connected()` — and therefore never enters the shared SSL context — while `mqttReconnectTask` is active.
+
+### Files Changed
+
+- `SF-ESP32-Clients/SF-ESP32-Clients.ino` — `mqttMaybeReconnect()` function
