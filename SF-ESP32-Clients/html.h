@@ -270,8 +270,8 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
 
     <hr class="section-divider"/>
     <h3>Firmware Updates (OTA)</h3>
-    <label>Manifest URL <span class="small">(plain-text file, one filename or URL per line; blank = disabled)</span></label>
-    <input type="url" name="updateUrl" id="updateUrl" placeholder="http://192.168.1.10/updates/manifest.txt"/>
+    <label>OTA URL <span class="small">(plain-text file, one filename or URL per line; blank = disabled)</span></label>
+    <input type="url" name="updateUrl" id="updateUrl" placeholder="http://192.168.1.10/syncframe/ota"/>
 
     <label>Check interval (minutes)</label>
     <input type="number" name="updateIntervalMin" id="updateIntervalMin" min="1" placeholder="60"/>
