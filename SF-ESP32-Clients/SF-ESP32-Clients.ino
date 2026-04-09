@@ -1016,6 +1016,7 @@ static void mqttSetupClient() {
 // what triggers the above crash path in the first place.
 static void mqttReconnectTask(void* pv) {
   (void)pv;
+  // Snapshot config under no lock (safe as strings are immutable after WiFi connected)
   char host[64]  = {};
   char topic[64] = {};
   char user[64]  = {};
@@ -1028,41 +1029,80 @@ static void mqttReconnectTask(void* pv) {
   bool tlsInsec   = cfg.mqttTlsInsecure;
   bool hasCredentials = (user[0] != '\0');
 
+  // Take mutex for ALL socket/TLS operations to prevent concurrent access
   xSemaphoreTake(mqttMutex, portMAX_DELAY);
-  mqtt.disconnect();
 
-  // Always stop the underlying socket to clear stale SSL state
+  // Clean slate: disconnect + stop any existing connection
+  mqtt.disconnect();       // sends MQTT DISCONNECT if connected
   if (useTLS) {
-    mqttNetSecure.stop();
+    mqttNetSecure.stop();  // tears down TLS cleanly under mutex protection
     // Re-apply TLS settings — this re-initialises the mbedTLS context
     if (tlsInsec) mqttNetSecure.setInsecure();
     mqttNetSecure.setTimeout(5);
     mqtt.setClient(mqttNetSecure);
   } else {
-    mqttNetPlain.stop();
+    mqttNetPlain.stop();   // tears down plain TCP cleanly
     mqttNetPlain.setTimeout(5);
     mqtt.setClient(mqttNetPlain);
   }
+  delay(50); // allow socket resources to fully release
+
+  // Setup fresh connection under mutex protection
   mqtt.setServer(host, cfg.mqttPort);
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(mqttCallback);
-  xSemaphoreGive(mqttMutex);  // release BEFORE connect() so lwIP can run freely
 
   bool ok = hasCredentials
     ? mqtt.connect(HOSTNAME, user, pass)
     : mqtt.connect(HOSTNAME);
 
+  // Hold mutex for subscribe as it also uses the socket
+  bool subOk = false;
   if (ok) {
-    if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
-      bool subOk = mqtt.subscribe(topic);
-      xSemaphoreGive(mqttMutex);
-      logEvent("MQTT", "connected sub=%s topic=%s", subOk ? "ok" : "fail", topic);
+    subOk = mqtt.subscribe(topic);
+    if (subOk) {
+      logEvent("MQTT", "connected sub=ok topic=%s", topic);
       mqttConnected = true;
+    } else {
+      logEvent("MQTT", "connected sub=fail topic=%s", topic);
+      mqttConnected = false;
     }
   } else {
     logEvent("MQTT", "connect failed rc=%d", mqtt.state());
+    mqttConnected = false;
   }
 
+  xSemaphoreGive(mqttMutex); // release mutex before blocking delete
+  mqttTaskRunning = false;
+  vTaskDelete(NULL);
+}
+  delay(50); // allow socket resources to fully release
+
+  // Setup fresh connection under mutex protection
+  mqtt.setServer(host, cfg.mqttPort);
+  mqtt.setSocketTimeout(5);
+  mqtt.setCallback(mqttCallback);
+
+  bool ok = hasCredentials
+    ? mqtt.connect(HOSTNAME, user, pass)
+    : mqtt.connect(HOSTNAME);
+
+  // Only hold mutex for subscribe if connect succeeded (subscribe also uses socket)
+  if (ok) {
+    bool subOk = mqtt.subscribe(topic);
+    if (subOk) {
+      logEvent("MQTT", "connected sub=ok topic=%s", topic);
+      mqttConnected = true;
+    } else {
+      logEvent("MQTT", "connected sub=fail topic=%s", topic);
+      mqttConnected = false;
+    }
+  } else {
+    logEvent("MQTT", "connect failed rc=%d", mqtt.state());
+    mqttConnected = false;
+  }
+
+  xSemaphoreGive(mqttMutex); // release mutex before blocking delete
   mqttTaskRunning = false;
   vTaskDelete(NULL);
 }
