@@ -1068,6 +1068,7 @@ static void mqttReconnectTask(void* pv) {
 }
 
 static void mqttMaybeReconnect() {
+  if (mqttTaskRunning) return; // Moved to top per fixes.md
   if (xSemaphoreTake(mqttMutex, 0) != pdTRUE) return;
   bool connected = mqtt.connected();
   xSemaphoreGive(mqttMutex);
@@ -1076,7 +1077,6 @@ static void mqttMaybeReconnect() {
   mqttConnected = false;
   if (WiFi.status() != WL_CONNECTED) return;
   if (millis() - lastMqttAttemptMs < 15000) return;
-  if (mqttTaskRunning) return;
   if (cfg.mqttHost.length() == 0) return;
 
   lastMqttAttemptMs = millis();
