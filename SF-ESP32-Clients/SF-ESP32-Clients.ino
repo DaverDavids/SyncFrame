@@ -1052,11 +1052,14 @@ static void mqttReconnectTask(void* pv) {
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(mqttCallback);
 
-  bool ok = hasCredentials
-    ? mqtt.connect(HOSTNAME, user, pass)
-    : mqtt.connect(HOSTNAME);
+  // Release the mutex before performing the blocking TLS handshake connect
+  xSemaphoreGive(mqttMutex); // release mutex before connect to allow lwIP to run
 
-  // Hold mutex for subscribe as it also uses the socket
+  // Connect using the broker host we configured (host), not HOSTNAME
+  bool ok = hasCredentials ? mqtt.connect(host, user, pass) : mqtt.connect(host);
+
+  // Re-acquire mutex to perform subscribe (socket touches still guarded)
+  xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000));
   bool subOk = false;
   if (ok) {
     subOk = mqtt.subscribe(topic);
@@ -1071,8 +1074,8 @@ static void mqttReconnectTask(void* pv) {
     logEvent("MQTT", "connect failed rc=%d", mqtt.state());
     mqttConnected = false;
   }
+  xSemaphoreGive(mqttMutex);
 
-  xSemaphoreGive(mqttMutex); // release mutex before blocking delete
   mqttTaskRunning = false;
   vTaskDelete(NULL);
 }
