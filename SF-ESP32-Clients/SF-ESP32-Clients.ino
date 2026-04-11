@@ -702,11 +702,9 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
 
   } else {
     // ---- No-PSRAM path (C3): stream into growable internal-heap chunks ----
-    // Pre-allocating MAX_JPG (134 KB) on C3 with ~150-180 KB free heap
-    // after WiFi+TLS leaves no room and causes "out of memory".
-    // Instead we realloc in 4 KB increments up to MAX_JPG.
+    // Start with a small chunk and grow as needed to avoid early OOM on limited heap
     static const size_t CHUNK = 4096;
-    size_t allocSize = (total > 0) ? (size_t)total : CHUNK;
+    size_t allocSize = CHUNK;
     if (allocSize > MAX_JPG) allocSize = MAX_JPG;
 
     buf = (uint8_t*)malloc(allocSize);
