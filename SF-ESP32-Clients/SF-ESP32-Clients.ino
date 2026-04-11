@@ -779,6 +779,18 @@ static bool downloadAndShowPhoto() {
 
   if (!currentJpg && !lastJpg) board_draw_boot_status("Downloading Photo...");
 
+  // Rotate buffers BEFORE download on no-PSRAM builds to free currentJpg before allocation
+  if (!hasPsram()) {
+    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      freeBuf(lastJpg, lastJpgLen);
+      lastJpg       = currentJpg;
+      lastJpgLen    = currentJpgLen;
+      currentJpg    = nullptr;
+      currentJpgLen = 0;
+      xSemaphoreGive(drawMutex);
+    }
+  }
+
   uint8_t* newBuf = nullptr;
   size_t   newLen = 0;
   String   err;
@@ -815,11 +827,14 @@ static bool downloadAndShowPhoto() {
     return true;
   }
 
-  // New image — rotate buffers and display
+  // New image — on PSRAM builds rotate, on no-PSRAM just assign (already rotated above)
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    freeBuf(lastJpg, lastJpgLen);
-    lastJpg       = currentJpg;
-    lastJpgLen    = currentJpgLen;
+    if (hasPsram()) {
+      freeBuf(lastJpg, lastJpgLen);
+      lastJpg       = currentJpg;
+      lastJpgLen    = currentJpgLen;
+    }
+    // On no-PSRAM, currentJpg was already moved to lastJpg before download, so just assign newBuf
     currentJpg    = newBuf;
     currentJpgLen = newLen;
     lastDownloadOk  = true;
@@ -1134,7 +1149,7 @@ static void startNetworkServicesOnce() {
     });
     server.begin();
     webServerStarted = true;
-    logEvent("WEB", "server started");
+    logEvent("WEB", "server STARTED");
   }
 
   if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
