@@ -1129,6 +1129,7 @@ def sse_stream():
                     _sse_subscribers.remove(q)
                 except ValueError:
                     pass
+
     return Response(
         generate(),
         mimetype="text/event-stream",
