@@ -385,8 +385,6 @@ def extract_compile_id(data: bytes):
         return None, " | ".join(debug_parts)
 
 
-
-
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -1108,6 +1106,7 @@ def serve_photo_variant(w, h):
 def serve_static(filename):
     return send_from_directory("static", filename)
 
+
 @bp.route("/events")
 def sse_stream():
     """Server-Sent Events endpoint — clients subscribe here for live refresh notifications."""
@@ -1138,6 +1137,8 @@ def sse_stream():
             "X-Accel-Buffering": "no",
         },
     )
+
+
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -1191,14 +1192,12 @@ def ota_check():
         elif hostname_match is not None:
             matched_key = hostname_match
             if mac:
-                # Check MAC conflict: existing entry has a different non-empty MAC
                 existing_mac = clients[hostname_match].get("mac", "")
                 if (
                     existing_mac
                     and existing_mac not in ("", "0000000000")
                     and existing_mac != mac
                 ):
-                    # Duplicate device — create new entry
                     new_key = f"{hostname}--{mac}"
                     clients[new_key] = {
                         "hostname": hostname,
@@ -1215,7 +1214,6 @@ def ota_check():
                 else:
                     clients[hostname_match]["mac"] = mac
         else:
-            # Auto-register
             matched_key = hostname
             clients[matched_key] = {
                 "hostname": hostname,
@@ -1230,7 +1228,6 @@ def ota_check():
             }
 
         if matched_key not in clients:
-            # Safety — shouldn't happen, but guard anyway
             clients[matched_key] = {
                 "hostname": hostname,
                 "mac": mac,
@@ -1243,20 +1240,17 @@ def ota_check():
                 "last_flashed": None,
             }
 
-        # Update live fields
         clients[matched_key]["last_seen"] = now_iso
         if compiled:
             clients[matched_key]["compiled"] = compiled
         if uptime:
             clients[matched_key]["uptime"] = uptime
 
-        # --- firmware decision ---
         entry = clients[matched_key]
         fw_compile_id = entry.get("fw_compile_id")
         firmware_file = entry.get("firmware")
 
         if fw_compile_id and compiled == fw_compile_id:
-            # Device already running the target firmware — auto-clear
             entry["firmware"] = None
             entry["fw_compile_id"] = None
             entry["last_flashed"] = now_iso
@@ -1635,7 +1629,7 @@ def admin_upload_firmware():
             f"Could not extract compile ID from firmware.\nDebug info: {extract_err}",
             400,
         )
-        
+
     safe_hostname = hostname.replace("/", "_").replace("..", "_")
     filename = f"{safe_hostname}--{compile_id}.bin"
     dest = os.path.join(OTA_FIRMWARE_DIR, filename)
@@ -1659,7 +1653,6 @@ def admin_upload_firmware():
             }
         clients[hostname]["firmware"] = filename
         clients[hostname]["fw_compile_id"] = compile_id
-        # Remove legacy fw_token if present
         clients[hostname].pop("fw_token", None)
         _save_clients(clients)
     return redirect(
@@ -1685,92 +1678,72 @@ def admin_clear_firmware():
     )
 
 
+# ---------------------------------------------------------------------------
 # Register blueprint
+# ---------------------------------------------------------------------------
 if URL_PREFIX:
     app.register_blueprint(bp, url_prefix=URL_PREFIX)
 else:
     app.register_blueprint(bp)
 
 
-def start_web_server():
-    if USE_HTTPS:
-        try:
-            ensure_certificates(CERTFILE, KEYFILE)
-        except Exception as e:
-            logging.error("Could not ensure certificates: %s. Falling back to HTTP.", e)
-            app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
-            return
-        if os.path.exists(CERTFILE) and os.path.exists(KEYFILE):
-            logging.info(
-                "Starting HTTPS Flask server on %s:%s (prefix=%s)",
-                SERVER_HOST,
-                SERVER_PORT,
-                URL_PREFIX or "/",
-            )
-            app.run(
-                host=SERVER_HOST,
-                port=SERVER_PORT,
-                threaded=True,
-                ssl_context=(CERTFILE, KEYFILE),
-            )
-        else:
-            logging.error(
-                "CERTFILE or KEYFILE not found after generation. Falling back to HTTP."
-            )
-            app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
-    else:
-        logging.info(
-            "Starting HTTP Flask server on %s:%s (prefix=%s)",
-            SERVER_HOST,
-            SERVER_PORT,
-            URL_PREFIX or "/",
-        )
-        app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+# ---------------------------------------------------------------------------
+# Background startup — runs once whether launched via gunicorn or directly.
+# Starts mosquitto, the file watcher, and the desaturation scheduler.
+# ---------------------------------------------------------------------------
+_startup_done = threading.Event()
 
 
-if __name__ == "__main__":
+def _do_startup():
+    if _startup_done.is_set():
+        return
+    _startup_done.set()
+
     write_mosquitto_conf()
     generate_mqtt_certificates()
     create_mqtt_password_file()
 
     mosq_conf = os.path.join(MOSQ_DIR, "mosquitto.conf")
     logging.info("Starting Mosquitto MQTT broker...")
+    broker_process = None
     try:
         broker_process = subprocess.Popen(
-            ["/usr/sbin/mosquitto", "-c", mosq_conf, "-p", str(MQTT_PORT)],
+            ["/usr/sbin/mosquitto", "-c", mosq_conf],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
     except FileNotFoundError:
-        broker_process = None
         logging.warning(
             "mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start."
         )
 
-    try:
-        w = Watcher()
-        logging.info("Watcher started. Monitoring file changes on %s...", WATCH_FILE)
-        logging.info('URL prefix is: "%s"', URL_PREFIX or "/")
-        logging.info("Basic auth enabled. Username: %s", USERNAME)
+    # Ensure TLS certs exist before gunicorn serves any HTTPS
+    if USE_HTTPS:
+        try:
+            ensure_certificates(CERTFILE, KEYFILE)
+        except Exception as e:
+            logging.error("Could not generate TLS certificates: %s", e)
 
-        web_server_thread = threading.Thread(target=start_web_server)
-        web_server_thread.daemon = True
-        web_server_thread.start()
+    logging.info("Watcher started. Monitoring file changes on %s...", WATCH_FILE)
+    logging.info('URL prefix is: "%s"', URL_PREFIX or "/")
+    logging.info("Basic auth enabled. Username: %s", USERNAME)
 
-        desaturation_thread = threading.Thread(target=schedule_desaturation)
-        desaturation_thread.daemon = True
-        desaturation_thread.start()
+    desaturation_thread = threading.Thread(target=schedule_desaturation, daemon=True)
+    desaturation_thread.start()
 
-        w.run()
-    except Exception as e:
-        logging.error(f"Error: {e}")
-    finally:
-        logging.info("Terminating Mosquitto MQTT broker...")
-        if broker_process:
-            try:
-                broker_process.terminate()
-                stdout, stderr = broker_process.communicate(timeout=5)
-                logging.info("Broker stdout: %s", stdout.decode())
-                logging.info("Broker stderr: %s", stderr.decode())
-            except Exception as e:
-                logging.error("Error terminating broker: %s", e)
+    watcher_thread = threading.Thread(target=Watcher().run, daemon=True)
+    watcher_thread.start()
+
+
+# Kick off startup when the module is imported (covers gunicorn worker init)
+_do_startup()
+
+
+# ---------------------------------------------------------------------------
+# Direct invocation fallback (python3 syncframe-server.py)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    # _do_startup() already called above; just run Flask dev server as fallback
+    from gevent import monkey
+    monkey.patch_all()
+    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
