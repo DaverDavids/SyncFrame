@@ -975,7 +975,6 @@ static void sseTask(void* pv) {
   HTTPClient* http = new HTTPClient();
 
   http->setConnectTimeout(5000);
-  http->setTimeout(0);
 
   bool ok = false;
   if (isHttps) {
@@ -1007,6 +1006,7 @@ static void sseTask(void* pv) {
     sseConnected = true;
 
     WiFiClient* stream = http->getStreamPtr();
+	stream->setTimeout(60);
     String line;
     line.reserve(64);
 
