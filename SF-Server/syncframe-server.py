@@ -1,4 +1,5 @@
 import configparser
+import io
 import hashlib
 import json
 import logging
@@ -255,6 +256,12 @@ RESOLUTIONS = [
     (800, 480),
     (280, 240),
 ]
+
+# Max output file size in KB per resolution. 0 = no limit.
+RESOLUTION_MAX_KB = {
+    (800, 480): 100,
+    (280, 240): 20,
+}
 
 # ---------------------------------------------------------------------------
 # OTA state
@@ -683,7 +690,18 @@ def generate_thumbnails(source_img=None):
                 thumb = source_img.copy()
                 thumb.thumbnail((w, h), Image.LANCZOS)
                 out_path = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
-                thumb.save(out_path, format="JPEG", quality=75, optimize=True)
+                max_kb = RESOLUTION_MAX_KB.get((w, h), 0)
+                quality = 75
+                while True:
+                    buf = io.BytesIO()
+                    thumb.save(buf, format="JPEG", quality=quality, optimize=True)
+                    if max_kb == 0 or buf.tell() <= max_kb * 1024 or quality <= 10:
+                        break
+                    quality -= 5
+                with open(out_path, "wb") as f:
+                    f.write(buf.getvalue())
+                if max_kb > 0:
+                    logging.info("Thumbnail %dx%d: %d bytes at quality=%d", w, h, buf.tell(), quality)
                 logging.info("Thumbnail saved: %s at size %s", out_path, thumb.size)
             except Exception as e:
                 logging.error("Error generating %dx%d thumbnail: %s", w, h, e)

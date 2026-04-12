@@ -676,10 +676,12 @@ static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outEr
     // ---- No-PSRAM path (C3): stream into growable internal-heap chunks ----
     // Start with a small chunk and grow as needed to avoid early OOM on limited heap
     static const size_t CHUNK = 4096;
-    size_t allocSize = CHUNK;
-    if (allocSize > MAX_JPG) allocSize = MAX_JPG;
-
-    buf = (uint8_t*)malloc(allocSize);
+	static const size_t C3_MAX_PREALLOC = 20480;
+	size_t allocSize = (total > 0 && (size_t)total <= C3_MAX_PREALLOC)
+					   ? (size_t)total
+					   : CHUNK;
+	if (allocSize > MAX_JPG) allocSize = MAX_JPG;
+	buf = (uint8_t*)malloc(allocSize);
     if (!buf) {
       if (outErr) *outErr = "out of memory";
       logEvent("PHOTO", "C3 initial alloc failed allocSize=%u heapFree=%u", (unsigned)allocSize, (unsigned)ESP.getFreeHeap());
