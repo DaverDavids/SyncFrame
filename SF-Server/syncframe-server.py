@@ -1120,13 +1120,9 @@ def sse_stream():
             while True:
                 try:
                     msg = q.get(timeout=25)
-                    yield f"data: {msg}
-
-"
+                    yield f"data: {msg}"
                 except queue.Empty:
-                    yield ": keepalive
-
-"
+                    yield ": keepalive"
         finally:
             with _sse_lock:
                 try:
