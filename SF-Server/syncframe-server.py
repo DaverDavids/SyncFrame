@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import secrets
 import shutil
 import ssl
@@ -229,6 +230,26 @@ photo_upload_etag = _load_photo_etag()
 if not photo_upload_etag:
     photo_upload_etag = secrets.token_hex(8)
     _save_photo_etag(photo_upload_etag)
+
+# ---------------------------------------------------------------------------
+# SSE (Server-Sent Events) subscriber registry
+# ---------------------------------------------------------------------------
+_sse_subscribers: list[queue.SimpleQueue] = []
+_sse_lock = threading.Lock()
+
+
+def _sse_notify(message: str = "refresh"):
+    """Notify all SSE subscribers of an event."""
+    with _sse_lock:
+        dead = []
+        for q in _sse_subscribers:
+            try:
+                q.put_nowait(message)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            _sse_subscribers.remove(q)
+
 
 RESOLUTIONS = [
     (800, 480),
@@ -725,6 +746,7 @@ class Handler(FileSystemEventHandler):
             self.watcher.last_notification = current_time
             logging.info(f"File {event.src_path} has been modified")
             send_mqtt_message("refresh")
+            _sse_notify("refresh")
 
 
 def send_mqtt_message(message):
@@ -1086,7 +1108,42 @@ def serve_photo_variant(w, h):
 def serve_static(filename):
     return send_from_directory("static", filename)
 
+@bp.route("/events")
+def sse_stream():
+    """Server-Sent Events endpoint — clients subscribe here for live refresh notifications."""
+    def generate():
+        q = queue.SimpleQueue()
+        with _sse_lock:
+            _sse_subscribers.append(q)
+        try:
+            yield "data: connected
 
+"
+            while True:
+                try:
+                    msg = q.get(timeout=25)
+                    yield f"data: {msg}
+
+"
+                except queue.Empty:
+                    yield ": keepalive
+
+"
+        finally:
+            with _sse_lock:
+                try:
+                    _sse_subscribers.remove(q)
+                except ValueError:
+                    pass
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -2084,6 +2141,7 @@ class Handler(FileSystemEventHandler):
             self.watcher.last_notification = current_time
             logging.info(f"File {event.src_path} has been modified")
             send_mqtt_message("refresh")
+            _sse_notify("refresh")
 
 
 def send_mqtt_message(message):
