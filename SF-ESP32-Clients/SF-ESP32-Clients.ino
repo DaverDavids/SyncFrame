@@ -8,7 +8,7 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
-#include <PubSubClient.h>
+
 #include <Update.h>
 #include <stdarg.h>
 #include <esp_system.h>
@@ -46,7 +46,6 @@ static char compileIdStr[16];
 const char SF_COMPILE_ID[] __attribute__((used, section(".rodata"))) = "SFID:" __DATE__ " " __TIME__;
 
 static SemaphoreHandle_t drawMutex = nullptr;
-static SemaphoreHandle_t mqttMutex = nullptr;
 static unsigned long bootTimeMs = 0;
 
 // Single pending-refresh flag replaces mqttRefreshPending + webRefreshPending + forceRedraw
@@ -69,13 +68,6 @@ struct Config {
   bool   httpsInsecure;
   String httpUser;
   String httpPass;
-  String mqttHost;
-  uint16_t mqttPort;
-  String mqttTopic;
-  String mqttUser;
-  String mqttPass;
-  bool mqttUseTLS;
-  bool mqttTlsInsecure;
   String updateUrl;
   uint32_t updateIntervalMin;
   String webUser;
@@ -88,31 +80,20 @@ static String installedFwFilename = "";
 static const char* PREF_NS = "syncframe";
 static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
 static const char* DEFAULT_HTTP_USER           = "david";
-static const char* DEFAULT_MQTT_USER           = "david";
-static const char* DEFAULT_MQTT_HOST           = "192.168.6.202";
-static const uint16_t DEFAULT_MQTT_PORT        = 8368;
-static const char* DEFAULT_MQTT_TOPIC          = "photos";
 static const char* DEFAULT_UPDATE_URL          = "";
 static const uint32_t DEFAULT_UPDATE_INTERVAL_MIN = 10;
 static const char* DEFAULT_WEB_USER            = "admin";
 static const char* DEFAULT_WEB_PASS            = "";
 
 WebServer server(80);
-WiFiClient   mqttNetPlain;
-WiFiClientSecure mqttNetSecure;
-PubSubClient mqtt;
 
 bool networkServicesStarted = false;
 static bool webServerStarted = false;
 
 unsigned long lastWifiAttemptMs  = 0;
-unsigned long lastMqttAttemptMs  = 0;
-
-volatile bool mqttConnected  = false;
-volatile bool lastDownloadOk = false;
 String lastDownloadErr = "";
 unsigned long lastDownloadMs = 0;
-unsigned long lastMqttMsgMs  = 0;
+volatile bool lastDownloadOk = false;
 
 uint8_t* currentJpg    = nullptr;
 size_t   currentJpgLen = 0;
@@ -124,7 +105,12 @@ bool wifiEverConnected  = false;
 static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 static volatile bool photoTaskRunning = false;
-static volatile bool mqttTaskRunning  = false;
+
+// SSE
+static WiFiClientSecure* sseClient = nullptr;
+static bool sseConnected = false;
+static unsigned long lastSseAttemptMs = 0;
+static unsigned long lastSseMsgMs = 0;
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
@@ -311,13 +297,6 @@ static void loadConfig() {
   cfg.httpsInsecure     = prefs.getBool("pinsec",    true);
   cfg.httpUser          = prefs.getString("puser",   DEFAULT_HTTP_USER);
   cfg.httpPass          = prefs.getString("ppass",   String(test_http_password));
-  cfg.mqttHost          = prefs.getString("mhost",   DEFAULT_MQTT_HOST);
-  cfg.mqttPort          = prefs.getUShort("mport",   DEFAULT_MQTT_PORT);
-  cfg.mqttTopic         = prefs.getString("mtopic",  DEFAULT_MQTT_TOPIC);
-  cfg.mqttUser          = prefs.getString("muser",   DEFAULT_MQTT_USER);
-  cfg.mqttPass          = prefs.getString("mpass",   String(test_http_password));
-  cfg.mqttUseTLS        = prefs.getBool("mtls",      true);
-  cfg.mqttTlsInsecure   = prefs.getBool("mtlsins",   true);
   cfg.updateUrl         = prefs.getString("updurl",  DEFAULT_UPDATE_URL);
   cfg.updateIntervalMin = prefs.getUInt("updint",    DEFAULT_UPDATE_INTERVAL_MIN);
   cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
@@ -354,13 +333,6 @@ static void saveConfig() {
   prefs.putBool("pinsec",   cfg.httpsInsecure);
   prefs.putString("puser",  cfg.httpUser);
   prefs.putString("ppass",  cfg.httpPass);
-  prefs.putString("mhost",  cfg.mqttHost);
-  prefs.putUShort("mport",  cfg.mqttPort);
-  prefs.putString("mtopic", cfg.mqttTopic);
-  prefs.putString("muser",  cfg.mqttUser);
-  prefs.putString("mpass",  cfg.mqttPass);
-  prefs.putBool("mtls",     cfg.mqttUseTLS);
-  prefs.putBool("mtlsins",  cfg.mqttTlsInsecure);
   prefs.putString("updurl", cfg.updateUrl);
   prefs.putUInt("updint",   cfg.updateIntervalMin);
   prefs.putString("wbuser", cfg.webUser);
@@ -991,134 +963,90 @@ static void startOtaTask() {
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
 
-// ---------------------- MQTT ----------------------
-static void mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
-  (void)payload;
-  lastMqttMsgMs  = millis();
-  refreshPending = true;
-  logEvent("MQTT", "message topic=%s bytes=%u", topic ? topic : "", length);
-}
+// ---------------------- SSE ----------------------
+static void sseTask(void* pv) {
+  String url = cfg.photoBaseUrl;
+  if (!url.endsWith("/")) url += "/";
+  url += "events";
 
-static void mqttSetupClient() {
-  mqtt.setCallback(mqttCallback);
-  if (cfg.mqttUseTLS) {
-    if (cfg.mqttTlsInsecure) mqttNetSecure.setInsecure();
-    mqtt.setClient(mqttNetSecure);
+  bool isHttps = url.startsWith("https://");
+  WiFiClientSecure* sec = nullptr;
+  WiFiClient* plain = nullptr;
+  HTTPClient* http = new HTTPClient();
+
+  http->setConnectTimeout(5000);
+  http->setTimeout(0);
+
+  bool ok = false;
+  if (isHttps) {
+    sec = new WiFiClientSecure();
+    if (cfg.httpsInsecure) sec->setInsecure();
+    ok = http->begin(*sec, url);
   } else {
-    mqtt.setClient(mqttNetPlain);
+    plain = new WiFiClient();
+    ok = http->begin(*plain, url);
   }
-  mqtt.setServer(cfg.mqttHost.c_str(), cfg.mqttPort);
-  mqtt.setSocketTimeout(1);
-}
 
-// MQTT reconnect runs in its own task so mqtt.connect() never blocks loop().
-//
-// FIX (S3 crash): The global mqttNetSecure object retains stale internal SSL
-// state across reconnect attempts. When the broker closes the TLS connection
-// (e.g. on bad credentials), mbedTLS leaves the SSL context in a half-torn-
-// down state. A subsequent mqtt.connect() call triggers available() on that
-// stale context, which dereferences a freed internal buffer (buf=0x0) and
-// crashes with LoadProhibited (excvaddr=0x9).
-//
-// Fix: call stop() AND reconstruct the SSL context by calling setInsecure()
-// before every connect attempt. This forces mbedTLS to re-initialise its
-// internal state cleanly regardless of what happened in the previous attempt.
-//
-// Additionally: never pass empty string credentials to mqtt.connect() — some
-// brokers reject them by closing the TLS connection immediately, which is
-// what triggers the above crash path in the first place.
-static void mqttReconnectTask(void* pv) {
-  (void)pv;
-  // Snapshot config under no lock (safe as strings are immutable after WiFi connected)
-  char host[64]  = {};
-  char topic[64] = {};
-  char user[64]  = {};
-  char pass[64]  = {};
-  strncpy(host,  cfg.mqttHost.c_str(),  sizeof(host)  - 1);
-  strncpy(topic, cfg.mqttTopic.c_str(), sizeof(topic) - 1);
-  strncpy(user,  cfg.mqttUser.c_str(),  sizeof(user)  - 1);
-  strncpy(pass,  cfg.mqttPass.c_str(),  sizeof(pass)  - 1);
-  bool useTLS     = cfg.mqttUseTLS;
-  bool tlsInsec   = cfg.mqttTlsInsecure;
-  bool hasCredentials = (user[0] != '\0');
-
-  // Take mutex for ALL socket/TLS operations to prevent concurrent access
-  xSemaphoreTake(mqttMutex, portMAX_DELAY);
-
-  // Clean slate: disconnect + stop any existing connection
-  mqtt.disconnect();       // sends MQTT DISCONNECT if connected
-  if (useTLS) {
-    mqttNetSecure.stop();  // tears down TLS cleanly under mutex protection
-    // Re-apply TLS settings — this re-initialises the mbedTLS context
-    if (tlsInsec) mqttNetSecure.setInsecure();
-    mqttNetSecure.setTimeout(5);
-    mqtt.setClient(mqttNetSecure);
-  } else {
-    mqttNetPlain.stop();   // tears down plain TCP cleanly
-    mqttNetPlain.setTimeout(5);
-    mqtt.setClient(mqttNetPlain);
+  if (!ok) {
+    logEvent("SSE", "begin failed");
+    goto cleanup;
   }
-  delay(50); // allow socket resources to fully release
 
-  // Setup fresh connection under mutex protection
-  mqtt.setServer(host, cfg.mqttPort);
-  mqtt.setSocketTimeout(5);
-  mqtt.setCallback(mqttCallback);
+  http->addHeader("Accept", "text/event-stream");
+  if (cfg.httpUser.length() > 0)
+    http->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
 
-  // Release the mutex before performing the blocking TLS handshake connect
-  xSemaphoreGive(mqttMutex); // release mutex before connect to allow lwIP to run
-
-  // Connect using the broker host we configured (host), not HOSTNAME
-  bool ok = hasCredentials ? mqtt.connect(host, user, pass) : mqtt.connect(host);
-
-  // Re-acquire mutex to perform subscribe (socket touches still guarded)
-  xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000));
-  bool subOk = false;
-  if (ok) {
-    subOk = mqtt.subscribe(topic);
-    if (subOk) {
-      logEvent("MQTT", "connected sub=ok topic=%s", topic);
-      mqttConnected = true;
-    } else {
-      logEvent("MQTT", "connected sub=fail topic=%s", topic);
-      mqttConnected = false;
+  {
+    int code = http->GET();
+    if (code != HTTP_CODE_OK) {
+      logEvent("SSE", "GET failed code=%d", code);
+      goto cleanup;
     }
-  } else {
-    logEvent("MQTT", "connect failed rc=%d", mqtt.state());
-    mqttConnected = false;
-  }
-  xSemaphoreGive(mqttMutex);
 
-  mqttTaskRunning = false;
+    logEvent("SSE", "connected url=%s", url.c_str());
+    sseConnected = true;
+
+    WiFiClient* stream = http->getStreamPtr();
+    String line;
+    line.reserve(64);
+
+    while (http->connected() || stream->available()) {
+      while (stream->available()) {
+        char c = stream->read();
+        if (c == '\n') {
+          if (line.startsWith("data:")) {
+            lastSseMsgMs = millis();
+            refreshPending = true;
+            logEvent("SSE", "refresh triggered");
+          }
+          line = "";
+        } else if (c != '\r') {
+          line += c;
+        }
+      }
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    logEvent("SSE", "stream ended");
+  }
+
+cleanup:
+  sseConnected = false;
+  http->end();
+  delete http;
+  delete sec;
+  delete plain;
   vTaskDelete(NULL);
 }
 
-static void mqttMaybeReconnect() {
-  if (mqttTaskRunning) return; // Moved to top per fixes.md
-  if (xSemaphoreTake(mqttMutex, 0) != pdTRUE) return;
-  bool connected = mqtt.connected();
-  xSemaphoreGive(mqttMutex);
-
-  if (connected) { mqttConnected = true; return; }
-  mqttConnected = false;
+static void sseMaybeReconnect() {
+  if (sseConnected) return;
   if (WiFi.status() != WL_CONNECTED) return;
-  if (millis() - lastMqttAttemptMs < 15000) return;
-  if (cfg.mqttHost.length() == 0) return;
+  if (millis() - lastSseAttemptMs < 15000) return;
+  if (cfg.photoBaseUrl.length() == 0) return;
 
-  lastMqttAttemptMs = millis();
-  mqttTaskRunning   = true;
-
-  BaseType_t created;
-#if APP_CORE == 0
-  // C3: do NOT pin — pinning alongside loopTask starves lwIP during connect()
-  created = xTaskCreate(mqttReconnectTask, "mqttRecon", 8192, nullptr, 1, nullptr);
-#else
-  created = xTaskCreatePinnedToCore(mqttReconnectTask, "mqttRecon", 8192, nullptr, 1, nullptr, APP_CORE);
-#endif
-  if (created != pdPASS) {
-    mqttTaskRunning = false;
-    logEvent("MQTT", "task create failed");
-  }
+  lastSseAttemptMs = millis();
+  logEvent("SSE", "spawning task");
+  xTaskCreatePinnedToCore(sseTask, "sseTask", 8192, nullptr, 1, nullptr, APP_CORE);
 }
 
 // ---------------------- Network services ----------------------
@@ -1151,14 +1079,6 @@ static void startNetworkServicesOnce() {
     webServerStarted = true;
     logEvent("WEB", "server STARTED");
   }
-
-  if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
-    mqttNetPlain.setTimeout(2);
-    mqttNetSecure.setTimeout(5);
-    mqttSetupClient();
-    xSemaphoreGive(mqttMutex);
-  }
-  lastMqttAttemptMs = 0;
 
   networkServicesStarted = true;
   wifiEverConnected      = true;
@@ -1224,13 +1144,6 @@ static void handleConfigPage() {
   j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
   j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
   j += "\"httpPass\":\"";       appendJsonPassword(j, cfg.httpPass);     j += "\",";
-  j += "\"mqttHost\":\"";       appendJsonEscaped(j, cfg.mqttHost);      j += "\",";
-  j += "\"mqttPort\":";         j += String(cfg.mqttPort);               j += ",";
-  j += "\"mqttTopic\":\"";      appendJsonEscaped(j, cfg.mqttTopic);     j += "\",";
-  j += "\"mqttUser\":\"";       appendJsonEscaped(j, cfg.mqttUser);      j += "\",";
-  j += "\"mqttPass\":\"";       appendJsonPassword(j, cfg.mqttPass);     j += "\",";
-  j += "\"mqttUseTLS\":";       j += (cfg.mqttUseTLS ? "true" : "false");  j += ",";
-  j += "\"mqttTlsInsecure\":";  j += (cfg.mqttTlsInsecure ? "true" : "false"); j += ",";
   j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
   j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
@@ -1256,11 +1169,11 @@ static void handleStatusJson() {
   j += "\"ip\":\""; appendJsonEscaped(j, wifiOk ? WiFi.localIP().toString() : String("")); j += "\",";
   j += "\"mdns\":";  j += (networkServicesStarted ? "true" : "false"); j += ",";
   j += "\"ota\":";   j += (networkServicesStarted ? "true" : "false"); j += ",";
-  j += "\"mqtt\":";  j += (mqttConnected ? "true" : "false"); j += ",";
+  j += "\"sse\":";         j += (sseConnected ? "true" : "false"); j += ",";
   j += "\"lastDownloadOk\":";  j += (lastDownloadOk ? "true" : "false"); j += ",";
   j += "\"lastDownloadErr\":\""; appendJsonEscaped(j, lastDownloadErr); j += "\",";
   j += "\"lastDownloadMs\":"; j += String(lastDownloadMs); j += ",";
-  j += "\"lastMqttMsgMs\":";  j += String(lastMqttMsgMs); j += ",";
+  j += "\"lastSseMsgMs\":"; j += String(lastSseMsgMs); j += ",";
   j += "\"lastLogSeq\":";     j += String(logSeq); j += ",";
   j += "\"otaInProgress\":";  j += (otaInProgress ? "true" : "false"); j += ",";
   j += "\"installedFw\":\"";  appendJsonEscaped(j, installedFwFilename); j += "\",";
@@ -1323,31 +1236,17 @@ static void handlePostConfig() {
   if (server.hasArg("photoBaseUrl"))       cfg.photoBaseUrl       = server.arg("photoBaseUrl");
   if (server.hasArg("photoFilename"))      cfg.photoFilename      = server.arg("photoFilename");
   if (server.hasArg("httpUser"))           cfg.httpUser           = server.arg("httpUser");
-  if (server.hasArg("mqttHost"))           cfg.mqttHost           = server.arg("mqttHost");
-  if (server.hasArg("mqttTopic"))          cfg.mqttTopic          = server.arg("mqttTopic");
-  if (server.hasArg("mqttUser"))           cfg.mqttUser           = server.arg("mqttUser");
-  if (server.hasArg("mqttPort")) {
-    uint16_t port = (uint16_t)server.arg("mqttPort").toInt();
-    if (port > 0) cfg.mqttPort = port;
-  }
   if (server.hasArg("updateUrl"))          cfg.updateUrl          = server.arg("updateUrl");
   if (server.hasArg("updateIntervalMin"))  cfg.updateIntervalMin  = (uint32_t)server.arg("updateIntervalMin").toInt();
   if (server.hasArg("webUser") && server.arg("webUser").length() > 0)
     cfg.webUser = server.arg("webUser");
   if (server.hasArg("httpPass") && isRealPassword(server.arg("httpPass"))) cfg.httpPass = server.arg("httpPass");
-  if (server.hasArg("mqttPass") && isRealPassword(server.arg("mqttPass"))) cfg.mqttPass = server.arg("mqttPass");
   if (server.hasArg("webPass")  && isRealPassword(server.arg("webPass")))  cfg.webPass  = server.arg("webPass");
   if (server.hasArg("webPassClear") && server.arg("webPassClear") == "1")  cfg.webPass  = "";
   cfg.httpsInsecure   = server.hasArg("httpsInsecure");
-  cfg.mqttUseTLS      = server.hasArg("mqttUseTLS");
-  cfg.mqttTlsInsecure = server.hasArg("mqttTlsInsecure");
   saveConfig();
-  if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
-    mqtt.disconnect();
-    mqttSetupClient();
-    xSemaphoreGive(mqttMutex);
-  }
-  lastMqttAttemptMs = 0;
+  sseConnected = false;
+  lastSseAttemptMs = 0;
   startOtaTask();
   logEvent("WEB", "config saved");
   server.send(200, "application/json", "{\"ok\":true}");
@@ -1402,7 +1301,6 @@ void setup() {
 
   drawMutex = xSemaphoreCreateBinary();
   xSemaphoreGive(drawMutex);
-  mqttMutex = xSemaphoreCreateMutex();
 
   loadConfig();
   board_init();
@@ -1432,11 +1330,7 @@ void loop() {
       if (ESP.getFreeHeap() > 20000) server.handleClient();
 
       if (!otaInProgress) {
-        mqttMaybeReconnect();
-        if (xSemaphoreTake(mqttMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-          if (mqtt.connected()) mqtt.loop();
-          xSemaphoreGive(mqttMutex);
-        }
+        sseMaybeReconnect();
         if (refreshPending) {
           refreshPending = false;
           spawnPhotoTask();

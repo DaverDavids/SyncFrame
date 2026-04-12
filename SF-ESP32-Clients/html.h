@@ -208,7 +208,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
   <div class="status-bar">
     <span id="s_wifi">WiFi: &hellip;</span>
     <span id="s_mdns">mDNS: &hellip;</span>
-    <span id="s_mqtt">MQTT: &hellip;</span>
+    <span id="s_sse">SSE: &hellip;</span>
     <span id="s_dl">Photo: &hellip;</span>
     <span id="s_ota">OTA: &hellip;</span>
     <span id="s_uptime">Up: &hellip;</span>
@@ -237,36 +237,6 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
         <input type="password" name="httpPass" id="httpPass" autocomplete="off"/>
       </div>
     </div>
-
-    <hr class="section-divider"/>
-    <h3>MQTT</h3>
-    <div class="row">
-      <div>
-        <label>Host</label>
-        <input type="text" name="mqttHost" id="mqttHost" placeholder="192.168.1.10"/>
-      </div>
-      <div>
-        <label>Port</label>
-        <input type="number" name="mqttPort" id="mqttPort" placeholder="9368"/>
-      </div>
-    </div>
-
-    <label>Topic</label>
-    <input type="text" name="mqttTopic" id="mqttTopic" placeholder="photos"/>
-
-    <div class="row">
-      <div>
-        <label>User (optional)</label>
-        <input type="text" name="mqttUser" id="mqttUser" placeholder="mqttuser"/>
-      </div>
-      <div>
-        <label>Pass <span class="small">(blank = keep current)</span></label>
-        <input type="password" name="mqttPass" id="mqttPass" autocomplete="off"/>
-      </div>
-    </div>
-
-    <label><input type="checkbox" name="mqttUseTLS" id="mqttUseTLS"/> Use TLS</label>
-    <label><input type="checkbox" name="mqttTlsInsecure" id="mqttTlsInsecure"/> Allow insecure TLS (self-signed)</label>
 
     <hr class="section-divider"/>
     <h3>Firmware Updates (OTA)</h3>
@@ -309,7 +279,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span id="ds_mac">MAC: &hellip;</span>
     <span id="ds_ip">IP: &hellip;</span>
     <span id="ds_wifi">WiFi: &hellip;</span>
-    <span id="ds_mqtt">MQTT: &hellip;</span>
+    <span id="ds_sse">SSE: &hellip;</span>
     <span id="ds_photo">Photo: &hellip;</span>
     <span id="ds_ota">OTA: idle</span>
     <span id="ds_uptime">Uptime: &hellip;</span>
@@ -342,14 +312,6 @@ function applyCfg(c) {
   document.getElementById("httpUser").value          = c.httpUser          || "";
   document.getElementById("httpPass").value          = "";
   document.getElementById("httpPass").placeholder    = c.httpPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
-  document.getElementById("mqttHost").value          = c.mqttHost          || "";
-  document.getElementById("mqttPort").value          = c.mqttPort          || "";
-  document.getElementById("mqttTopic").value         = c.mqttTopic         || "";
-  document.getElementById("mqttUser").value          = c.mqttUser          || "";
-  document.getElementById("mqttPass").value          = "";
-  document.getElementById("mqttPass").placeholder    = c.mqttPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
-  document.getElementById("mqttUseTLS").checked      = !!c.mqttUseTLS;
-  document.getElementById("mqttTlsInsecure").checked = !!c.mqttTlsInsecure;
   document.getElementById("updateUrl").value         = c.updateUrl         || "";
   document.getElementById("updateIntervalMin").value = (c.updateIntervalMin != null) ? c.updateIntervalMin : "";
   document.getElementById("webUser").value           = c.webUser           || "";
@@ -392,7 +354,7 @@ async function loadStatus() {
     const s = await r.json();
     setPill("s_wifi", "WiFi",  !!s.wifi);
     setPill("s_mdns", "mDNS",  !!s.mdns);
-    setPill("s_mqtt", "MQTT",  !!s.mqtt);
+    setPill("s_sse", "SSE",  !!s.sse);
     setPill("s_dl",   "Photo", !!s.lastDownloadOk);
     setPill("s_ota",  "OTA",   !s.otaInProgress);
     // Uptime pill
@@ -404,7 +366,7 @@ async function loadStatus() {
     setSpan("ds_mac",   "MAC: " +(s.mac     ||"-"),       null);
     setSpan("ds_ip",    "IP: "  +(s.ip      ||"offline"), null);
     setSpan("ds_wifi",  "WiFi: "+(s.wifi  ?"connected":"disconnected"), !!s.wifi);
-    setSpan("ds_mqtt",  "MQTT: "+(s.mqtt  ?"connected":"disconnected"), !!s.mqtt);
+    setSpan("ds_sse",  "SSE: "+(s.sse  ?"connected":"disconnected"), !!s.sse);
     setSpan("ds_photo", s.lastDownloadOk
       ? "Photo: ok"
       : "Photo: failed ("+(s.lastDownloadErr||"unknown")+")",
@@ -458,24 +420,16 @@ document.getElementById("configForm").addEventListener('submit', async (e) => {
   f.append('photoBaseUrl',       document.getElementById("photoBaseUrl").value);
   f.append('photoFilename',      document.getElementById("photoFilename").value);
   f.append('httpUser',           document.getElementById("httpUser").value);
-  f.append('mqttHost',           document.getElementById("mqttHost").value);
-  f.append('mqttPort',           document.getElementById("mqttPort").value);
-  f.append('mqttTopic',          document.getElementById("mqttTopic").value);
-  f.append('mqttUser',           document.getElementById("mqttUser").value);
   f.append('updateUrl',          document.getElementById("updateUrl").value);
   f.append('updateIntervalMin',  document.getElementById("updateIntervalMin").value);
   const webUserVal  = document.getElementById("webUser").value;
   const httpPassVal = document.getElementById("httpPass").value;
-  const mqttPassVal = document.getElementById("mqttPass").value;
   const webPassVal  = document.getElementById("webPass").value;
   if (webUserVal.length  > 0) f.append('webUser',  webUserVal);
   if (httpPassVal.length > 0) f.append('httpPass', httpPassVal);
-  if (mqttPassVal.length > 0) f.append('mqttPass', mqttPassVal);
   if (webPassVal.length  > 0) f.append('webPass',  webPassVal);
   if (document.getElementById('webPassClearCb').checked) f.append('webPassClear','1');
   if (document.getElementById("httpsInsecure").checked)   f.append('httpsInsecure',   '1');
-  if (document.getElementById("mqttUseTLS").checked)      f.append('mqttUseTLS',      '1');
-  if (document.getElementById("mqttTlsInsecure").checked) f.append('mqttTlsInsecure', '1');
   saveBtn.disabled = true;
   saveBtn.textContent = 'Saving\u2026';
   try {
