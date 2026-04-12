@@ -1111,25 +1111,25 @@ def serve_static(filename):
 @bp.route("/events")
 def sse_stream():
     """Server-Sent Events endpoint — clients subscribe here for live refresh notifications."""
-    def generate():
-        q = queue.SimpleQueue()
+def generate():
+    q = queue.SimpleQueue()
+    with _sse_lock:
+        _sse_subscribers.append(q)
+    try:
+        yield "data: connected\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=25)
+                yield f"data: {msg}\n\n"
+            except queue.Empty:
+                yield ": keepalive\n\n"
+    finally:
         with _sse_lock:
-            _sse_subscribers.append(q)
-        try:
-            yield "data: connected"
-            while True:
-                try:
-                    msg = q.get(timeout=25)
-                    yield f"data: {msg}"
-                except queue.Empty:
-                    yield ": keepalive"
-        finally:
-            with _sse_lock:
-                try:
-                    _sse_subscribers.remove(q)
-                except ValueError:
-                    pass
-
+            try:
+                _sse_subscribers.remove(q)
+            except ValueError:
+                pass
+                
     return Response(
         generate(),
         mimetype="text/event-stream",
