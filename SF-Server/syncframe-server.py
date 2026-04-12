@@ -1116,9 +1116,7 @@ def sse_stream():
         with _sse_lock:
             _sse_subscribers.append(q)
         try:
-            yield "data: connected
-
-"
+            yield "data: connected"
             while True:
                 try:
                     msg = q.get(timeout=25)
