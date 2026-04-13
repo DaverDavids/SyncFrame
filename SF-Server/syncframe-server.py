@@ -1240,7 +1240,7 @@ def stream():
         clients = _load_clients()
         client_data = clients.get(hostname)
         if client_data and client_data.get("firmware"):
-            fw_path = os.path.join(FIRMWARE_DIR, client_data["firmware"])
+            fw_path = os.path.join(OTA_FIRMWARE_DIR, client_data["firmware"])
             fw_compile_id = client_data.get("fw_compile_id", "")
             if os.path.exists(fw_path) and fw_compile_id != compiled:
                 try:
@@ -1258,8 +1258,8 @@ def stream():
                 except Exception as e:
                     logging.warning(f"Failed to push OTA to {hostname}: {e}")
         
-        # Photo check: if photo_hash differs, push current photo immediately
-        if photo_hash and photo_hash != current_photo_hash and current_photo_hash:
+        # Photo check: push current photo if it differs from client's hash (or client has no hash)
+        if current_photo_hash and photo_hash != current_photo_hash:
             variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{resolution[0]}x{resolution[1]}.jpg")
             if not os.path.exists(variant_file):
                 variant_file = WATCH_FILE

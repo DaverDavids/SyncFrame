@@ -65,8 +65,6 @@ struct Config {
   bool   httpsInsecure;
   String httpUser;
   String httpPass;
-  String updateUrl;
-  uint32_t updateIntervalMin;
   String webUser;
   String webPass;
 } cfg;
@@ -77,8 +75,6 @@ static String installedFwFilename = "";
 static const char* PREF_NS = "syncframe";
 static const char* DEFAULT_PHOTO_BASEURL       = "https://192.168.6.202:8369/syncframe/";
 static const char* DEFAULT_HTTP_USER           = "david";
-static const char* DEFAULT_UPDATE_URL          = "";
-static const uint32_t DEFAULT_UPDATE_INTERVAL_MIN = 10;
 static const char* DEFAULT_WEB_USER            = "admin";
 static const char* DEFAULT_WEB_PASS            = "";
 
@@ -301,8 +297,6 @@ static void loadConfig() {
   cfg.httpsInsecure     = prefs.getBool("pinsec",    true);
   cfg.httpUser          = prefs.getString("puser",   DEFAULT_HTTP_USER);
   cfg.httpPass          = prefs.getString("ppass",   String(test_http_password));
-  cfg.updateUrl         = prefs.getString("updurl",  DEFAULT_UPDATE_URL);
-  cfg.updateIntervalMin = prefs.getUInt("updint",    DEFAULT_UPDATE_INTERVAL_MIN);
   cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
   cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
   installedFwToken      = prefs.getString("fwtoken", "");
@@ -337,8 +331,6 @@ static void saveConfig() {
   prefs.putBool("pinsec",   cfg.httpsInsecure);
   prefs.putString("puser",  cfg.httpUser);
   prefs.putString("ppass",  cfg.httpPass);
-  prefs.putString("updurl", cfg.updateUrl);
-  prefs.putUInt("updint",   cfg.updateIntervalMin);
   prefs.putString("wbuser", cfg.webUser);
   prefs.putString("wbpass", cfg.webPass);
   prefs.end();
@@ -762,7 +754,14 @@ static void mjpegTask(void* pv) {
         snprintf(currentPhotoHash, sizeof(currentPhotoHash), "%08lx", (unsigned long)computed);
         lastDataMs = millis();
 
+        // Keep a copy for /img/current endpoint
         if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          freeBuf(currentJpg, currentJpgLen);
+          currentJpg = (uint8_t*)malloc(readTotal);
+          if (currentJpg) {
+            memcpy(currentJpg, buf, readTotal);
+            currentJpgLen = readTotal;
+          }
           board_draw_jpeg(buf, readTotal);
           boardDrawActive = false;
           xSemaphoreGive(drawMutex);
@@ -899,8 +898,6 @@ static void handleConfigPage() {
   j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
   j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
   j += "\"httpPass\":\"";       appendJsonPassword(j, cfg.httpPass);     j += "\",";
-  j += "\"updateUrl\":\"";      appendJsonEscaped(j, cfg.updateUrl);     j += "\",";
-  j += "\"updateIntervalMin\":";j += String(cfg.updateIntervalMin);      j += ",";
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
   j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\"}";
 
@@ -988,8 +985,6 @@ static void handlePostConfig() {
   if (server.hasArg("photoBaseUrl"))       cfg.photoBaseUrl       = server.arg("photoBaseUrl");
   if (server.hasArg("photoFilename"))      cfg.photoFilename      = server.arg("photoFilename");
   if (server.hasArg("httpUser"))           cfg.httpUser           = server.arg("httpUser");
-  if (server.hasArg("updateUrl"))          cfg.updateUrl          = server.arg("updateUrl");
-  if (server.hasArg("updateIntervalMin"))  cfg.updateIntervalMin  = (uint32_t)server.arg("updateIntervalMin").toInt();
   if (server.hasArg("webUser") && server.arg("webUser").length() > 0)
     cfg.webUser = server.arg("webUser");
   if (server.hasArg("httpPass") && isRealPassword(server.arg("httpPass"))) cfg.httpPass = server.arg("httpPass");

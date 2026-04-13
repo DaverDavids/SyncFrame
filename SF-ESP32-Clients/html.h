@@ -239,19 +239,6 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     </div>
 
     <hr class="section-divider"/>
-    <h3>Firmware Updates (OTA)</h3>
-    <label>OTA URL <span class="small">(plain-text file, one filename or URL per line; blank = disabled)</span></label>
-    <input type="url" name="updateUrl" id="updateUrl" placeholder="http://192.168.1.10/syncframe/ota"/>
-
-    <label>Check interval (minutes)</label>
-    <input type="number" name="updateIntervalMin" id="updateIntervalMin" min="1" placeholder="60"/>
-
-    <p class="small" style="margin-top:6px">
-      The device checks the manifest for a line containing its hostname (e.g. <em id="hostnameHint">syncframe-XXX</em>).
-      If found, that firmware is downloaded and flashed automatically.
-    </p>
-
-    <hr class="section-divider"/>
     <h3>Web UI Login</h3>
     <p class="warn">&#9888; Leave password blank to disable authentication (open access on local network).</p>
     <div class="row">
@@ -312,8 +299,6 @@ function applyCfg(c) {
   document.getElementById("httpUser").value          = c.httpUser          || "";
   document.getElementById("httpPass").value          = "";
   document.getElementById("httpPass").placeholder    = c.httpPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set)";
-  document.getElementById("updateUrl").value         = c.updateUrl         || "";
-  document.getElementById("updateIntervalMin").value = (c.updateIntervalMin != null) ? c.updateIntervalMin : "";
   document.getElementById("webUser").value           = c.webUser           || "";
   document.getElementById("webPass").value           = "";
   document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
@@ -420,8 +405,6 @@ document.getElementById("configForm").addEventListener('submit', async (e) => {
   f.append('photoBaseUrl',       document.getElementById("photoBaseUrl").value);
   f.append('photoFilename',      document.getElementById("photoFilename").value);
   f.append('httpUser',           document.getElementById("httpUser").value);
-  f.append('updateUrl',          document.getElementById("updateUrl").value);
-  f.append('updateIntervalMin',  document.getElementById("updateIntervalMin").value);
   const webUserVal  = document.getElementById("webUser").value;
   const httpPassVal = document.getElementById("httpPass").value;
   const webPassVal  = document.getElementById("webPass").value;
