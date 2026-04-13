@@ -656,6 +656,8 @@ static void mjpegTask(void* pv) {
       return;
     }
 
+    unsigned long lastDataMs = 0;
+
     // Drain HTTP response headers — wait for data, don't bail early
     while (client->connected()) {
       while (!client->available()) {
@@ -664,13 +666,13 @@ static void mjpegTask(void* pv) {
       }
       String line = client->readStringUntil('\n');
       line.trim();
-      if (line.length() == 0) break; // blank line = end of headers
+      if (line.length() == 0) break;
     }
 
     logEvent("STREAM", "connected");
     lastMjpegConnectMs = millis();
-    unsigned long lastDataMs = millis();
-
+    lastDataMs = millis();
+	
     while (client->connected() || client->available()) {
       if (millis() - lastDataMs > 90000) {
         logEvent("STREAM", "idle timeout");
