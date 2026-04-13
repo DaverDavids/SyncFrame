@@ -117,7 +117,6 @@ async function refreshNow() {
   await poll();
 }
 async function rebootDevice() {
-  if (!confirm("Reboot device?")) return;
   await fetch("/api/reboot",{method:"POST",credentials:"include"});
 }
 poll();
@@ -207,7 +206,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
   <div class="status-bar">
     <span id="s_wifi">WiFi: &hellip;</span>
     <span id="s_mdns">mDNS: &hellip;</span>
-    <span id="s_sse">SSE: &hellip;</span>
+    <span id="s_stream">Stream: &hellip;</span>
     <span id="s_dl">Photo: &hellip;</span>
     <span id="s_ota">OTA: &hellip;</span>
     <span id="s_uptime">Up: &hellip;</span>
@@ -265,7 +264,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span id="ds_mac">MAC: &hellip;</span>
     <span id="ds_ip">IP: &hellip;</span>
     <span id="ds_wifi">WiFi: &hellip;</span>
-    <span id="ds_sse">SSE: &hellip;</span>
+    <span id="ds_stream">Stream: &hellip;</span>
     <span id="ds_photo">Photo: &hellip;</span>
     <span id="ds_ota">OTA: idle</span>
     <span id="ds_uptime">Uptime: &hellip;</span>
@@ -338,6 +337,7 @@ async function loadStatus() {
     const s = await r.json();
     setPill("s_wifi", "WiFi",  !!s.wifi);
     setPill("s_mdns", "mDNS",  !!s.mdns);
+    setPill("s_stream", "Stream", !!s.mjpeg);
     setPill("s_mjpeg", "MJPEG", !!s.mjpeg);
     setPill("s_dl",   "Photo", !!s.photoHash);
     setPill("s_ota",  "OTA",   true);
@@ -350,6 +350,7 @@ async function loadStatus() {
     setSpan("ds_mac",   "MAC: " +(s.mac     ||"-"),       null);
     setSpan("ds_ip",    "IP: "  +(s.ip      ||"offline"), null);
     setSpan("ds_wifi",  "WiFi: "+(s.wifi  ?"connected":"disconnected"), !!s.wifi);
+    setSpan("ds_stream", "Stream: "+(s.mjpeg?"connected":"disconnected"), !!s.mjpeg);
     setSpan("ds_mjpeg", "MJPEG: "+(s.mjpeg?"connected":"disconnected"), !!s.mjpeg);
     setSpan("ds_photo", "Photo hash: "+(s.photoHash||"none"), !!s.photoHash);
     setSpan("ds_ota",   "OTA: idle", true);

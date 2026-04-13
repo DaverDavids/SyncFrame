@@ -676,11 +676,6 @@ static void mjpegTask(void* pv) {
     lastDataMs = millis();
   	
     while (client->connected() || client->available()) {
-      if (mjpegRequestRefresh) {
-        mjpegRequestRefresh = false;
-        logEvent("STREAM", "refresh requested, reconnecting");
-        break;
-      }
       if (millis() - lastDataMs > 90000) {
         logEvent("STREAM", "idle timeout");
         break;
@@ -817,8 +812,9 @@ static void mjpegTask(void* pv) {
     streamClient = nullptr;
 
     mjpegConnected = false;
-  logEvent("STREAM", "task ended");
-  vTaskDelete(NULL);
+    lastMjpegAttemptMs = 0;
+    logEvent("STREAM", "task ended");
+    vTaskDelete(NULL);
 }
 
 static void mjpegMaybeReconnect() {
@@ -1037,34 +1033,39 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  uint8_t* jpg = nullptr;
-  size_t jpgLen = 0;
+  uint8_t* copy = nullptr; size_t copyLen = 0;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    jpg = currentJpg; jpgLen = currentJpgLen;
+    if (currentJpg && currentJpgLen) {
+      copy = (uint8_t*)malloc(currentJpgLen);
+      if (copy) { memcpy(copy, currentJpg, currentJpgLen); copyLen = currentJpgLen; }
+    }
     xSemaphoreGive(drawMutex);
   }
-  if (!jpg || !jpgLen) { server.send(404, "text/plain", "no image"); return; }
+  if (!copy) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)jpg, jpgLen);
+  server.send_P(200, "image/jpeg", (const char*)copy, copyLen);
+  free(copy);
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  uint8_t* jpg = nullptr;
-  size_t jpgLen = 0;
+  uint8_t* copy = nullptr; size_t copyLen = 0;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    jpg = lastJpg; jpgLen = lastJpgLen;
+    if (lastJpg && lastJpgLen) {
+      copy = (uint8_t*)malloc(lastJpgLen);
+      if (copy) { memcpy(copy, lastJpg, lastJpgLen); copyLen = lastJpgLen; }
+    }
     xSemaphoreGive(drawMutex);
   }
-  if (!jpg || !jpgLen) { server.send(404, "text/plain", "no last image"); return; }
+  if (!copy) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)jpg, jpgLen);
+  server.send_P(200, "image/jpeg", (const char*)copy, copyLen);
+  free(copy);
 }
 
 static void handleActionRefresh() {
   if (!requireWebAuth()) return;
   logEvent("WEB", "manual refresh requested");
-  mjpegRequestRefresh = true;
   mjpegForceReconnect = true;
   server.send(200, "application/json", "{\"ok\":true}");
 }
