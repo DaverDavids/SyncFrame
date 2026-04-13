@@ -615,7 +615,10 @@ static void mjpegTask(void* pv) {
 
   if (!client->connect(host.c_str(), port)) {
     logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
+    delete client;
+    streamClient = nullptr;
     mjpegConnected = false;
+    lastMjpegAttemptMs = millis();
     vTaskDelete(NULL);
     return;
   }
@@ -758,6 +761,11 @@ static void mjpegTask(void* pv) {
         buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!buf) buf = (uint8_t*)malloc(allocSize);
       } else {
+        // Free current copy to reclaim heap before allocating frame buffer
+        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+          freeBuf(currentJpg, currentJpgLen);
+          xSemaphoreGive(drawMutex);
+        }
         if (allocSize > MAX_JPG) allocSize = MAX_JPG;
         buf = (uint8_t*)malloc(allocSize);
       }
@@ -790,15 +798,13 @@ static void mjpegTask(void* pv) {
         bool changed = strcmp(oldHash, currentPhotoHash) != 0;
         lastDataMs = millis();
 
-        // Keep a copy for /img/current endpoint
+        // Transfer buffer to currentJpg (reuses buf, no second malloc)
         if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
           freeBuf(currentJpg, currentJpgLen);
-          currentJpg = (uint8_t*)malloc(readTotal);
-          if (currentJpg) {
-            memcpy(currentJpg, buf, readTotal);
-            currentJpgLen = readTotal;
-          }
-          board_draw_jpeg(buf, readTotal);
+          currentJpg = buf;          // transfer ownership
+          currentJpgLen = readTotal;
+          buf = nullptr;              // prevent double-free
+          board_draw_jpeg(currentJpg, currentJpgLen);
           boardDrawActive = false;
           xSemaphoreGive(drawMutex);
         }
@@ -841,9 +847,10 @@ static void mjpegMaybeReconnect() {
   if (cfg.photoBaseUrl.length() == 0) return;
   if (millis() - lastMjpegAttemptMs < 15000) return;
 
-  lastMjpegConnectMs  = millis();
-  lastMjpegAttemptMs  = millis();
+  mjpegRequestRefresh = false;  // clear flag before spawning new task
   mjpegConnected      = true;
+  lastMjpegConnectMs = millis();
+  lastMjpegAttemptMs = millis();
   xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", 16384, nullptr, 1, nullptr, APP_CORE);
 }
 

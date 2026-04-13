@@ -1230,6 +1230,12 @@ def stream():
     logging.info(f"Stream connect: mac={mac} hostname={hostname} resolution={resolution} compiled={compiled}")
 
     with _stream_lock:
+        # If MAC already connected, signal old generator to stop cleanly
+        if mac in connected_stream_clients:
+            try:
+                connected_stream_clients[mac]["queue"].put_nowait(b"_close_")
+            except Exception:
+                pass
         connected_stream_clients[mac] = {
             "resolution": resolution,
             "hostname": hostname,
@@ -1243,6 +1249,7 @@ def stream():
     def generate():
         nonlocal mac
         last_push = time.time()
+        last_sent_hash = photo_hash  # client's current hash; updated when we send anything
         q = connected_stream_clients[mac]["queue"]
         
         # OTA check: before entering keepalive loop, check for pending firmware
@@ -1279,6 +1286,7 @@ def stream():
                 yield jpeg_bytes
                 last_push = time.time()
                 logging.info(f"Stream initial photo pushed to {mac}")
+                last_sent_hash = current_photo_hash  # update after sending
                 # Drain any duplicate that _push_photo_to_stream_clients may have queued
                 try:
                     while not q.empty():
@@ -1293,10 +1301,28 @@ def stream():
                 try:
                     item = q.get(timeout=1.0)
                 except queue.Empty:
-                    if time.time() - last_push >= 60:
+                    # Check if we missed any photo pushes while blocked on queue
+                    if current_photo_hash and current_photo_hash != last_sent_hash:
+                        variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{resolution[0]}x{resolution[1]}.jpg")
+                        if not os.path.exists(variant_file):
+                            variant_file = WATCH_FILE
+                        try:
+                            with open(variant_file, "rb") as f:
+                                jpeg_bytes = f.read()
+                            yield f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpeg_bytes)}\r\n\r\n".encode()
+                            yield jpeg_bytes
+                            last_sent_hash = current_photo_hash
+                            last_push = time.time()
+                        except Exception:
+                            pass
+                    elif time.time() - last_push >= 60:
                         yield b"--frame\r\n\r\n"
                         last_push = time.time()
                     continue
+
+                # Handle _close_ signal for clean disconnect
+                if item == b"_close_":
+                    return
 
                 if isinstance(item, bytes):
                     if item == b"_keepalive_":
