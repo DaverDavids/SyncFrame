@@ -8,7 +8,7 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
-
+#include <mbedtls/base64.h>
 #include <Update.h>
 #include <stdarg.h>
 #include <esp_system.h>
@@ -591,37 +591,44 @@ static void mjpegTask(void* pv) {
     host = url.substring(url.indexOf("//") + 2);
   }
 
-  if (!host.startsWith("/")) {
-    String path = (slashPos > 0) ? url.substring(slashPos) : "/";
+  // Guard against bad parse
+  if (host.length() == 0 || host.startsWith("/")) {
+    logEvent("STREAM", "bad host parse: %s", host.c_str());
+    mjpegConnected = false;
+    vTaskDelete(NULL);
+    return;
+  }
 
-    WiFiClient* client = streamClient;
-    if (!client) {
-      client = new WiFiClientSecure();
-      if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
-      streamClient = (WiFiClientSecure*)client;
-    }
+  String path = (slashPos > 0) ? url.substring(slashPos) : "/";
 
-    if (!client->connect(host.c_str(), port)) {
-      logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
-      mjpegConnected = false;
-      vTaskDelete(NULL);
-      return;
-    }
+  WiFiClient* client = streamClient;
+  if (!client) {
+    client = new WiFiClientSecure();
+    if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
+    streamClient = (WiFiClientSecure*)client;
+  }
 
-    // Build MAC without colons
-    char macNaked[13] = {};
-    int mi = 0;
-    for (int i = 0; MAC_STR[i] && mi < 12; i++) {
-      if (MAC_STR[i] != ':') macNaked[mi++] = MAC_STR[i];
-    }
+  if (!client->connect(host.c_str(), port)) {
+    logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
+    mjpegConnected = false;
+    vTaskDelete(NULL);
+    return;
+  }
 
-    client->print("GET " + path + " HTTP/1.1\r\n");
-    client->print("Host: " + host + "\r\n");
-    client->print("User-Agent: SyncFrame/1.0\r\n");
-    client->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
-    client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
-    client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
-    client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
+  // Build MAC without colons
+  char macNaked[13] = {};
+  int mi = 0;
+  for (int i = 0; MAC_STR[i] && mi < 12; i++) {
+    if (MAC_STR[i] != ':') macNaked[mi++] = MAC_STR[i];
+  }
+
+  client->print("GET " + path + " HTTP/1.1\r\n");
+  client->print("Host: " + host + "\r\n");
+  client->print("User-Agent: SyncFrame/1.0\r\n");
+  client->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
+  client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
+  client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
+  client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
     client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
     client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
     if (cfg.httpUser.length() > 0) {

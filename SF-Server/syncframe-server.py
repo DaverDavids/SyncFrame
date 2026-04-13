@@ -233,17 +233,13 @@ if not photo_upload_etag:
     photo_upload_etag = secrets.token_hex(8)
     _save_photo_etag(photo_upload_etag)
 
-if os.path.exists(WATCH_FILE):
-    current_photo_hash = _compute_crc32(WATCH_FILE)
-
 # ---------------------------------------------------------------------------
 # SSE (Server-Sent Events) subscriber registry
 # ---------------------------------------------------------------------------
 _sse_subscribers: list[queue.SimpleQueue] = []
 _sse_lock = threading.Lock()
 
-current_photo_hash: str = ""          # CRC32 hex of current photo.jpg
-connected_stream_clients: dict = {}   # keyed by MAC → {"response": <Response obj>, "resolution": (w,h), "hostname": str, "uptime": int, "compiled": str}
+connected_stream_clients: dict = {}   # keyed by MAC → {"response": <Response obj>, "resolution": (w,h), "hostname": str, "uptime": int, "compiled": str, "queue": queue.Queue}
 _stream_lock = threading.Lock()
 
 
@@ -253,6 +249,9 @@ def _compute_crc32(path: str) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             val = zlib.crc32(chunk, val)
     return format(val & 0xFFFFFFFF, "08x")
+
+
+current_photo_hash: str = _compute_crc32(WATCH_FILE) if os.path.exists(WATCH_FILE) else ""
 
 
 def _sse_notify(message: str = "refresh"):
