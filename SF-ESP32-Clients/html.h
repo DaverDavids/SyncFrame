@@ -86,7 +86,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <button onclick="refreshNow()">&#8635; Refresh the Frame</button>
   </div>
   <div class="image-container">
-    <img id="img" src="/img/current" alt="current photo"/>
+    <img id="img" alt="current photo"/>
   </div>
   <p id="last-updated">No photo loaded yet</p>
   <footer>

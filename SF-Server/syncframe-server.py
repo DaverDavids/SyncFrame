@@ -1279,6 +1279,12 @@ def stream():
                 yield jpeg_bytes
                 last_push = time.time()
                 logging.info(f"Stream initial photo pushed to {mac}")
+                # Drain any duplicate that _push_photo_to_stream_clients may have queued
+                try:
+                    while not q.empty():
+                        q.get_nowait()
+                except Exception:
+                    pass
             except Exception as e:
                 logging.warning(f"Failed to push initial photo to {mac}: {e}")
         
@@ -1950,6 +1956,7 @@ if __name__ == "__main__":
             "--workers", "1",
             "--bind", f"{SERVER_HOST}:{SERVER_PORT}",
             "--timeout", "0",
+            "--log-level", "warning",
         ]
         if USE_HTTPS:
             gunicorn_args += ["--keyfile", KEYFILE, "--certfile", CERTFILE]

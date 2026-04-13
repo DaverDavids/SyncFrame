@@ -135,7 +135,10 @@ static void handleActionReboot();
 // Web Authentication
 // ============================================================
 static bool requireWebAuth() {
-  if (ESP.getFreeHeap() < 20000) {
+  bool imgEndpoint = false;
+  if (server.uri().startsWith("/img/")) imgEndpoint = true;
+  int threshold = imgEndpoint ? 10000 : 20000;
+  if (ESP.getFreeHeap() < threshold) {
     server.send(503, "application/json", "{\"ok\":false,\"err\":\"low memory\"}");
     return false;
   }
@@ -676,6 +679,11 @@ static void mjpegTask(void* pv) {
     lastDataMs = millis();
   	
     while (client->connected() || client->available()) {
+      if (mjpegRequestRefresh) {
+        mjpegRequestRefresh = false;
+        logEvent("STREAM", "refresh requested, reconnecting");
+        break;
+      }
       if (millis() - lastDataMs > 90000) {
         logEvent("STREAM", "idle timeout");
         break;
@@ -819,8 +827,9 @@ static void mjpegTask(void* pv) {
 
 static void mjpegMaybeReconnect() {
   if (mjpegConnected) {
-    if (millis() - lastMjpegConnectMs >= 120000UL) {
-      mjpegForceReconnect = true;
+    if (mjpegForceReconnect ||
+        millis() - lastMjpegConnectMs >= 120000UL) {
+      mjpegRequestRefresh = true;
     }
     return;
   }
