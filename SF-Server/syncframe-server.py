@@ -1203,7 +1203,8 @@ def sse_stream():
 def stream():
     """MJPEG-style streaming endpoint for client device communication."""
     hostname = (request.headers.get("X-SF-Hostname") or "").strip()
-    mac = (request.headers.get("X-SF-MAC") or "").strip().upper()
+    mac_raw = (request.headers.get("X-SF-MAC") or "").strip().upper()
+    mac = mac_raw.replace(":", "")  # strip colons
     uptime = (request.headers.get("X-SF-Uptime") or "").strip()
     compiled = (request.headers.get("X-SF-Compiled") or "").strip()
     photo_hash = (request.headers.get("X-SF-Photo-Hash") or "").strip()
@@ -1234,6 +1235,44 @@ def stream():
         nonlocal mac
         last_push = time.time()
         q = connected_stream_clients[mac]["queue"]
+        
+        # OTA check: before entering keepalive loop, check for pending firmware
+        clients = _load_clients()
+        client_data = clients.get(hostname)
+        if client_data and client_data.get("firmware"):
+            fw_path = os.path.join(FIRMWARE_DIR, client_data["firmware"])
+            fw_compile_id = client_data.get("fw_compile_id", "")
+            if os.path.exists(fw_path) and fw_compile_id != compiled:
+                try:
+                    with open(fw_path, "rb") as f:
+                        fw_data = f.read()
+                    fw_len = len(fw_data)
+                    yield f"--frame\r\nContent-Type: application/octet-stream\r\nX-SF-Frame-Type: ota\r\nContent-Length: {fw_len}\r\n\r\n".encode()
+                    yield fw_data
+                    yield b"--frame--\r\n"
+                    logging.info(f"Stream OTA pushed to {hostname}: {client_data['firmware']}")
+                    with _stream_lock:
+                        if mac in connected_stream_clients:
+                            del connected_stream_clients[mac]
+                    return
+                except Exception as e:
+                    logging.warning(f"Failed to push OTA to {hostname}: {e}")
+        
+        # Photo check: if photo_hash differs, push current photo immediately
+        if photo_hash and photo_hash != current_photo_hash and current_photo_hash:
+            variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{resolution[0]}x{resolution[1]}.jpg")
+            if not os.path.exists(variant_file):
+                variant_file = WATCH_FILE
+            try:
+                with open(variant_file, "rb") as f:
+                    jpeg_bytes = f.read()
+                yield f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpeg_bytes)}\r\n\r\n".encode()
+                yield jpeg_bytes
+                last_push = time.time()
+                logging.info(f"Stream initial photo pushed to {mac}")
+            except Exception as e:
+                logging.warning(f"Failed to push initial photo to {mac}: {e}")
+        
         try:
             while True:
                 try:
@@ -1248,8 +1287,6 @@ def stream():
                     if item == b"_keepalive_":
                         yield b"--frame\r\n\r\n"
                         last_push = time.time()
-                    elif item == b"_ota_":
-                        pass
                     else:
                         yield f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(item)}\r\n\r\n".encode()
                         yield item
@@ -1270,15 +1307,23 @@ def stream():
 
 
 def _update_ota_client(mac, compiled, resolution, hostname, uptime):
-    """Update OTA clients JSON with stream client info."""
+    """Update OTA clients JSON with stream client info. Uses hostname as key, preserves existing fields."""
     clients = _load_clients()
-    clients[mac] = {
-        "hostname": hostname,
-        "compiled": compiled,
-        "resolution": f"{resolution[0]}x{resolution[1]}",
-        "uptime": uptime,
-        "last_seen": int(time.time()),
-    }
+    # Use hostname as key (consistent with OTA admin page)
+    if hostname in clients:
+        # Merge with existing record, preserve firmware fields
+        clients[hostname]["compiled"] = compiled
+        clients[hostname]["resolution"] = f"{resolution[0]}x{resolution[1]}"
+        clients[hostname]["uptime"] = uptime
+        clients[hostname]["last_seen"] = int(time.time())
+    else:
+        clients[hostname] = {
+            "hostname": hostname,
+            "compiled": compiled,
+            "resolution": f"{resolution[0]}x{resolution[1]}",
+            "uptime": uptime,
+            "last_seen": int(time.time()),
+        }
     _save_clients(clients)
 
 

@@ -88,20 +88,14 @@ bool networkServicesStarted = false;
 static bool webServerStarted = false;
 
 unsigned long lastWifiAttemptMs  = 0;
-String lastDownloadErr = "";
-unsigned long lastDownloadMs = 0;
-volatile bool lastDownloadOk = false;
+bool wifiEverConnected  = false;
 
+// Note: currentJpg/lastJpg no longer used for streaming, but kept for /img endpoints
 uint8_t* currentJpg    = nullptr;
 size_t   currentJpgLen = 0;
 uint8_t* lastJpg       = nullptr;
 size_t   lastJpgLen    = 0;
 bool showingLast        = false;
-bool wifiEverConnected  = false;
-
-static TaskHandle_t otaTaskHandle  = nullptr;
-static volatile bool otaInProgress = false;
-static volatile bool photoTaskRunning = false;
 
 // Stream (mjpeg)
 static WiFiClientSecure* streamClient     = nullptr;
@@ -569,10 +563,6 @@ static void handlePortalLoop() {
   }
 }
 
-// ============================================================
-// HTTP photo download
-// ============================================================
-
 // Returns true if this build has PSRAM available at runtime.
 static inline bool hasPsram() {
 #if defined(BOARD_HAS_PSRAM)
@@ -580,399 +570,6 @@ static inline bool hasPsram() {
 #else
   return false;
 #endif
-}
-
-static bool httpDownloadToBuffer(uint8_t** outBuf, size_t* outLen, String* outErr) {
-  *outBuf = nullptr;
-  *outLen = 0;
-  if (outErr) *outErr = "";
-
-  String url = makePhotoUrl();
-  if (!url.startsWith("https://") && !url.startsWith("http://")) {
-    if (outErr) *outErr = "URL must start with http:// or https://";
-    logEvent("PHOTO", "bad url %s", url.c_str());
-    return false;
-  }
-
-  logEvent("PHOTO", "GET %s heap=%u", url.c_str(), (unsigned)ESP.getFreeHeap());
-
-  WiFiClientSecure* secureClient = nullptr;
-  WiFiClient*       plainClient  = nullptr;
-  HTTPClient*       http         = new HTTPClient();
-  if (!http) { if (outErr) *outErr = "alloc failed"; return false; }
-
-  http->setConnectTimeout(4000);
-  http->setTimeout(5000);
-
-  bool isHttps = url.startsWith("https://");
-  bool beginOk = false;
-
-  if (isHttps) {
-    secureClient = new WiFiClientSecure();
-    if (!secureClient) { delete http; if (outErr) *outErr = "alloc failed"; return false; }
-    secureClient->setTimeout(5);
-    if (cfg.httpsInsecure) secureClient->setInsecure();
-    beginOk = http->begin(*secureClient, url);
-  } else {
-    plainClient = new WiFiClient();
-    if (!plainClient) { delete http; if (outErr) *outErr = "alloc failed"; return false; }
-    plainClient->setTimeout(5);
-    beginOk = http->begin(*plainClient, url);
-  }
-
-  if (!beginOk) {
-    if (outErr) *outErr = "http.begin failed";
-    delete http; delete secureClient; delete plainClient;
-    return false;
-  }
-
-  if (cfg.httpUser.length() > 0)
-    http->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
-
-  int code = http->GET();
-  if (code != HTTP_CODE_OK) {
-    String err = (code < 0) ? http->errorToString(code) : ("HTTP " + String(code));
-    if (outErr) *outErr = err;
-    logEvent("HTTP", "GET failed %s", err.c_str());
-    http->end(); delete http; delete secureClient; delete plainClient;
-    return false;
-  }
-
-  int64_t total = http->getSize();
-  if (total > (int64_t)MAX_JPG) {
-    if (outErr) *outErr = "image too large";
-    http->end(); delete http; delete secureClient; delete plainClient;
-    return false;
-  }
-
-  WiFiClient* stream = http->getStreamPtr();
-  uint8_t* buf = nullptr;
-  size_t readTotal = 0;
-  unsigned long lastProgressMs = millis();
-
-  if (hasPsram()) {
-    // ---- PSRAM path (S3): single up-front alloc for speed ----
-    size_t allocSize = (total > 0) ? (size_t)total : MAX_JPG;
-    buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-      // Fallback: try internal heap (shouldn't be needed on S3 but be safe)
-      buf = (uint8_t*)malloc(allocSize);
-    }
-    if (!buf) {
-      if (outErr) *outErr = "out of memory";
-      logEvent("PHOTO", "PSRAM alloc failed allocSize=%u psramFree=%u", (unsigned)allocSize, (unsigned)ESP.getFreePsram());
-      http->end(); delete http; delete secureClient; delete plainClient;
-      return false;
-    }
-
-    while ((http->connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
-      size_t avail = stream->available();
-      if (!avail) { delay(1); continue; }
-      size_t toRead = avail;
-      if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
-      if (toRead == 0) {
-        free(buf); if (outErr) *outErr = "image too large";
-        http->end(); delete http; delete secureClient; delete plainClient;
-        return false;
-      }
-      int n = stream->readBytes(buf + readTotal, toRead);
-      if (n <= 0) break;
-      readTotal += (size_t)n;
-      lastProgressMs = millis();
-      if (total > 0 && readTotal >= (size_t)total) break;
-    }
-
-  } else {
-    // ---- No-PSRAM path (C3): stream into growable internal-heap chunks ----
-    // Start with a small chunk and grow as needed to avoid early OOM on limited heap
-    static const size_t CHUNK = 4096;
-	static const size_t C3_MAX_PREALLOC = 20480;
-	size_t allocSize = (total > 0 && (size_t)total <= C3_MAX_PREALLOC)
-					   ? (size_t)total
-					   : CHUNK;
-	if (allocSize > MAX_JPG) allocSize = MAX_JPG;
-	buf = (uint8_t*)malloc(allocSize);
-    if (!buf) {
-      if (outErr) *outErr = "out of memory";
-      logEvent("PHOTO", "C3 initial alloc failed allocSize=%u heapFree=%u", (unsigned)allocSize, (unsigned)ESP.getFreeHeap());
-      http->end(); delete http; delete secureClient; delete plainClient;
-      return false;
-    }
-
-    while ((http->connected() || stream->available()) && (millis() - lastProgressMs) < 5000) {
-      size_t avail = stream->available();
-      if (!avail) { delay(1); continue; }
-
-      // Grow buffer if needed (only when Content-Length was unknown)
-      if (readTotal + avail > allocSize) {
-        size_t needed = readTotal + avail;
-        if (needed > MAX_JPG) needed = MAX_JPG;
-        if (needed > allocSize) {
-          // Round up to next CHUNK boundary
-          size_t newSize = ((needed + CHUNK - 1) / CHUNK) * CHUNK;
-          if (newSize > MAX_JPG) newSize = MAX_JPG;
-          uint8_t* newBuf = (uint8_t*)realloc(buf, newSize);
-          if (!newBuf) {
-            // Can't grow further — return what we have if it looks like a valid JPEG
-            logEvent("PHOTO", "C3 realloc failed at %u bytes, stopping read", (unsigned)readTotal);
-            break;
-          }
-          buf = newBuf;
-          allocSize = newSize;
-        }
-      }
-
-      size_t toRead = avail;
-      if (readTotal + toRead > allocSize) toRead = allocSize - readTotal;
-      if (toRead == 0) break;
-
-      int n = stream->readBytes(buf + readTotal, toRead);
-      if (n <= 0) break;
-      readTotal += (size_t)n;
-      lastProgressMs = millis();
-      if (total > 0 && readTotal >= (size_t)total) break;
-    }
-  }
-
-  http->end(); delete http; delete secureClient; delete plainClient;
-
-  if ((total > 0 && readTotal != (size_t)total) || readTotal < 16) {
-    free(buf); if (outErr) *outErr = "short read";
-    logEvent("PHOTO", "short read %u/%u", (unsigned)readTotal, (unsigned)((total > 0) ? total : 0));
-    return false;
-  }
-
-  *outBuf = buf;
-  *outLen = readTotal;
-  logEvent("PHOTO", "download ok bytes=%u heap=%u", (unsigned)readTotal, (unsigned)ESP.getFreeHeap());
-  return true;
-}
-
-// Single-GET download + show.
-// If the new image bytes are identical to what is already displayed: redraw in place (no rotation).
-// If different: rotate buffers and show new image.
-static bool downloadAndShowPhoto() {
-  if (otaInProgress) return false;
-
-  if (WiFi.status() != WL_CONNECTED) {
-    lastDownloadOk  = false;
-    lastDownloadErr = "no wifi";
-    logEvent("PHOTO", "skipped no wifi");
-    return false;
-  }
-
-  if (!currentJpg && !lastJpg) board_draw_boot_status("Downloading Photo...");
-
-  // Rotate buffers BEFORE download on no-PSRAM builds to free currentJpg before allocation
-  if (!hasPsram()) {
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      freeBuf(lastJpg, lastJpgLen);
-      lastJpg       = currentJpg;
-      lastJpgLen    = currentJpgLen;
-      currentJpg    = nullptr;
-      currentJpgLen = 0;
-      xSemaphoreGive(drawMutex);
-    }
-  }
-
-  uint8_t* newBuf = nullptr;
-  size_t   newLen = 0;
-  String   err;
-
-  bool ok = httpDownloadToBuffer(&newBuf, &newLen, &err);
-  lastDownloadMs = millis();
-
-  if (!ok) {
-    lastDownloadOk  = false;
-    lastDownloadErr = err;
-    logEvent("PHOTO", "download failed %s", err.c_str());
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      if (currentJpg && currentJpgLen)       board_draw_jpeg(currentJpg, currentJpgLen);
-      else if (lastJpg && lastJpgLen)         board_draw_jpeg(lastJpg, lastJpgLen);
-      else board_draw_boot_status((String("Download failed: ") + err).c_str());
-      boardDrawActive = false;
-      xSemaphoreGive(drawMutex);
-    }
-    return false;
-  }
-
-  // Same image already on screen — just redraw, no rotation
-  if (currentJpg && newLen == currentJpgLen && memcmp(newBuf, currentJpg, newLen) == 0) {
-    free(newBuf);
-    lastDownloadOk  = true;
-    lastDownloadErr = "";
-    logEvent("PHOTO", "same image, redraw bytes=%u", (unsigned)newLen);
-    showingLast = false;
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      board_draw_jpeg(currentJpg, currentJpgLen);
-      boardDrawActive = false;
-      xSemaphoreGive(drawMutex);
-    }
-    return true;
-  }
-
-  // New image — on PSRAM builds rotate, on no-PSRAM just assign (already rotated above)
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    if (hasPsram()) {
-      freeBuf(lastJpg, lastJpgLen);
-      lastJpg       = currentJpg;
-      lastJpgLen    = currentJpgLen;
-    }
-    // On no-PSRAM, currentJpg was already moved to lastJpg before download, so just assign newBuf
-    currentJpg    = newBuf;
-    currentJpgLen = newLen;
-    lastDownloadOk  = true;
-    lastDownloadErr = "";
-    showingLast = false;
-    board_draw_jpeg(currentJpg, currentJpgLen);
-    boardDrawActive = false;
-    xSemaphoreGive(drawMutex);
-  }
-  logEvent("PHOTO", "showing new photo bytes=%u", (unsigned)newLen);
-  return true;
-}
-
-static void spawnPhotoTask() {
-  portENTER_CRITICAL(&logMux);
-  if (photoTaskRunning || otaInProgress) {
-    portEXIT_CRITICAL(&logMux);
-    return;
-  }
-  photoTaskRunning = true;
-  portEXIT_CRITICAL(&logMux);
-  xTaskCreatePinnedToCore(
-    [](void* param) {
-      downloadAndShowPhoto();
-      portENTER_CRITICAL(&logMux);
-      photoTaskRunning = false;
-      portEXIT_CRITICAL(&logMux);
-      vTaskDelete(NULL);
-    },
-    "photoTask", 16384, NULL, 1, NULL, APP_CORE
-  );
-}
-
-// ============================================================
-// Background OTA update task
-// ============================================================
-static void otaUpdateTask(void* pv) {
-  boardDrawActive = true;
-  while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(5000));
-  vTaskDelay(pdMS_TO_TICKS(30000));
-
-  for (;;) {
-    char     updateUrlSnap[256] = {};
-    uint32_t intervalMinSnap    = DEFAULT_UPDATE_INTERVAL_MIN;
-    strncpy(updateUrlSnap, cfg.updateUrl.c_str(), sizeof(updateUrlSnap) - 1);
-    intervalMinSnap = cfg.updateIntervalMin;
-
-    uint32_t intervalMs = intervalMinSnap * 60UL * 1000UL;
-    if (intervalMs == 0) intervalMs = 3600000UL;
-
-    if (updateUrlSnap[0] != '\0' && WiFi.status() == WL_CONNECTED && !otaInProgress) {
-      logEvent("OTA", "checking %s compileId=%s", updateUrlSnap, compileIdStr);
-
-      HTTPClient*       http  = new HTTPClient();
-      WiFiClientSecure* sec   = nullptr;
-      WiFiClient*       plain = nullptr;
-
-      if (http) {
-        http->setConnectTimeout(10000);
-        http->setTimeout(60000);
-        bool ok = false;
-        bool isHttps = (strncmp(updateUrlSnap, "https://", 8) == 0);
-        if (isHttps) {
-          sec = new WiFiClientSecure();
-          if (sec) { sec->setInsecure(); ok = http->begin(*sec, updateUrlSnap); }
-        } else {
-          plain = new WiFiClient();
-          if (plain) ok = http->begin(*plain, updateUrlSnap);
-        }
-
-        if (ok) {
-          char macNaked[13] = {};
-          int mi = 0;
-          for (int i = 0; MAC_STR[i] && mi < 12; i++) {
-            if (MAC_STR[i] != ':') macNaked[mi++] = MAC_STR[i];
-          }
-          char uptimeBuf[16];
-          snprintf(uptimeBuf, sizeof(uptimeBuf), "%lu",
-                   (unsigned long)((millis() - bootTimeMs) / 1000));
-          http->addHeader("X-SF-Hostname", HOSTNAME);
-          http->addHeader("X-SF-MAC",      macNaked);
-          http->addHeader("X-SF-Compiled", compileIdStr);
-          http->addHeader("X-SF-Uptime",   uptimeBuf);
-
-          int code = http->GET();
-
-          if (code == 204) {
-            logEvent("OTA", "no update (204)");
-            http->end(); delete http; delete sec; delete plain;
-          } else if (code == HTTP_CODE_OK) {
-            int32_t fwSize = http->getSize();
-            if (fwSize <= 0) {
-              logEvent("OTA", "200 but no Content-Length, aborting");
-              http->end(); delete http; delete sec; delete plain;
-            } else {
-              WiFiClient* fwStream = http->getStreamPtr();
-              if (!fwStream) {
-                logEvent("OTA", "null fw stream");
-                http->end(); delete http; delete sec; delete plain;
-              } else {
-                otaInProgress = true;
-                logEvent("OTA", "starting flash size=%d", fwSize);
-                bool flashed = false;
-                if (xSemaphoreTake(drawMutex, portMAX_DELAY) == pdTRUE) {
-                  if (Update.begin((size_t)fwSize)) {
-                    size_t written = Update.writeStream(*fwStream);
-                    if (Update.end() && Update.isFinished()) {
-                      logEvent("OTA", "flash ok bytes=%u", (unsigned)written);
-                      flashed = true;
-                    } else {
-                      logEvent("OTA", "Update.end error: %s", Update.errorString());
-                    }
-                  } else {
-                    logEvent("OTA", "Update.begin error: %s", Update.errorString());
-                  }
-                  xSemaphoreGive(drawMutex);
-                }
-                http->end(); delete http; delete sec; delete plain;
-                if (flashed) {
-                  saveInstalledFw(compileIdStr, compileIdStr);
-                  delay(1500);
-                  ESP.restart();
-                }
-                otaInProgress = false;
-              }
-            }
-          } else {
-            logEvent("OTA", "unexpected HTTP code=%d", code);
-            http->end(); delete http; delete sec; delete plain;
-          }
-        } else {
-          logEvent("OTA", "http.begin failed");
-          http->end(); delete http; delete sec; delete plain;
-        }
-      }
-    }
-
-    uint32_t elapsed = 0;
-    while (elapsed < intervalMs) {
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      elapsed += 1000;
-      if (cfg.updateIntervalMin * 60UL * 1000UL != intervalMs) break;
-    }
-  }
-  boardDrawActive = false;
-}
-
-static void startOtaTask() {
-  if (cfg.updateUrl.length() == 0) return;
-  if (cfg.updateIntervalMin == 0) return;
-  if (otaTaskHandle != nullptr) return;
-  xTaskCreatePinnedToCore(otaUpdateTask, "ota_check", 8192, nullptr, 1, &otaTaskHandle, APP_CORE);
-  logEvent("OTA", "task started interval=%umin url=%s compileId=%s",
-           (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
 
 // ---------------------- MJPEG Stream ----------------------
@@ -1004,7 +601,6 @@ static void mjpegTask(void* pv) {
 
   if (!host.startsWith("/")) {
     String path = (slashPos > 0) ? url.substring(slashPos) : "/";
-    path += "?1";
 
     WiFiClient* client = streamClient;
     if (!client) {
@@ -1020,11 +616,18 @@ static void mjpegTask(void* pv) {
       return;
     }
 
+    // Build MAC without colons
+    char macNaked[13] = {};
+    int mi = 0;
+    for (int i = 0; MAC_STR[i] && mi < 12; i++) {
+      if (MAC_STR[i] != ':') macNaked[mi++] = MAC_STR[i];
+    }
+
     client->print("GET " + path + " HTTP/1.1\r\n");
     client->print("Host: " + host + "\r\n");
     client->print("User-Agent: SyncFrame/1.0\r\n");
     client->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
-    client->print("X-SF-MAC: " + String(MAC_STR) + "\r\n");
+    client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
     client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
     client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
     client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
@@ -1110,6 +713,22 @@ static void mjpegTask(void* pv) {
 
       uint8_t* buf = nullptr;
       size_t allocSize = contentLength;
+      static const size_t C3_MAX_PREALLOC = 20480;
+      if (!hasPsram() && contentLength > C3_MAX_PREALLOC) {
+        logEvent("STREAM", "frame too large %d, draining", contentLength);
+        size_t drain = contentLength;
+        while (drain > 0 && client->connected()) {
+          size_t avail = client->available();
+          if (avail == 0) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+          size_t toRead = (drain < avail) ? drain : avail;
+          uint8_t tmp[256];
+          client->read(tmp, toRead);
+          drain -= toRead;
+        }
+        lastDataMs = millis();
+        continue;
+      }
+
       if (hasPsram()) {
         buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!buf) buf = (uint8_t*)malloc(allocSize);
