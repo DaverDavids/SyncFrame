@@ -633,10 +633,10 @@ static void mjpegTask(void* pv) {
     client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
     if (cfg.httpUser.length() > 0) {
       String auth = cfg.httpUser + ":" + cfg.httpPass;
-      int len = auth.length();
+      size_t len = auth.length();
       uint8_t* buf = (uint8_t*)malloc(len * 2);
       if (buf) {
-        int outLen = 0;
+        size_t outLen = 0;
         mbedtls_base64_encode(buf, len * 2, &outLen, (const uint8_t*)auth.c_str(), len);
         client->print("Authorization: Basic ");
         client->write(buf, outLen);
@@ -686,9 +686,13 @@ static void mjpegTask(void* pv) {
         String line = client->readStringUntil('\n');
         if (line.length() <= 1) break;
         if (line.startsWith("Content-Length:")) {
-          contentLength = line.substring(15).trim().toInt();
+          String val = line.substring(15);
+          val.trim();
+          contentLength = val.toInt();
         } else if (line.startsWith("X-SF-Frame-Type:")) {
-          frameType = line.substring(16).trim();
+          String val = line.substring(16);
+          val.trim();
+          frameType = val;
         }
       }
 
