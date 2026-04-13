@@ -604,9 +604,9 @@ static void mjpegTask(void* pv) {
   WiFiClient* client = streamClient;
   if (!client) {
     client = new WiFiClientSecure();
-    if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
     streamClient = (WiFiClientSecure*)client;
   }
+  if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
 
   if (!client->connect(host.c_str(), port)) {
     logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
