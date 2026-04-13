@@ -179,6 +179,12 @@ KEYFILE = os.path.abspath(
     config.get("server", "keyfile", fallback=default_config["server"]["keyfile"])
 )
 
+if USE_HTTPS:
+    try:
+        ensure_certificates(CERTFILE, KEYFILE)
+    except Exception as _cert_err:
+        logging.error("Could not generate TLS certificates: %s", _cert_err)
+
 _raw_prefix = config.get(
     "server", "url_prefix", fallback=default_config["server"]["url_prefix"]
 ).strip()
@@ -1907,13 +1913,6 @@ def _do_startup():
         logging.warning(
             "mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start."
         )
-
-    # Ensure TLS certs exist before gunicorn serves any HTTPS
-    if USE_HTTPS:
-        try:
-            ensure_certificates(CERTFILE, KEYFILE)
-        except Exception as e:
-            logging.error("Could not generate TLS certificates: %s", e)
 
     logging.info("Watcher started. Monitoring file changes on %s...", WATCH_FILE)
     logging.info('URL prefix is: "%s"', URL_PREFIX or "/")

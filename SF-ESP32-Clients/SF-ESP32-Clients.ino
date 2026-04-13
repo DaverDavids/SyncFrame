@@ -629,22 +629,21 @@ static void mjpegTask(void* pv) {
   client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
   client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
   client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
-  {
-    client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
-    client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
-    if (cfg.httpUser.length() > 0) {
-      String auth = cfg.httpUser + ":" + cfg.httpPass;
-      size_t len = auth.length();
-      uint8_t* buf = (uint8_t*)malloc(len * 2);
-      if (buf) {
-        size_t outLen = 0;
-        mbedtls_base64_encode(buf, len * 2, &outLen, (const uint8_t*)auth.c_str(), len);
-        client->print("Authorization: Basic ");
-        client->write(buf, outLen);
-        client->print("\r\n");
-        free(buf);
-      }
-    }
+  client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
+  client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
+  if (cfg.httpUser.length() > 0) {
+	String auth = cfg.httpUser + ":" + cfg.httpPass;
+	size_t len = auth.length();
+	uint8_t* buf = (uint8_t*)malloc(len * 2);
+	if (buf) {
+		size_t outLen = 0;
+		mbedtls_base64_encode(buf, len * 2, &outLen, (const uint8_t*)auth.c_str(), len);
+		client->print("Authorization: Basic ");
+		client->write(buf, outLen);
+		client->print("\r\n");
+		free(buf);
+	}
+	}
     client->print("Connection: keep-alive\r\n");
     client->print("\r\n");
 
@@ -786,8 +785,8 @@ static void mjpegTask(void* pv) {
     }
     client->stop();
 	if (streamClient) {
-    delete streamClient;
-    streamClient = nullptr;
+		delete streamClient;
+		streamClient = nullptr;
   }
 
   mjpegConnected = false;
