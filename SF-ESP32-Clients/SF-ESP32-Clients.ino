@@ -783,7 +783,7 @@ static void mjpegTask(void* pv) {
       free(buf);
       if (!client->connected()) break;
     }
-
+  }
     client->stop();
   }
 
