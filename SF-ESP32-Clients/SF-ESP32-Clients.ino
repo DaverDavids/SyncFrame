@@ -813,12 +813,10 @@ static void mjpegTask(void* pv) {
 
     stream_done:
     client->stop();
-	if (streamClient) {
-		delete streamClient;
-		streamClient = nullptr;
-  }
+    delete client;
+    streamClient = nullptr;
 
-  mjpegConnected = false;
+    mjpegConnected = false;
   logEvent("STREAM", "task ended");
   vTaskDelete(NULL);
 }
@@ -831,12 +829,6 @@ static void mjpegMaybeReconnect() {
     return;
   }
   if (mjpegForceReconnect) {
-    if (streamClient) {
-      streamClient->stop();
-	  delete streamClient;
-      streamClient = nullptr;
-      delay(200);
-    }
     mjpegForceReconnect = false;
     lastMjpegAttemptMs = 0;
   }
