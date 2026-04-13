@@ -12,6 +12,7 @@ import struct
 import subprocess
 import threading
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from io import BytesIO
@@ -232,11 +233,26 @@ if not photo_upload_etag:
     photo_upload_etag = secrets.token_hex(8)
     _save_photo_etag(photo_upload_etag)
 
+if os.path.exists(WATCH_FILE):
+    current_photo_hash = _compute_crc32(WATCH_FILE)
+
 # ---------------------------------------------------------------------------
 # SSE (Server-Sent Events) subscriber registry
 # ---------------------------------------------------------------------------
 _sse_subscribers: list[queue.SimpleQueue] = []
 _sse_lock = threading.Lock()
+
+current_photo_hash: str = ""          # CRC32 hex of current photo.jpg
+connected_stream_clients: dict = {}   # keyed by MAC → {"response": <Response obj>, "resolution": (w,h), "hostname": str, "uptime": int, "compiled": str}
+_stream_lock = threading.Lock()
+
+
+def _compute_crc32(path: str) -> str:
+    val = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            val = zlib.crc32(chunk, val)
+    return format(val & 0xFFFFFFFF, "08x")
 
 
 def _sse_notify(message: str = "refresh"):
@@ -250,6 +266,25 @@ def _sse_notify(message: str = "refresh"):
                 dead.append(q)
         for q in dead:
             _sse_subscribers.remove(q)
+
+
+def _push_photo_to_stream_clients():
+    """Push new photo to all connected stream clients."""
+    with _stream_lock:
+        clients_snapshot = dict(connected_stream_clients)
+
+    for mac, client in clients_snapshot.items():
+        resolution = client.get("resolution", (800, 480))
+        variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{resolution[0]}x{resolution[1]}.jpg")
+        if not os.path.exists(variant_file):
+            variant_file = WATCH_FILE
+        try:
+            with open(variant_file, "rb") as f:
+                jpeg_bytes = f.read()
+            client["queue"].put_nowait(jpeg_bytes)
+            logging.info(f"Pushed photo to stream client {mac}")
+        except Exception as e:
+            logging.warning(f"Failed to push photo to {mac}: {e}")
 
 
 RESOLUTIONS = [
@@ -763,6 +798,9 @@ class Handler(FileSystemEventHandler):
             logging.info(f"File {event.src_path} has been modified")
             send_mqtt_message("refresh")
             _sse_notify("refresh")
+            global current_photo_hash
+            current_photo_hash = _compute_crc32(WATCH_FILE)
+            _push_photo_to_stream_clients()
 
 
 def send_mqtt_message(message):
@@ -1073,6 +1111,9 @@ def upload_file():
         photo_upload_etag = secrets.token_hex(8)
         _save_photo_etag(photo_upload_etag)
         generate_thumbnails(source_img=img)
+        global current_photo_hash
+        current_photo_hash = _compute_crc32(target_path)
+        _push_photo_to_stream_clients()
         return redirect(url_for("syncframe.index"))
     except Exception as e:
         logging.error("Upload failed: %s", e)
@@ -1155,6 +1196,90 @@ def sse_stream():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@bp.route("/stream")
+@requires_auth
+def stream():
+    """MJPEG-style streaming endpoint for client device communication."""
+    hostname = (request.headers.get("X-SF-Hostname") or "").strip()
+    mac = (request.headers.get("X-SF-MAC") or "").strip().upper()
+    uptime = (request.headers.get("X-SF-Uptime") or "").strip()
+    compiled = (request.headers.get("X-SF-Compiled") or "").strip()
+    photo_hash = (request.headers.get("X-SF-Photo-Hash") or "").strip()
+    resolution_str = (request.headers.get("X-SF-Resolution") or "").strip()
+    resolution = (800, 480)  # default
+    if resolution_str:
+        try:
+            parts = resolution_str.lower().split("x")
+            if len(parts) == 2:
+                resolution = (int(parts[0]), int(parts[1]))
+        except Exception:
+            pass
+
+    logging.info(f"Stream connect: mac={mac} hostname={hostname} resolution={resolution} compiled={compiled}")
+
+    with _stream_lock:
+        connected_stream_clients[mac] = {
+            "resolution": resolution,
+            "hostname": hostname,
+            "uptime": uptime,
+            "compiled": compiled,
+            "queue": queue.SimpleQueue(),
+        }
+
+    _update_ota_client(mac, compiled, resolution, hostname, uptime)
+
+    def generate():
+        nonlocal mac
+        last_push = time.time()
+        q = connected_stream_clients[mac]["queue"]
+        try:
+            while True:
+                try:
+                    item = q.get(timeout=1.0)
+                except queue.Empty:
+                    if time.time() - last_push >= 60:
+                        yield b"--frame\r\n\r\n"
+                        last_push = time.time()
+                    continue
+
+                if isinstance(item, bytes):
+                    if item == b"_keepalive_":
+                        yield b"--frame\r\n\r\n"
+                        last_push = time.time()
+                    elif item == b"_ota_":
+                        pass
+                    else:
+                        yield f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(item)}\r\n\r\n".encode()
+                        yield item
+                        last_push = time.time()
+        except GeneratorExit:
+            pass
+        finally:
+            with _stream_lock:
+                if mac in connected_stream_clients:
+                    del connected_stream_clients[mac]
+            logging.info(f"Stream disconnect: mac={mac}")
+
+    return Response(
+        generate(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _update_ota_client(mac, compiled, resolution, hostname, uptime):
+    """Update OTA clients JSON with stream client info."""
+    clients = _load_clients()
+    clients[mac] = {
+        "hostname": hostname,
+        "compiled": compiled,
+        "resolution": f"{resolution[0]}x{resolution[1]}",
+        "uptime": uptime,
+        "last_seen": int(time.time()),
+    }
+    _save_clients(clients)
 
 
 def allowed_file(filename):

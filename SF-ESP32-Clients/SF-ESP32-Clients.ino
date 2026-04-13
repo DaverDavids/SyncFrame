@@ -48,9 +48,6 @@ const char SF_COMPILE_ID[] __attribute__((used, section(".rodata"))) = "SFID:" _
 static SemaphoreHandle_t drawMutex = nullptr;
 static unsigned long bootTimeMs = 0;
 
-// Single pending-refresh flag replaces mqttRefreshPending + webRefreshPending + forceRedraw
-static volatile bool refreshPending = false;
-
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 
 DNSServer dnsServer;
@@ -106,11 +103,13 @@ static TaskHandle_t otaTaskHandle  = nullptr;
 static volatile bool otaInProgress = false;
 static volatile bool photoTaskRunning = false;
 
-// SSE
-static WiFiClientSecure* sseClient = nullptr;
-static bool sseConnected = false;
-static unsigned long lastSseAttemptMs = 0;
-static unsigned long lastSseMsgMs = 0;
+// Stream (mjpeg)
+static WiFiClientSecure* streamClient     = nullptr;
+static bool              mjpegConnected   = false;
+static unsigned long     lastMjpegConnectMs = 0;
+static unsigned long     lastMjpegAttemptMs = 0;
+static bool              mjpegForceReconnect = false;
+static char              currentPhotoHash[12] = "";
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
@@ -278,6 +277,17 @@ static void appendJsonPassword(String& out, const String& pass) {
 static void freeBuf(uint8_t*& p, size_t& n) {
   if (p) { free(p); p = nullptr; }
   n = 0;
+}
+
+static uint32_t crc32buf(const uint8_t* data, size_t len) {
+  uint32_t crc = 0xFFFFFFFF;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; j++) {
+      crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+    }
+  }
+  return ~crc;
 }
 
 static void applyWifiDefaults() {
@@ -965,90 +975,217 @@ static void startOtaTask() {
            (unsigned)cfg.updateIntervalMin, cfg.updateUrl.c_str(), compileIdStr);
 }
 
-// ---------------------- SSE ----------------------
-static void sseTask(void* pv) {
+// ---------------------- MJPEG Stream ----------------------
+static void mjpegTask(void* pv) {
+  (void)pv;
   String url = cfg.photoBaseUrl;
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    url = "https://" + url;
+  }
   if (!url.endsWith("/")) url += "/";
-  url += "events";
+  url += "stream";
 
   bool isHttps = url.startsWith("https://");
-  WiFiClientSecure* sec = nullptr;
-  WiFiClient* plain = nullptr;
-  HTTPClient* http = new HTTPClient();
-
-  http->setConnectTimeout(5000);
-
-  bool ok = false;
-  if (isHttps) {
-    sec = new WiFiClientSecure();
-    if (cfg.httpsInsecure) sec->setInsecure();
-    ok = http->begin(*sec, url);
+  int port = isHttps ? 443 : 80;
+  String host;
+  int slashPos = url.indexOf("/", 8);
+  if (slashPos > 0) {
+    String hostPart = url.substring(8, slashPos);
+    if (hostPart.indexOf(":") > 0) {
+      int colonPos = hostPart.indexOf(":");
+      host = hostPart.substring(0, colonPos);
+      port = hostPart.substring(colonPos + 1).toInt();
+    } else {
+      host = hostPart;
+    }
   } else {
-    plain = new WiFiClient();
-    ok = http->begin(*plain, url);
+    host = url.substring(url.indexOf("//") + 2);
   }
 
-  if (!ok) {
-    logEvent("SSE", "begin failed");
-    goto cleanup;
-  }
+  if (!host.startsWith("/")) {
+    String path = (slashPos > 0) ? url.substring(slashPos) : "/";
+    path += "?1";
 
-  http->addHeader("Accept", "text/event-stream");
-  if (cfg.httpUser.length() > 0)
-    http->setAuthorization(cfg.httpUser.c_str(), cfg.httpPass.c_str());
-
-  {
-    int code = http->GET();
-    if (code != HTTP_CODE_OK) {
-      logEvent("SSE", "GET failed code=%d", code);
-      goto cleanup;
+    WiFiClient* client = streamClient;
+    if (!client) {
+      client = new WiFiClientSecure();
+      if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
+      streamClient = (WiFiClientSecure*)client;
     }
 
-    logEvent("SSE", "connected url=%s", url.c_str());
-    sseConnected = true;
+    if (!client->connect(host.c_str(), port)) {
+      logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
+      mjpegConnected = false;
+      vTaskDelete(NULL);
+      return;
+    }
 
-    WiFiClient* stream = http->getStreamPtr();
-	stream->setTimeout(60);
-    String line;
-    line.reserve(64);
+    client->print("GET " + path + " HTTP/1.1\r\n");
+    client->print("Host: " + host + "\r\n");
+    client->print("User-Agent: SyncFrame/1.0\r\n");
+    client->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
+    client->print("X-SF-MAC: " + String(MAC_STR) + "\r\n");
+    client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
+    client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
+    client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
+    client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
+    if (cfg.httpUser.length() > 0) {
+      String auth = cfg.httpUser + ":" + cfg.httpPass;
+      int len = auth.length();
+      uint8_t* buf = (uint8_t*)malloc(len * 2);
+      if (buf) {
+        int outLen = 0;
+        mbedtls_base64_encode(buf, len * 2, &outLen, (const uint8_t*)auth.c_str(), len);
+        client->print("Authorization: Basic ");
+        client->write(buf, outLen);
+        client->print("\r\n");
+        free(buf);
+      }
+    }
+    client->print("Connection: keep-alive\r\n");
+    client->print("\r\n");
 
-    while (http->connected() || stream->available()) {
-      while (stream->available()) {
-        char c = stream->read();
-        if (c == '\n') {
-          if (line.startsWith("data:")) {
-            lastSseMsgMs = millis();
-            refreshPending = true;
-            logEvent("SSE", "refresh triggered");
-          }
-          line = "";
-        } else if (c != '\r') {
-          line += c;
+    String statusLine = client->readStringUntil('\n');
+    if (!statusLine.startsWith("HTTP/1.1 200")) {
+      logEvent("STREAM", "status %s", statusLine.c_str());
+      client->stop();
+      mjpegConnected = false;
+      vTaskDelete(NULL);
+      return;
+    }
+
+    while (client->connected() && client->available()) {
+      String line = client->readStringUntil('\n');
+      if (line.length() <= 1) break;
+    }
+
+    logEvent("STREAM", "connected");
+    lastMjpegConnectMs = millis();
+    unsigned long lastDataMs = millis();
+
+    while (client->connected() || client->available()) {
+      if (millis() - lastDataMs > 90000) {
+        logEvent("STREAM", "idle timeout");
+        break;
+      }
+
+      String boundary = client->readStringUntil('\n');
+      if (!boundary.startsWith("--frame")) {
+        if (client->available() == 0) {
+          vTaskDelay(pdMS_TO_TICKS(10));
+          continue;
+        }
+        break;
+      }
+
+      int contentLength = 0;
+      String frameType;
+      while (client->connected() && client->available()) {
+        String line = client->readStringUntil('\n');
+        if (line.length() <= 1) break;
+        if (line.startsWith("Content-Length:")) {
+          contentLength = line.substring(15).trim().toInt();
+        } else if (line.startsWith("X-SF-Frame-Type:")) {
+          frameType = line.substring(16).trim();
         }
       }
-      vTaskDelay(pdMS_TO_TICKS(10));
+
+      if (contentLength == 0) {
+        lastDataMs = millis();
+        continue;
+      }
+
+      if (frameType == "ota") {
+        logEvent("STREAM", "OTA frame size=%d", contentLength);
+        if (Update.begin(contentLength)) {
+          size_t written = Update.writeStream(*client);
+          if (Update.end() && Update.isFinished()) {
+            logEvent("STREAM", "OTA flash ok");
+            delay(500);
+            ESP.restart();
+          }
+        }
+        break;
+      }
+
+      uint8_t* buf = nullptr;
+      size_t allocSize = contentLength;
+      if (hasPsram()) {
+        buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!buf) buf = (uint8_t*)malloc(allocSize);
+      } else {
+        if (allocSize > MAX_JPG) allocSize = MAX_JPG;
+        buf = (uint8_t*)malloc(allocSize);
+      }
+
+      if (!buf) {
+        logEvent("STREAM", "alloc failed %d", contentLength);
+        break;
+      }
+
+      size_t remaining = contentLength;
+      size_t readTotal = 0;
+      while (remaining > 0 && client->connected()) {
+        size_t avail = client->available();
+        if (avail == 0) {
+          vTaskDelay(pdMS_TO_TICKS(1));
+          continue;
+        }
+        size_t toRead = (remaining < avail) ? remaining : avail;
+        int n = client->read(buf + readTotal, toRead);
+        if (n <= 0) break;
+        readTotal += n;
+        remaining -= n;
+      }
+
+      if (readTotal == contentLength) {
+        uint32_t computed = crc32buf(buf, readTotal);
+        snprintf(currentPhotoHash, sizeof(currentPhotoHash), "%08lx", (unsigned long)computed);
+        lastDataMs = millis();
+
+        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          board_draw_jpeg(buf, readTotal);
+          boardDrawActive = false;
+          xSemaphoreGive(drawMutex);
+        }
+        logEvent("STREAM", "jpeg frame size=%u hash=%s", (unsigned)readTotal, currentPhotoHash);
+      }
+
+      free(buf);
+      if (!client->connected()) break;
     }
-    logEvent("SSE", "stream ended");
+
+    client->stop();
   }
 
-cleanup:
-  sseConnected = false;
-  http->end();
-  delete http;
-  delete sec;
-  delete plain;
+  mjpegConnected = false;
+  logEvent("STREAM", "task ended");
   vTaskDelete(NULL);
 }
 
-static void sseMaybeReconnect() {
-  if (sseConnected) return;
+static void mjpegMaybeReconnect() {
+  if (mjpegConnected) {
+    if (millis() - lastMjpegConnectMs >= 600000UL) {
+      mjpegForceReconnect = true;
+    }
+    return;
+  }
+  if (mjpegForceReconnect) {
+    if (streamClient) {
+      streamClient->stop();
+      delay(200);
+    }
+    mjpegForceReconnect = false;
+    lastMjpegAttemptMs = 0;
+  }
   if (WiFi.status() != WL_CONNECTED) return;
-  if (millis() - lastSseAttemptMs < 15000) return;
   if (cfg.photoBaseUrl.length() == 0) return;
+  if (millis() - lastMjpegAttemptMs < 15000) return;
 
-  lastSseAttemptMs = millis();
-  logEvent("SSE", "spawning task");
-  xTaskCreatePinnedToCore(sseTask, "sseTask", 8192, nullptr, 1, nullptr, APP_CORE);
+  lastMjpegConnectMs  = millis();
+  lastMjpegAttemptMs  = millis();
+  mjpegConnected      = true;
+  xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", 16384, nullptr, 1, nullptr, APP_CORE);
 }
 
 // ---------------------- Network services ----------------------
@@ -1091,9 +1228,6 @@ static void startNetworkServicesOnce() {
            mdnsOk ? "on" : "off", hasPsram() ? "yes" : "no", (unsigned)ESP.getFreeHeap());
 
   board_draw_boot_status(("IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR)).c_str());
-
-  startOtaTask();
-  spawnPhotoTask();
 }
 
 static void ensureWifi() {
@@ -1171,13 +1305,10 @@ static void handleStatusJson() {
   j += "\"ip\":\""; appendJsonEscaped(j, wifiOk ? WiFi.localIP().toString() : String("")); j += "\",";
   j += "\"mdns\":";  j += (networkServicesStarted ? "true" : "false"); j += ",";
   j += "\"ota\":";   j += (networkServicesStarted ? "true" : "false"); j += ",";
-  j += "\"sse\":";         j += (sseConnected ? "true" : "false"); j += ",";
-  j += "\"lastDownloadOk\":";  j += (lastDownloadOk ? "true" : "false"); j += ",";
-  j += "\"lastDownloadErr\":\""; appendJsonEscaped(j, lastDownloadErr); j += "\",";
-  j += "\"lastDownloadMs\":"; j += String(lastDownloadMs); j += ",";
-  j += "\"lastSseMsgMs\":"; j += String(lastSseMsgMs); j += ",";
+  j += "\"mjpeg\":";       j += (mjpegConnected ? "true" : "false"); j += ",";
+  j += "\"lastMjpegConnectMs\":"; j += String(lastMjpegConnectMs); j += ",";
+  j += "\"photoHash\":\""; appendJsonEscaped(j, currentPhotoHash); j += "\",";
   j += "\"lastLogSeq\":";     j += String(logSeq); j += ",";
-  j += "\"otaInProgress\":";  j += (otaInProgress ? "true" : "false"); j += ",";
   j += "\"installedFw\":\"";  appendJsonEscaped(j, installedFwFilename); j += "\",";
   j += "\"compiledId\":\"";   appendJsonEscaped(j, compileIdStr); j += "\",";
   j += "\"installedFwId\":\""; appendJsonEscaped(j, installedFwToken); j += "\",";
@@ -1247,9 +1378,7 @@ static void handlePostConfig() {
   if (server.hasArg("webPassClear") && server.arg("webPassClear") == "1")  cfg.webPass  = "";
   cfg.httpsInsecure   = server.hasArg("httpsInsecure");
   saveConfig();
-  sseConnected = false;
-  lastSseAttemptMs = 0;
-  startOtaTask();
+  mjpegForceReconnect = true;
   logEvent("WEB", "config saved");
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -1282,12 +1411,8 @@ static void handleImgLast() {
 
 static void handleActionRefresh() {
   if (!requireWebAuth()) return;
-  if (otaInProgress) {
-    server.send(503, "application/json", "{\"ok\":false,\"err\":\"ota in progress\"}");
-    return;
-  }
   logEvent("WEB", "manual refresh requested");
-  refreshPending = true;
+  mjpegForceReconnect = true;
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -1331,13 +1456,7 @@ void loop() {
       ArduinoOTA.handle();
       if (ESP.getFreeHeap() > 20000) server.handleClient();
 
-      if (!otaInProgress) {
-        sseMaybeReconnect();
-        if (refreshPending) {
-          refreshPending = false;
-          spawnPhotoTask();
-        }
-      }
+      mjpegMaybeReconnect();
     }
   }
 
