@@ -116,6 +116,10 @@ async function refreshNow() {
   await fetch("/api/refresh",{method:"POST",credentials:"include"});
   await poll();
 }
+async function rebootDevice() {
+  if (!confirm("Reboot device?")) return;
+  await fetch("/api/reboot",{method:"POST",credentials:"include"});
+}
 poll();
 setInterval(poll, 2000);
 </script>
@@ -181,6 +185,8 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     .console{margin-top:8px;background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:10px;min-height:200px;max-height:260px;overflow:auto;white-space:pre-wrap;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#a8d8b0;text-align:left}
     .back-link{color:rgba(255,255,255,0.6);text-decoration:none;font-size:0.9em}
     .back-link:hover{color:#fff}
+    .reboot-btn{background:#c00;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;margin-left:auto}
+    .reboot-btn:hover{background:#e00}
     .header-row{display:flex;align-items:center;gap:14px;margin-bottom:16px}
     .small{font-size:0.82em;opacity:0.7}
     .section-divider{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:20px 0 4px}
@@ -194,6 +200,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <h1>Config / Debug</h1>
     <span id="hostnameHint" class="small"></span>
     <a class="back-link" href="/">&larr; Back</a>
+    <button type="button" class="reboot-btn" onclick="rebootDevice()">Reboot</button>
   </div>
 
   <h3>Device Status</h3>

@@ -128,6 +128,7 @@ static void handlePostConfig();
 static void handleImgCurrent();
 static void handleImgLast();
 static void handleActionRefresh();
+static void handleActionReboot();
 
 // ============================================================
 // Web Authentication
@@ -853,6 +854,7 @@ static void startNetworkServicesOnce() {
     server.on("/api/log",     HTTP_GET,  handleLogJson);
     server.on("/api/config",  HTTP_POST, handlePostConfig);
     server.on("/api/refresh", HTTP_POST, handleActionRefresh);
+    server.on("/api/reboot",  HTTP_POST, handleActionReboot);
     server.on("/img/current", HTTP_GET,  handleImgCurrent);
     server.on("/img/last",    HTTP_GET,  handleImgLast);
     setupCoredumpRoute();
@@ -1057,6 +1059,14 @@ static void handleActionRefresh() {
   logEvent("WEB", "manual refresh requested");
   mjpegForceReconnect = true;
   server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handleActionReboot() {
+  if (!requireWebAuth()) return;
+  logEvent("WEB", "reboot requested");
+  server.send(200, "application/json", "{\"ok\":true}");
+  delay(500);
+  ESP.restart();
 }
 
 // ---------------------- Main ----------------------
