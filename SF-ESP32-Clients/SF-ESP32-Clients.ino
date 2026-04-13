@@ -656,9 +656,15 @@ static void mjpegTask(void* pv) {
       return;
     }
 
-    while (client->connected() && client->available()) {
+    // Drain HTTP response headers — wait for data, don't bail early
+    while (client->connected()) {
+      while (!client->available()) {
+        if (!client->connected()) goto stream_done;
+        vTaskDelay(pdMS_TO_TICKS(5));
+      }
       String line = client->readStringUntil('\n');
-      if (line.length() <= 1) break;
+      line.trim();
+      if (line.length() == 0) break; // blank line = end of headers
     }
 
     logEvent("STREAM", "connected");
@@ -671,35 +677,39 @@ static void mjpegTask(void* pv) {
         break;
       }
 
-      String boundary = client->readStringUntil('\n');
-      if (!boundary.startsWith("--frame")) {
-        if (client->available() == 0) {
-          vTaskDelay(pdMS_TO_TICKS(10));
-          continue;
-        }
+      // Wait for boundary line
+      String boundary = "";
+      while (client->connected()) {
+        if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+        boundary = client->readStringUntil('\n');
         break;
       }
+      if (!boundary.startsWith("--frame")) {
+        if (!client->connected()) break;
+        continue;
+      }
 
+      // Drain frame headers
       int contentLength = 0;
       String frameType;
-      while (client->connected() && client->available()) {
+      while (client->connected()) {
+        while (!client->available()) {
+          if (!client->connected()) goto stream_done;
+          vTaskDelay(pdMS_TO_TICKS(5));
+        }
         String line = client->readStringUntil('\n');
-        if (line.length() <= 1) break;
+        line.trim();
+        if (line.length() == 0) break;
         if (line.startsWith("Content-Length:")) {
-          String val = line.substring(15);
-          val.trim();
+          String val = line.substring(15); val.trim();
           contentLength = val.toInt();
         } else if (line.startsWith("X-SF-Frame-Type:")) {
-          String val = line.substring(16);
-          val.trim();
+          String val = line.substring(16); val.trim();
           frameType = val;
         }
       }
 
-      if (contentLength == 0) {
-        lastDataMs = millis();
-        continue;
-      }
+      if (contentLength == 0) { lastDataMs = millis(); continue; }
 
       if (frameType == "ota") {
         logEvent("STREAM", "OTA frame size=%d", contentLength);
@@ -783,6 +793,8 @@ static void mjpegTask(void* pv) {
       free(buf);
       if (!client->connected()) break;
     }
+
+    stream_done:
     client->stop();
 	if (streamClient) {
 		delete streamClient;
