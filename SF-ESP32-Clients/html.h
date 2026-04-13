@@ -96,14 +96,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <a href="/config">Config</a>
   </footer>
 <script>
-let lastImgStamp = 0;
-function formatTimestamp(deviceUptimeMs, lastDownloadMs) {
-  // lastDownloadMs is millis() since boot on the device, NOT a Unix timestamp.
-  // Reconstruct wall-clock time: browser now minus device uptime plus device-relative stamp.
-  if (!lastDownloadMs) return null;
-  var wallMs = Date.now() - deviceUptimeMs + lastDownloadMs;
-  return new Date(wallMs).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
-}
+let lastImgStamp = "";
 async function poll() {
   try {
     const r = await fetch("/api/status",{cache:"no-store",credentials:"include"});
@@ -111,13 +104,11 @@ async function poll() {
     if (s.ip)       document.getElementById("f_ip").textContent   = "IP: "  +s.ip;
     if (s.mac)      document.getElementById("f_mac").textContent  = "MAC: " +s.mac;
     if (s.hostname) document.getElementById("f_host").textContent = "Host: "+s.hostname;
-    if (s.lastDownloadMs) {
-      const ts = formatTimestamp(s.uptimeMs, s.lastDownloadMs);
-      if (ts) document.getElementById("last-updated").textContent = "Last updated: "+ts;
-      if (s.lastDownloadMs !== lastImgStamp) {
-        lastImgStamp = s.lastDownloadMs;
-        document.getElementById("img").src = "/img/current?ts="+lastImgStamp;
-      }
+    if (s.photoHash && s.photoHash !== lastImgStamp) {
+      lastImgStamp = s.photoHash;
+      document.getElementById("img").src = "/img/current?ts="+encodeURIComponent(s.photoHash);
+      document.getElementById("last-updated").textContent =
+        "Last updated: " + new Date().toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
     }
   } catch(e) {}
 }
@@ -201,6 +192,7 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
 <div class="card">
   <div class="header-row">
     <h1>Config / Debug</h1>
+    <span id="hostnameHint" class="small"></span>
     <a class="back-link" href="/">&larr; Back</a>
   </div>
 
@@ -339,9 +331,9 @@ async function loadStatus() {
     const s = await r.json();
     setPill("s_wifi", "WiFi",  !!s.wifi);
     setPill("s_mdns", "mDNS",  !!s.mdns);
-    setPill("s_sse", "SSE",  !!s.sse);
-    setPill("s_dl",   "Photo", !!s.lastDownloadOk);
-    setPill("s_ota",  "OTA",   !s.otaInProgress);
+    setPill("s_mjpeg", "MJPEG", !!s.mjpeg);
+    setPill("s_dl",   "Photo", !!s.photoHash);
+    setPill("s_ota",  "OTA",   true);
     // Uptime pill
     if (s.uptimeMs !== undefined) {
       const el = document.getElementById("s_uptime");
@@ -351,13 +343,9 @@ async function loadStatus() {
     setSpan("ds_mac",   "MAC: " +(s.mac     ||"-"),       null);
     setSpan("ds_ip",    "IP: "  +(s.ip      ||"offline"), null);
     setSpan("ds_wifi",  "WiFi: "+(s.wifi  ?"connected":"disconnected"), !!s.wifi);
-    setSpan("ds_sse",  "SSE: "+(s.sse  ?"connected":"disconnected"), !!s.sse);
-    setSpan("ds_photo", s.lastDownloadOk
-      ? "Photo: ok"
-      : "Photo: failed ("+(s.lastDownloadErr||"unknown")+")",
-      !!s.lastDownloadOk);
-    setSpan("ds_ota", s.otaInProgress?"OTA: flashing...":"OTA: idle",
-      s.otaInProgress?null:true);
+    setSpan("ds_mjpeg", "MJPEG: "+(s.mjpeg?"connected":"disconnected"), !!s.mjpeg);
+    setSpan("ds_photo", "Photo hash: "+(s.photoHash||"none"), !!s.photoHash);
+    setSpan("ds_ota",   "OTA: idle", true);
     if (s.uptimeMs !== undefined)
       setSpan("ds_uptime", "Uptime: "+formatUptime(s.uptimeMs), null);
     if (s.hostname) document.getElementById("hostnameHint").textContent = s.hostname;

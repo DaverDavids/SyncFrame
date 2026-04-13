@@ -529,7 +529,11 @@ def generate_self_signed_cert_py(
         .serial_number(x509.random_serial_number())
         .not_valid_before(datetime.utcnow() - timedelta(days=1))
         .not_valid_after(datetime.utcnow() + timedelta(days=days_valid))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("syncframe"), x509.DNSName("localhost")]),
+            critical=False,
+        )
         .sign(key, hashes.SHA256())
     )
     with open(keyfile, "wb") as f:
