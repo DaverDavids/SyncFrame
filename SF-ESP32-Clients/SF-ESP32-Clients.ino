@@ -99,6 +99,7 @@ static bool              mjpegConnected   = false;
 static unsigned long     lastMjpegConnectMs = 0;
 static unsigned long     lastMjpegAttemptMs = 0;
 static bool              mjpegForceReconnect = false;
+static volatile bool    mjpegRequestRefresh = false;
 static char              currentPhotoHash[12] = "";
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
@@ -673,8 +674,13 @@ static void mjpegTask(void* pv) {
     logEvent("STREAM", "connected");
     lastMjpegConnectMs = millis();
     lastDataMs = millis();
-	
+  	
     while (client->connected() || client->available()) {
+      if (mjpegRequestRefresh) {
+        mjpegRequestRefresh = false;
+        logEvent("STREAM", "refresh requested, reconnecting");
+        break;
+      }
       if (millis() - lastDataMs > 90000) {
         logEvent("STREAM", "idle timeout");
         break;
@@ -774,8 +780,11 @@ static void mjpegTask(void* pv) {
       }
 
       if (readTotal == contentLength) {
+        char oldHash[12];
+        strncpy(oldHash, currentPhotoHash, sizeof(oldHash));
         uint32_t computed = crc32buf(buf, readTotal);
         snprintf(currentPhotoHash, sizeof(currentPhotoHash), "%08lx", (unsigned long)computed);
+        bool changed = strcmp(oldHash, currentPhotoHash) != 0;
         lastDataMs = millis();
 
         // Keep a copy for /img/current endpoint
@@ -790,10 +799,15 @@ static void mjpegTask(void* pv) {
           boardDrawActive = false;
           xSemaphoreGive(drawMutex);
         }
-        logEvent("STREAM", "jpeg frame size=%u hash=%s", (unsigned)readTotal, currentPhotoHash);
+        logEvent("STREAM", "frame size=%u hash=%s %s heap=%u",
+          (unsigned)readTotal, currentPhotoHash,
+          changed ? "NEW" : "same",
+          (unsigned)ESP.getFreeHeap());
+      } else {
+        logEvent("STREAM", "frame INCOMPLETE read=%u expected=%u", (unsigned)readTotal, (unsigned)contentLength);
+        break;
       }
 
-      free(buf);
       if (!client->connected()) break;
     }
 
@@ -811,7 +825,7 @@ static void mjpegTask(void* pv) {
 
 static void mjpegMaybeReconnect() {
   if (mjpegConnected) {
-    if (millis() - lastMjpegConnectMs >= 600000UL) {
+    if (millis() - lastMjpegConnectMs >= 120000UL) {
       mjpegForceReconnect = true;
     }
     return;
@@ -855,6 +869,7 @@ static void startNetworkServicesOnce() {
     server.on("/api/config",  HTTP_POST, handlePostConfig);
     server.on("/api/refresh", HTTP_POST, handleActionRefresh);
     server.on("/api/reboot",  HTTP_POST, handleActionReboot);
+    server.on("/api/reboot",  HTTP_GET,  handleActionReboot);
     server.on("/img/current", HTTP_GET,  handleImgCurrent);
     server.on("/img/last",    HTTP_GET,  handleImgLast);
     setupCoredumpRoute();
@@ -1057,6 +1072,7 @@ static void handleImgLast() {
 static void handleActionRefresh() {
   if (!requireWebAuth()) return;
   logEvent("WEB", "manual refresh requested");
+  mjpegRequestRefresh = true;
   mjpegForceReconnect = true;
   server.send(200, "application/json", "{\"ok\":true}");
 }
