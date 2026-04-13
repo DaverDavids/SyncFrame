@@ -785,6 +785,9 @@ static void mjpegTask(void* pv) {
       if (!client->connected()) break;
     }
     client->stop();
+	if (streamClient) {
+    delete streamClient;
+    streamClient = nullptr;
   }
 
   mjpegConnected = false;
@@ -802,6 +805,8 @@ static void mjpegMaybeReconnect() {
   if (mjpegForceReconnect) {
     if (streamClient) {
       streamClient->stop();
+	  delete streamClient;
+      streamClient = nullptr;
       delay(200);
     }
     mjpegForceReconnect = false;
