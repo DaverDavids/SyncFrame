@@ -1933,7 +1933,35 @@ _do_startup()
 # Direct invocation fallback (python3 syncframe-server.py)
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # _do_startup() already called above; just run Flask dev server as fallback
-    from gevent import monkey
-    monkey.patch_all()
-    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+    import sys
+
+    if "--launch" in sys.argv:
+        # Generate certs if needed, then hand off to gunicorn
+        if USE_HTTPS:
+            try:
+                ensure_certificates(CERTFILE, KEYFILE)
+            except Exception as e:
+                logging.error("Certificate generation failed: %s", e)
+                sys.exit(1)
+
+        gunicorn_args = [
+            "gunicorn",
+            "--worker-class", "gevent",
+            "--workers", "1",
+            "--bind", f"{SERVER_HOST}:{SERVER_PORT}",
+            "--timeout", "0",
+        ]
+        if USE_HTTPS:
+            gunicorn_args += ["--keyfile", KEYFILE, "--certfile", CERTFILE]
+        gunicorn_args.append("syncframe-server:app")
+
+        import shutil
+        gunicorn_bin = shutil.which("gunicorn") or "/usr/local/bin/gunicorn"
+        logging.info("Handing off to gunicorn: %s", " ".join(gunicorn_args))
+        os.execv(gunicorn_bin, gunicorn_args)
+        # os.execv replaces this process entirely — nothing below runs
+    else:
+        # Direct dev-server fallback
+        from gevent import monkey
+        monkey.patch_all()
+        app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
