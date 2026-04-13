@@ -629,6 +629,7 @@ static void mjpegTask(void* pv) {
   client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
   client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
   client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
+  {
     client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
     client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
     if (cfg.httpUser.length() > 0) {
@@ -783,7 +784,6 @@ static void mjpegTask(void* pv) {
       free(buf);
       if (!client->connected()) break;
     }
-  }
     client->stop();
   }
 
