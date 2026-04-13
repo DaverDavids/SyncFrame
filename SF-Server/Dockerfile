@@ -10,13 +10,7 @@ RUN mkdir -p /app/data
 
 VOLUME ["/app/data"]
 
-CMD ["gunicorn", \
-     "--worker-class", "gevent", \
-     "--workers", "1", \
-     "--bind", "0.0.0.0:9369", \
-     "--timeout", "0", \
-     "--keyfile", "/app/data/key.pem", \
-     "--certfile", "/app/data/cert.pem", \
-     "syncframe-server:app"]
+CMD ["python3", "/app/syncframe-server.py", "--launch"]
+
 EXPOSE 9369/tcp
 EXPOSE 9368
