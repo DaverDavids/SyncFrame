@@ -834,7 +834,7 @@ static void mjpegTask(void* pv) {
 static void mjpegMaybeReconnect() {
   if (mjpegConnected) {
     if (mjpegForceReconnect ||
-        millis() - lastMjpegConnectMs >= 120000UL) {
+        millis() - lastMjpegConnectMs >= 600000UL) {
       mjpegRequestRefresh = true;
     }
     return;

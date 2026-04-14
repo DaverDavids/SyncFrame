@@ -1237,10 +1237,12 @@ def stream():
             except Exception:
                 pass
         connected_stream_clients[mac] = {
+            "response": None,
             "resolution": resolution,
             "hostname": hostname,
             "uptime": uptime,
             "compiled": compiled,
+            "photo_hash": photo_hash,
             "queue": queue.SimpleQueue(),
         }
 
@@ -1249,7 +1251,7 @@ def stream():
     def generate():
         nonlocal mac
         last_push = time.time()
-        last_sent_hash = photo_hash  # client's current hash; updated when we send anything
+        last_sent_hash = ""  # track what we've sent to avoid duplicates
         q = connected_stream_clients[mac]["queue"]
         
         # OTA check: before entering keepalive loop, check for pending firmware
@@ -1316,6 +1318,7 @@ def stream():
                         except Exception:
                             pass
                     elif time.time() - last_push >= 60:
+                        # Keepalive frame (empty boundary with no body)
                         yield b"--frame\r\n\r\n"
                         last_push = time.time()
                     continue
