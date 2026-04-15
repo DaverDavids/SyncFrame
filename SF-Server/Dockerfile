@@ -3,8 +3,8 @@
 FROM python:3.13
 WORKDIR /app
 COPY . .
-RUN apt update && apt install -y mosquitto nano libheif-dev libffi-dev
-RUN pip install watchdog 'paho-mqtt<2.0.0' flask pillow schedule pillow-heif cryptography gunicorn gevent itsdangerous
+RUN apt update && apt install -y mosquitto nano
+RUN pip install watchdog 'paho-mqtt<2.0.0' flask pillow schedule pillow-heif cryptography gunicorn gevent
 
 RUN mkdir -p /app/data
 
