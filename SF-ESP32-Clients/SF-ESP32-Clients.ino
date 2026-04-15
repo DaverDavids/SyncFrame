@@ -49,7 +49,6 @@ static SemaphoreHandle_t drawMutex = nullptr;
 static unsigned long bootTimeMs = 0;
 
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
-static portMUX_TYPE mjpegFlagMux = portMUX_INITIALIZER_UNLOCKED;
 
 DNSServer dnsServer;
 static bool portalActive = false;
@@ -87,18 +86,20 @@ static bool webServerStarted = false;
 unsigned long lastWifiAttemptMs  = 0;
 bool wifiEverConnected  = false;
 
+// Note: currentJpg/lastJpg no longer used for streaming, but kept for /img endpoints
 uint8_t* currentJpg    = nullptr;
 size_t   currentJpgLen = 0;
 uint8_t* lastJpg       = nullptr;
 size_t   lastJpgLen    = 0;
 bool showingLast        = false;
 
-static WiFiClientSecure* streamClient       = nullptr;
-static bool              mjpegConnected     = false;
+// Stream (mjpeg)
+static WiFiClientSecure* streamClient     = nullptr;
+static bool              mjpegConnected   = false;
 static unsigned long     lastMjpegConnectMs = 0;
 static unsigned long     lastMjpegAttemptMs = 0;
 static bool              mjpegForceReconnect = false;
-static volatile bool     mjpegRequestRefresh = false;
+static volatile bool    mjpegRequestRefresh = false;
 static char              currentPhotoHash[12] = "";
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
@@ -117,6 +118,9 @@ static uint8_t  logHead  = 0;
 static uint8_t  logCount = 0;
 static uint32_t logSeq   = 0;
 
+// ============================================================
+// Forward declarations
+// ============================================================
 static void handleRoot();
 static void handleConfigPage();
 static void handleStatusJson();
@@ -127,6 +131,9 @@ static void handleImgLast();
 static void handleActionRefresh();
 static void handleActionReboot();
 
+// ============================================================
+// Web Authentication
+// ============================================================
 static bool requireWebAuth() {
   bool imgEndpoint = false;
   if (server.uri().startsWith("/img/")) imgEndpoint = true;
@@ -141,6 +148,7 @@ static bool requireWebAuth() {
   return false;
 }
 
+// ---------------------- Hardware Callbacks ----------------------
 bool hasLastPhoto() { return (lastJpg != nullptr && lastJpgLen > 0); }
 
 void showCurrentPhoto() {
@@ -165,6 +173,7 @@ void showLastPhoto() {
   }
 }
 
+// ---------------------- Helpers ----------------------
 static void buildHostAndClientId() {
   uint64_t fullMac = ESP.getEfuseMac();
   uint8_t m[6];
@@ -348,6 +357,9 @@ static String makePhotoUrl() {
   return base + cfg.photoFilename;
 }
 
+// ============================================================
+// Captive Portal
+// ============================================================
 static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head>
 <meta charset='utf-8'>
@@ -548,6 +560,7 @@ static void handlePortalLoop() {
   }
 }
 
+// Returns true if this build has PSRAM available at runtime.
 static inline bool hasPsram() {
 #if defined(BOARD_HAS_PSRAM)
   return (ESP.getPsramSize() > 0);
@@ -556,21 +569,7 @@ static inline bool hasPsram() {
 #endif
 }
 
-static bool getAndClearMjpegRefreshRequest() {
-  bool requested;
-  portENTER_CRITICAL(&mjpegFlagMux);
-  requested = mjpegRequestRefresh;
-  mjpegRequestRefresh = false;
-  portEXIT_CRITICAL(&mjpegFlagMux);
-  return requested;
-}
-
-static void requestMjpegRefresh() {
-  portENTER_CRITICAL(&mjpegFlagMux);
-  mjpegRequestRefresh = true;
-  portEXIT_CRITICAL(&mjpegFlagMux);
-}
-
+// ---------------------- MJPEG Stream ----------------------
 static void mjpegTask(void* pv) {
   (void)pv;
   String url = cfg.photoBaseUrl;
@@ -581,23 +580,23 @@ static void mjpegTask(void* pv) {
   url += "stream";
 
   bool isHttps = url.startsWith("https://");
-  int schemeLen = isHttps ? 8 : 7;
   int port = isHttps ? 443 : 80;
   String host;
-  int slashPos = url.indexOf('/', schemeLen);
+  int slashPos = url.indexOf("/", 8);
   if (slashPos > 0) {
-    String hostPart = url.substring(schemeLen, slashPos);
-    int colonPos = hostPart.indexOf(':');
-    if (colonPos > 0) {
+    String hostPart = url.substring(8, slashPos);
+    if (hostPart.indexOf(":") > 0) {
+      int colonPos = hostPart.indexOf(":");
       host = hostPart.substring(0, colonPos);
       port = hostPart.substring(colonPos + 1).toInt();
     } else {
       host = hostPart;
     }
   } else {
-    host = url.substring(schemeLen);
+    host = url.substring(url.indexOf("//") + 2);
   }
 
+  // Guard against bad parse
   if (host.length() == 0 || host.startsWith("/")) {
     logEvent("STREAM", "bad host parse: %s", host.c_str());
     mjpegConnected = false;
@@ -607,275 +606,240 @@ static void mjpegTask(void* pv) {
 
   String path = (slashPos > 0) ? url.substring(slashPos) : "/";
 
-  if (!streamClient) {
-    streamClient = new WiFiClientSecure();
-    if (!streamClient) {
-      logEvent("STREAM", "client alloc failed");
-      mjpegConnected = false;
-      vTaskDelete(NULL);
-      return;
-    }
+  WiFiClient* client = streamClient;
+  if (!client) {
+    client = new WiFiClientSecure();
+    streamClient = (WiFiClientSecure*)client;
   }
+  if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
 
-  streamClient->stop();
-  if (cfg.httpsInsecure) streamClient->setInsecure();
-
-  if (!streamClient->connect(host.c_str(), port)) {
+  if (!client->connect(host.c_str(), port)) {
     logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
+    delete client;
+    streamClient = nullptr;
     mjpegConnected = false;
     lastMjpegAttemptMs = millis();
     vTaskDelete(NULL);
     return;
   }
 
+  // Build MAC without colons
   char macNaked[13] = {};
   int mi = 0;
   for (int i = 0; MAC_STR[i] && mi < 12; i++) {
     if (MAC_STR[i] != ':') macNaked[mi++] = MAC_STR[i];
   }
 
-  streamClient->print("GET " + path + " HTTP/1.1\r\n");
-  streamClient->print("Host: " + host + "\r\n");
-  streamClient->print("User-Agent: SyncFrame/1.0\r\n");
-  streamClient->print("Accept: multipart/x-mixed-replace\r\n");
-  streamClient->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
-  streamClient->print("X-SF-MAC: " + String(macNaked) + "\r\n");
-  streamClient->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
-  streamClient->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
-  streamClient->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
-  streamClient->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
+  client->print("GET " + path + " HTTP/1.1\r\n");
+  client->print("Host: " + host + "\r\n");
+  client->print("User-Agent: SyncFrame/1.0\r\n");
+  client->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
+  client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
+  client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
+  client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
+  client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
+  client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
   if (cfg.httpUser.length() > 0) {
-    String auth = cfg.httpUser + ":" + cfg.httpPass;
-    size_t len = auth.length();
-    size_t encodedCap = (((len + 2) / 3) * 4) + 4;
-    uint8_t* buf = (uint8_t*)malloc(encodedCap);
-    if (buf) {
-      size_t outLen = 0;
-      if (mbedtls_base64_encode(buf, encodedCap, &outLen, (const uint8_t*)auth.c_str(), len) == 0) {
-        streamClient->print("Authorization: Basic ");
-        streamClient->write(buf, outLen);
-        streamClient->print("\r\n");
-      }
-      free(buf);
-    }
-  }
-  streamClient->print("Connection: keep-alive\r\n");
-  streamClient->print("\r\n");
+	String auth = cfg.httpUser + ":" + cfg.httpPass;
+	size_t len = auth.length();
+	uint8_t* buf = (uint8_t*)malloc(len * 2);
+	if (buf) {
+		size_t outLen = 0;
+		mbedtls_base64_encode(buf, len * 2, &outLen, (const uint8_t*)auth.c_str(), len);
+		client->print("Authorization: Basic ");
+		client->write(buf, outLen);
+		client->print("\r\n");
+		free(buf);
+	}
+	}
+    client->print("Connection: keep-alive\r\n");
+    client->print("\r\n");
 
-  String statusLine = streamClient->readStringUntil('\n');
-  if (!statusLine.startsWith("HTTP/1.1 200") && !statusLine.startsWith("HTTP/1.0 200")) {
-    logEvent("STREAM", "status %s", statusLine.c_str());
-    streamClient->stop();
-    mjpegConnected = false;
-    vTaskDelete(NULL);
-    return;
-  }
-
-  unsigned long lastDataMs = millis();
-
-  while (streamClient->connected()) {
-    while (!streamClient->available()) {
-      if (!streamClient->connected()) goto stream_done;
-      vTaskDelay(pdMS_TO_TICKS(5));
-    }
-    String line = streamClient->readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) break;
-  }
-
-  logEvent("STREAM", "connected");
-  lastMjpegConnectMs = millis();
-
-  while (streamClient->connected() || streamClient->available()) {
-    if (getAndClearMjpegRefreshRequest()) {
-      logEvent("STREAM", "refresh requested, reconnecting");
-      break;
-    }
-    if (millis() - lastDataMs > 90000) {
-      logEvent("STREAM", "idle timeout");
-      break;
+    String statusLine = client->readStringUntil('\n');
+    if (!statusLine.startsWith("HTTP/1.1 200")) {
+      logEvent("STREAM", "status %s", statusLine.c_str());
+      client->stop();
+      mjpegConnected = false;
+      vTaskDelete(NULL);
+      return;
     }
 
-    String boundary = "";
-    while (streamClient->connected()) {
-      if (!streamClient->available()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-      boundary = streamClient->readStringUntil('\n');
-      break;
-    }
-    if (!boundary.startsWith("--frame")) {
-      if (!streamClient->connected()) break;
-      continue;
-    }
+    unsigned long lastDataMs = 0;
 
-    int contentLength = 0;
-    String frameType;
-    String contentType;
-    while (streamClient->connected()) {
-      while (!streamClient->available()) {
-        if (!streamClient->connected()) goto stream_done;
+    // Drain HTTP response headers — wait for data, don't bail early
+    while (client->connected()) {
+      while (!client->available()) {
+        if (!client->connected()) goto stream_done;
         vTaskDelay(pdMS_TO_TICKS(5));
       }
-      String line = streamClient->readStringUntil('\n');
+      String line = client->readStringUntil('\n');
       line.trim();
       if (line.length() == 0) break;
-      if (line.startsWith("Content-Length:")) {
-        String val = line.substring(15); val.trim();
-        contentLength = val.toInt();
-      } else if (line.startsWith("Content-Type:")) {
-        String val = line.substring(13); val.trim();
-        contentType = val;
-      } else if (line.startsWith("X-SF-Frame-Type:")) {
-        String val = line.substring(16); val.trim();
-        frameType = val;
+    }
+
+    logEvent("STREAM", "connected");
+    lastMjpegConnectMs = millis();
+    lastDataMs = millis();
+  	
+    while (client->connected() || client->available()) {
+      if (mjpegRequestRefresh) {
+        mjpegRequestRefresh = false;
+        logEvent("STREAM", "refresh requested, reconnecting");
+        break;
       }
-    }
-
-    if (contentLength == 0) {
-      lastDataMs = millis();
-      continue;
-    }
-
-    if (contentType == "application/octet-stream" && frameType == "ota") {
-      logEvent("STREAM", "OTA frame size=%d", contentLength);
-      if (Update.begin(contentLength)) {
-        size_t written = Update.writeStream(*streamClient);
-        if (written == (size_t)contentLength && Update.end() && Update.isFinished()) {
-          logEvent("STREAM", "OTA flash ok");
-          delay(500);
-          ESP.restart();
-        } else {
-          logEvent("STREAM", "OTA failed written=%u err=%u", (unsigned)written, (unsigned)Update.getError());
-          Update.abort();
-        }
-      } else {
-        logEvent("STREAM", "OTA begin failed err=%u", (unsigned)Update.getError());
+      if (millis() - lastDataMs > 90000) {
+        logEvent("STREAM", "idle timeout");
+        break;
       }
-      break;
-    }
 
-    if (contentType != "image/jpeg") {
-      logEvent("STREAM", "unsupported frame type=%s len=%d", contentType.c_str(), contentLength);
-      size_t drain = contentLength;
-      while (drain > 0 && streamClient->connected()) {
-        size_t avail = streamClient->available();
-        if (avail == 0) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
-        size_t toRead = (drain < avail) ? drain : avail;
-        uint8_t tmp[256];
-        int n = streamClient->read(tmp, toRead > sizeof(tmp) ? sizeof(tmp) : toRead);
-        if (n <= 0) break;
-        drain -= (size_t)n;
+      // Wait for boundary line
+      String boundary = "";
+      while (client->connected()) {
+        if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+        boundary = client->readStringUntil('\n');
+        break;
       }
-      lastDataMs = millis();
-      continue;
-    }
-
-    uint8_t* buf = nullptr;
-    size_t allocSize = contentLength;
-    static const size_t C3_MAX_PREALLOC = 20480;
-    if (!hasPsram() && contentLength > C3_MAX_PREALLOC) {
-      logEvent("STREAM", "frame too large %d, draining", contentLength);
-      size_t drain = contentLength;
-      while (drain > 0 && streamClient->connected()) {
-        size_t avail = streamClient->available();
-        if (avail == 0) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
-        size_t toRead = (drain < avail) ? drain : avail;
-        uint8_t tmp[256];
-        int n = streamClient->read(tmp, toRead > sizeof(tmp) ? sizeof(tmp) : toRead);
-        if (n <= 0) break;
-        drain -= (size_t)n;
-      }
-      lastDataMs = millis();
-      continue;
-    }
-
-    if (hasPsram()) {
-      buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-      if (!buf) buf = (uint8_t*)malloc(allocSize);
-    } else {
-      if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-        freeBuf(currentJpg, currentJpgLen);
-        xSemaphoreGive(drawMutex);
-      }
-      if (allocSize > MAX_JPG) allocSize = MAX_JPG;
-      buf = (uint8_t*)malloc(allocSize);
-    }
-
-    if (!buf) {
-      logEvent("STREAM", "alloc failed %d", contentLength);
-      break;
-    }
-
-    size_t remaining = contentLength;
-    size_t readTotal = 0;
-    while (remaining > 0 && streamClient->connected()) {
-      size_t avail = streamClient->available();
-      if (avail == 0) {
-        vTaskDelay(pdMS_TO_TICKS(1));
+      if (!boundary.startsWith("--frame")) {
+        if (!client->connected()) break;
         continue;
       }
-      size_t toRead = (remaining < avail) ? remaining : avail;
-      int n = streamClient->read(buf + readTotal, toRead);
-      if (n <= 0) break;
-      readTotal += (size_t)n;
-      remaining -= (size_t)n;
-    }
 
-    if (readTotal == (size_t)contentLength) {
-      char oldHash[12];
-      strncpy(oldHash, currentPhotoHash, sizeof(oldHash));
-      oldHash[sizeof(oldHash) - 1] = 0;
-      uint32_t computed = crc32buf(buf, readTotal);
-      snprintf(currentPhotoHash, sizeof(currentPhotoHash), "%08lx", (unsigned long)computed);
-      bool changed = strcmp(oldHash, currentPhotoHash) != 0;
-      lastDataMs = millis();
-
-      if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        freeBuf(currentJpg, currentJpgLen);
-        currentJpg = buf;
-        currentJpgLen = readTotal;
-        buf = nullptr;
-        board_draw_jpeg(currentJpg, currentJpgLen);
-        boardDrawActive = false;
-        xSemaphoreGive(drawMutex);
+      // Drain frame headers
+      int contentLength = 0;
+      String frameType;
+      while (client->connected()) {
+        while (!client->available()) {
+          if (!client->connected()) goto stream_done;
+          vTaskDelay(pdMS_TO_TICKS(5));
+        }
+        String line = client->readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0) break;
+        if (line.startsWith("Content-Length:")) {
+          String val = line.substring(15); val.trim();
+          contentLength = val.toInt();
+        } else if (line.startsWith("X-SF-Frame-Type:")) {
+          String val = line.substring(16); val.trim();
+          frameType = val;
+        }
       }
-      logEvent("STREAM", "frame size=%u hash=%s %s heap=%u",
-        (unsigned)readTotal, currentPhotoHash,
-        changed ? "NEW" : "same",
-        (unsigned)ESP.getFreeHeap());
-    } else {
-      logEvent("STREAM", "frame INCOMPLETE read=%u expected=%u", (unsigned)readTotal, (unsigned)contentLength);
-      free(buf);
-      break;
+
+      if (contentLength == 0) { lastDataMs = millis(); continue; }
+
+      if (frameType == "ota") {
+        logEvent("STREAM", "OTA frame size=%d", contentLength);
+        if (Update.begin(contentLength)) {
+          size_t written = Update.writeStream(*client);
+          if (Update.end() && Update.isFinished()) {
+            logEvent("STREAM", "OTA flash ok");
+            delay(500);
+            ESP.restart();
+          }
+        }
+        break;
+      }
+
+      uint8_t* buf = nullptr;
+      size_t allocSize = contentLength;
+      static const size_t C3_MAX_PREALLOC = 20480;
+      if (!hasPsram() && contentLength > C3_MAX_PREALLOC) {
+        logEvent("STREAM", "frame too large %d, draining", contentLength);
+        size_t drain = contentLength;
+        while (drain > 0 && client->connected()) {
+          size_t avail = client->available();
+          if (avail == 0) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+          size_t toRead = (drain < avail) ? drain : avail;
+          uint8_t tmp[256];
+          client->read(tmp, toRead);
+          drain -= toRead;
+        }
+        lastDataMs = millis();
+        continue;
+      }
+
+      if (hasPsram()) {
+        buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!buf) buf = (uint8_t*)malloc(allocSize);
+      } else {
+        // Free current copy to reclaim heap before allocating frame buffer
+        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+          freeBuf(currentJpg, currentJpgLen);
+          xSemaphoreGive(drawMutex);
+        }
+        if (allocSize > MAX_JPG) allocSize = MAX_JPG;
+        buf = (uint8_t*)malloc(allocSize);
+      }
+
+      if (!buf) {
+        logEvent("STREAM", "alloc failed %d", contentLength);
+        break;
+      }
+
+      size_t remaining = contentLength;
+      size_t readTotal = 0;
+      while (remaining > 0 && client->connected()) {
+        size_t avail = client->available();
+        if (avail == 0) {
+          vTaskDelay(pdMS_TO_TICKS(1));
+          continue;
+        }
+        size_t toRead = (remaining < avail) ? remaining : avail;
+        int n = client->read(buf + readTotal, toRead);
+        if (n <= 0) break;
+        readTotal += n;
+        remaining -= n;
+      }
+
+      if (readTotal == contentLength) {
+        char oldHash[12];
+        strncpy(oldHash, currentPhotoHash, sizeof(oldHash));
+        uint32_t computed = crc32buf(buf, readTotal);
+        snprintf(currentPhotoHash, sizeof(currentPhotoHash), "%08lx", (unsigned long)computed);
+        bool changed = strcmp(oldHash, currentPhotoHash) != 0;
+        lastDataMs = millis();
+
+        // Transfer buffer to currentJpg (reuses buf, no second malloc)
+        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          freeBuf(currentJpg, currentJpgLen);
+          currentJpg = buf;          // transfer ownership
+          currentJpgLen = readTotal;
+          buf = nullptr;              // prevent double-free
+          board_draw_jpeg(currentJpg, currentJpgLen);
+          boardDrawActive = false;
+          xSemaphoreGive(drawMutex);
+        }
+        logEvent("STREAM", "frame size=%u hash=%s %s heap=%u",
+          (unsigned)readTotal, currentPhotoHash,
+          changed ? "NEW" : "same",
+          (unsigned)ESP.getFreeHeap());
+      } else {
+        logEvent("STREAM", "frame INCOMPLETE read=%u expected=%u", (unsigned)readTotal, (unsigned)contentLength);
+        break;
+      }
+
+      if (!client->connected()) break;
     }
 
-    if (buf) free(buf);
-    if (!streamClient->connected()) break;
-  }
+    stream_done:
+    client->stop();
+    delete client;
+    streamClient = nullptr;
 
-stream_done:
-  if (streamClient) streamClient->stop();
-  mjpegConnected = false;
-  lastMjpegAttemptMs = millis();
-  logEvent("STREAM", "task ended");
-  vTaskDelete(NULL);
+    mjpegConnected = false;
+    lastMjpegAttemptMs = 0;
+    logEvent("STREAM", "task ended");
+    vTaskDelete(NULL);
 }
 
 static void mjpegMaybeReconnect() {
   if (mjpegConnected) {
-    if (mjpegForceReconnect || millis() - lastMjpegConnectMs >= 600000UL) {
-      if (streamClient) streamClient->stop();
-      delay(200);
-      mjpegForceReconnect = false;
-      requestMjpegRefresh();
-      mjpegConnected = false;
-      lastMjpegAttemptMs = 0;
+    if (mjpegForceReconnect ||
+        millis() - lastMjpegConnectMs >= 600000UL) {
+      mjpegRequestRefresh = true;
     }
     return;
   }
-
   if (mjpegForceReconnect) {
-    if (streamClient) streamClient->stop();
-    delay(200);
     mjpegForceReconnect = false;
     lastMjpegAttemptMs = 0;
   }
@@ -883,18 +847,14 @@ static void mjpegMaybeReconnect() {
   if (cfg.photoBaseUrl.length() == 0) return;
   if (millis() - lastMjpegAttemptMs < 15000) return;
 
-  mjpegRequestRefresh = false;
+  mjpegRequestRefresh = false;  // clear flag before spawning new task
+  mjpegConnected      = true;
   lastMjpegConnectMs = millis();
   lastMjpegAttemptMs = millis();
-  BaseType_t taskOk = xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", 16384, nullptr, 1, nullptr, APP_CORE);
-  if (taskOk == pdPASS) {
-    mjpegConnected = true;
-  } else {
-    mjpegConnected = false;
-    logEvent("STREAM", "task spawn failed");
-  }
+  xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", 16384, nullptr, 1, nullptr, APP_CORE);
 }
 
+// ---------------------- Network services ----------------------
 static void startNetworkServicesOnce() {
   if (networkServicesStarted) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -970,6 +930,7 @@ static void ensureWifi() {
   WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
 }
 
+// ---------------------- Web UI handlers ----------------------
 static void handleRoot() {
   if (!requireWebAuth()) return;
   server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML));
@@ -1133,6 +1094,7 @@ static void handleActionReboot() {
   ESP.restart();
 }
 
+// ---------------------- Main ----------------------
 void setup() {
   DBG_BEGIN(115200);
   delay(50);
@@ -1171,6 +1133,7 @@ void loop() {
     if (networkServicesStarted) {
       ArduinoOTA.handle();
       if (ESP.getFreeHeap() > 20000) server.handleClient();
+
       mjpegMaybeReconnect();
     }
   }
