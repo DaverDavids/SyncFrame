@@ -179,12 +179,6 @@ KEYFILE = os.path.abspath(
     config.get("server", "keyfile", fallback=default_config["server"]["keyfile"])
 )
 
-if USE_HTTPS:
-    try:
-        ensure_certificates(CERTFILE, KEYFILE)
-    except Exception as _cert_err:
-        logging.error("Could not generate TLS certificates: %s", _cert_err)
-
 _raw_prefix = config.get(
     "server", "url_prefix", fallback=default_config["server"]["url_prefix"]
 ).strip()
@@ -280,7 +274,7 @@ def _push_photo_to_stream_clients():
 
     for mac, client in clients_snapshot.items():
         resolution = client.get("resolution", (800, 480))
-        variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{resolution[0]}x{resolution[1]}.jpg")
+        variant_file = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{resolution[0]}x{resolution[1]}.jpg")
         if not os.path.exists(variant_file):
             variant_file = WATCH_FILE
         try:
@@ -733,7 +727,7 @@ def generate_thumbnails(source_img=None):
             try:
                 thumb = source_img.copy()
                 thumb.thumbnail((w, h), Image.LANCZOS)
-                out_path = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
+                out_path = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{w}x{h}.jpg")
                 max_kb = RESOLUTION_MAX_KB.get((w, h), 0)
                 quality = 75
                 while True:
@@ -1147,7 +1141,7 @@ def serve_photo():
 def serve_photo_variant(w, h):
     if (w, h) not in RESOLUTIONS:
         return "Resolution not supported", 404
-    variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{w}x{h}.jpg")
+    variant_file = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{w}x{h}.jpg")
     if os.path.exists(variant_file):
         resp = send_from_directory(
             os.path.dirname(os.path.abspath(variant_file)) or ".",
@@ -1278,7 +1272,7 @@ def stream():
         
         # Photo check: push current photo if it differs from client's hash (or client has no hash)
         if current_photo_hash and photo_hash != current_photo_hash:
-            variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{resolution[0]}x{resolution[1]}.jpg")
+            variant_file = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{resolution[0]}x{resolution[1]}.jpg")
             if not os.path.exists(variant_file):
                 variant_file = WATCH_FILE
             try:
@@ -1305,7 +1299,7 @@ def stream():
                 except queue.Empty:
                     # Check if we missed any photo pushes while blocked on queue
                     if current_photo_hash and current_photo_hash != last_sent_hash:
-                        variant_file = WATCH_FILE.replace("photo.jpg", f"photo.{resolution[0]}x{resolution[1]}.jpg")
+                        variant_file = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{resolution[0]}x{resolution[1]}.jpg")
                         if not os.path.exists(variant_file):
                             variant_file = WATCH_FILE
                         try:

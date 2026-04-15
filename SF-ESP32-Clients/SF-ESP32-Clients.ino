@@ -640,19 +640,21 @@ static void mjpegTask(void* pv) {
   client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
   client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
   if (cfg.httpUser.length() > 0) {
-	String auth = cfg.httpUser + ":" + cfg.httpPass;
-	size_t len = auth.length();
-	uint8_t* buf = (uint8_t*)malloc(len * 2);
-	if (buf) {
-		size_t outLen = 0;
-		mbedtls_base64_encode(buf, len * 2, &outLen, (const uint8_t*)auth.c_str(), len);
-		client->print("Authorization: Basic ");
-		client->write(buf, outLen);
-		client->print("\r\n");
-		free(buf);
-	}
-	}
-    client->print("Connection: keep-alive\r\n");
+    String auth = cfg.httpUser + ":" + cfg.httpPass;
+    size_t len = auth.length();
+    size_t b64BufSize = ((len + 2) / 3) * 4 + 1;
+    uint8_t* buf = (uint8_t*)malloc(b64BufSize);
+    if (buf) {
+      size_t outLen = 0;
+      mbedtls_base64_encode(buf, b64BufSize, &outLen, (const uint8_t*)auth.c_str(), len);
+      client->print("Authorization: Basic ");
+      client->write(buf, outLen);
+      client->print("\r\n");
+      free(buf);
+    }
+  }
+  client->print("Accept: multipart/x-mixed-replace\r\n");
+  client->print("Connection: keep-alive\r\n");
     client->print("\r\n");
 
     String statusLine = client->readStringUntil('\n');
@@ -822,8 +824,6 @@ static void mjpegTask(void* pv) {
 
     stream_done:
     client->stop();
-    delete client;
-    streamClient = nullptr;
 
     mjpegConnected = false;
     lastMjpegAttemptMs = 0;
@@ -851,7 +851,11 @@ static void mjpegMaybeReconnect() {
   mjpegConnected      = true;
   lastMjpegConnectMs = millis();
   lastMjpegAttemptMs = millis();
-  xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", 16384, nullptr, 1, nullptr, APP_CORE);
+  BaseType_t taskCreated = xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", 16384, nullptr, 1, nullptr, APP_CORE);
+  if (taskCreated != pdPASS) {
+    mjpegConnected = false;
+    logEvent("STREAM", "task create failed");
+  }
 }
 
 // ---------------------- Network services ----------------------
