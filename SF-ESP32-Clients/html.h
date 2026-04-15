@@ -212,6 +212,9 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span id="s_uptime">Up: &hellip;</span>
   </div>
 
+  <h3>Current Photo</h3>
+  <img id="currentImg" alt="current photo" style="max-width:280px;display:block;border-radius:6px;margin-bottom:12px"/>
+
   <div id="saveMsg" class="msg">Settings saved!</div>
   <div id="errMsg"  class="err"></div>
 
@@ -221,7 +224,15 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <input type="url" name="photoBaseUrl" id="photoBaseUrl" placeholder="https://192.168.1.10:9369/syncframe/"/>
 
     <label>Photo filename</label>
-    <input type="text" name="photoFilename" id="photoFilename" placeholder="photo.800x480.jpg"/>
+    <div class="row">
+      <div style="flex:7">
+        <input type="text" name="photoFilename" id="photoFilename" placeholder="photo.800x480.jpg" style="width:100%"/>
+      </div>
+      <div style="flex:3">
+        <label>Reconnect (min)</label>
+        <input type="number" name="streamReconnectMin" id="streamReconnectMin" min="1" max="1440" value="10" style="width:100%"/>
+      </div>
+    </div>
 
     <label><input type="checkbox" name="httpsInsecure" id="httpsInsecure"/> Allow insecure HTTPS (self-signed)</label>
 
@@ -301,6 +312,7 @@ function applyCfg(c) {
   document.getElementById("webPass").value           = "";
   document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
   if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;
+  if (document.getElementById("streamReconnectMin")) document.getElementById("streamReconnectMin").value = c.streamReconnectMin || 10;
 }
 
 applyCfg(c);
@@ -357,6 +369,8 @@ async function loadStatus() {
     if (s.uptimeMs !== undefined)
       setSpan("ds_uptime", "Uptime: "+formatUptime(s.uptimeMs), null);
     if (s.hostname) document.getElementById("hostnameHint").textContent = s.hostname;
+    const currentImg = document.getElementById("currentImg");
+    if (currentImg) currentImg.src = '/img/current?t=' + Date.now();
   } catch(e) { setSpan("ds_host","Status unavailable",false); }
 }
 
@@ -400,6 +414,7 @@ document.getElementById("configForm").addEventListener('submit', async (e) => {
   const f = new URLSearchParams();
   f.append('photoBaseUrl',       document.getElementById("photoBaseUrl").value);
   f.append('photoFilename',      document.getElementById("photoFilename").value);
+  f.append('streamReconnectMin', document.getElementById("streamReconnectMin").value);
   f.append('httpUser',           document.getElementById("httpUser").value);
   const webUserVal  = document.getElementById("webUser").value;
   const httpPassVal = document.getElementById("httpPass").value;

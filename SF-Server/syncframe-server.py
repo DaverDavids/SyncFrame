@@ -287,12 +287,14 @@ def _push_photo_to_stream_clients():
 
 
 RESOLUTIONS = [
+    (1920, 1080),
     (800, 480),
     (280, 240),
 ]
 
 # Max output file size in KB per resolution. 0 = no limit.
 RESOLUTION_MAX_KB = {
+    (1920, 1080): 0,
     (800, 480): 100,
     (280, 240): 20,
 }
@@ -743,6 +745,10 @@ def generate_thumbnails(source_img=None):
                 logging.info("Thumbnail saved: %s at size %s", out_path, thumb.size)
             except Exception as e:
                 logging.error("Error generating %dx%d thumbnail: %s", w, h, e)
+        # Copy highest resolution to WATCH_FILE as the primary
+        primary_variant = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{RESOLUTIONS[0][0]}x{RESOLUTIONS[0][1]}.jpg")
+        if os.path.exists(primary_variant):
+            shutil.copy2(primary_variant, WATCH_FILE)
     except Exception as e:
         logging.error("Error in generate_thumbnails: %s", e)
 
@@ -846,9 +852,6 @@ def desaturate_image():
 
 def finalize_changes(img=None):
     try:
-        changed_path = os.path.join(DATA_DIR, "photo-changed.jpg")
-        shutil.copy(changed_path, WATCH_FILE)
-        logging.info("Copied %s to %s", changed_path, WATCH_FILE)
         generate_thumbnails(source_img=img)
     except Exception as e:
         logging.error(f"Error in finalize_changes: {e}")
@@ -1104,12 +1107,7 @@ def upload_file():
                 return "Image open failed", 500
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
-        max_size = (IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT)
-        img.thumbnail(max_size, Image.LANCZOS)
-        img.save(target_path, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
-        logging.info(
-            "Uploaded image resized to max %s and saved to %s", max_size, target_path
-        )
+        logging.info("Uploaded image saved via generate_thumbnails")
         global photo_upload_etag
         photo_upload_etag = secrets.token_hex(8)
         _save_photo_etag(photo_upload_etag)

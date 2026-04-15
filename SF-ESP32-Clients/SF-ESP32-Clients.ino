@@ -67,6 +67,7 @@ struct Config {
   String httpPass;
   String webUser;
   String webPass;
+  int    streamReconnectMin;
 } cfg;
 
 static String installedFwToken    = "";
@@ -304,6 +305,7 @@ static void loadConfig() {
   cfg.httpPass          = prefs.getString("ppass",   String(test_http_password));
   cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
   cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
+  cfg.streamReconnectMin = prefs.getInt("sreconn",   10);
   installedFwToken      = prefs.getString("fwtoken", "");
   installedFwFilename   = prefs.getString("fwfile",  "");
   prefs.end();
@@ -338,6 +340,7 @@ static void saveConfig() {
   prefs.putString("ppass",  cfg.httpPass);
   prefs.putString("wbuser", cfg.webUser);
   prefs.putString("wbpass", cfg.webPass);
+  prefs.putInt("sreconn",   cfg.streamReconnectMin);
   prefs.end();
 }
 
@@ -834,7 +837,7 @@ static void mjpegTask(void* pv) {
 static void mjpegMaybeReconnect() {
   if (mjpegConnected) {
     if (mjpegForceReconnect ||
-        millis() - lastMjpegConnectMs >= 600000UL) {
+        millis() - lastMjpegConnectMs >= (unsigned long)cfg.streamReconnectMin * 60000UL) {
       mjpegRequestRefresh = true;
     }
     return;
@@ -986,7 +989,8 @@ static void handleStatusJson() {
   j += "\"screenW\":"; j += String(SCREEN_W); j += ",";
   j += "\"screenH\":"; j += String(SCREEN_H); j += ",";
   j += "\"psram\":";   j += (hasPsram() ? "true" : "false"); j += ",";
-  j += "\"heapFree\":"; j += String(ESP.getFreeHeap());
+  j += "\"heapFree\":"; j += String(ESP.getFreeHeap()); j += ",";
+  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin);
   j += "}";
   server.send(200, "application/json", j);
 }
@@ -1044,6 +1048,10 @@ static void handlePostConfig() {
   if (server.hasArg("httpPass") && isRealPassword(server.arg("httpPass"))) cfg.httpPass = server.arg("httpPass");
   if (server.hasArg("webPass")  && isRealPassword(server.arg("webPass")))  cfg.webPass  = server.arg("webPass");
   if (server.hasArg("webPassClear") && server.arg("webPassClear") == "1")  cfg.webPass  = "";
+  if (server.hasArg("streamReconnectMin")) {
+    int v = server.arg("streamReconnectMin").toInt();
+    if (v >= 1 && v <= 1440) cfg.streamReconnectMin = v;
+  }
   cfg.httpsInsecure   = server.hasArg("httpsInsecure");
   saveConfig();
   mjpegForceReconnect = true;
