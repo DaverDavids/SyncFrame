@@ -70,6 +70,25 @@ logging.getLogger("gevent.ssl").addFilter(_SuppressSSLHandshakeErrors())
 logging.getLogger("gevent.pywsgi").addFilter(_SuppressSSLHandshakeErrors())
 logging.getLogger("gevent._gevent_cgreenlet").addFilter(_SuppressSSLHandshakeErrors())
 
+class _SuppressSSLStderr:
+    _SUPPRESS = {
+        "SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+        "TLSV1_ALERT_UNKNOWN_CA",
+        "WRONG_VERSION_NUMBER",
+        "NO_SHARED_CIPHER",
+        "UNEXPECTED_EOF_WHILE_READING",
+        "EOF occurred in violation of protocol",
+    }
+    def write(self, s):
+        if not any(k in s for k in self._SUPPRESS):
+            self._orig.write(s)
+    def flush(self):
+        self._orig.flush()
+    def __init__(self, orig):
+        self._orig = orig
+
+sys.stderr = _SuppressSSLStderr(sys.stderr)
+
 # ---------------------------------------------------------------------------
 # Data directory
 # ---------------------------------------------------------------------------
@@ -260,6 +279,8 @@ _sse_lock = threading.Lock()
 
 connected_stream_clients: dict = {}   # keyed by MAC → {"response": <Response obj>, "resolution": (w,h), "hostname": str, "uptime": int, "compiled": str, "queue": queue.Queue}
 _stream_lock = threading.Lock()
+_stream_last_seen: dict = {}  # mac -> timestamp of last connect log
+_STREAM_NEW_CLIENT_THRESHOLD = 300  # seconds; reconnects within this window are silent
 
 
 def _compute_crc32(path: str) -> str:
@@ -1238,10 +1259,13 @@ def stream():
         except Exception:
             pass
 
+    now = time.time()
     with _stream_lock:
-        prev = connected_stream_clients.get(mac)
-        is_reconnect = prev is not None
-    if not is_reconnect:
+        last_logged = _stream_last_seen.get(mac, 0)
+        is_new = (now - last_logged) > _STREAM_NEW_CLIENT_THRESHOLD
+        if is_new:
+            _stream_last_seen[mac] = now
+    if is_new:
         logging.info(f"Stream connect: mac={mac} hostname={hostname} resolution={resolution} compiled={compiled}")
     else:
         logging.debug(f"Stream reconnect: mac={mac} hostname={hostname}")
@@ -1368,7 +1392,7 @@ def stream():
             with _stream_lock:
                 if mac in connected_stream_clients:
                     del connected_stream_clients[mac]
-            logging.info(f"Stream disconnect: mac={mac}")
+            logging.debug(f"Stream disconnect: mac={mac}")
 
     return Response(
         generate(),
