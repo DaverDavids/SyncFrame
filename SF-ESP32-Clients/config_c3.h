@@ -29,9 +29,27 @@ extern bool showingLast;
 extern bool hasLastPhoto();
 extern volatile bool boardDrawActive;
 
+// Forward declaration of Config struct and cfg instance so board_loop() can
+// reference cfg.peekButtonPin even though the full definition is in the .ino
+// (which is compiled after all headers are included).
+struct Config;
+extern struct Config {
+  String wifiSsid;
+  String wifiPass;
+  String photoBaseUrl;
+  String photoFilename;
+  bool   httpsInsecure;
+  String httpUser;
+  String httpPass;
+  String webUser;
+  String webPass;
+  int    streamReconnectMin;
+  int    peekButtonPin;
+} cfg;
+
 void board_init() {
   gfx->begin();
-  gfx->fillScreen(0x0000); // Replaced BLACK with 0x0000 (black in RGB565)
+  gfx->fillScreen(0x0000);
 }
 
 void board_loop() {
