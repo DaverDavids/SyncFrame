@@ -1265,6 +1265,10 @@ def stream():
         last_sent_etag = ""  # track what we've sent to avoid duplicates
         q = connected_stream_clients[mac]["queue"]
         
+        # Flush HTTP headers immediately so client sees 200 OK
+        yield b"--frame\r\n\r\n"
+        last_push = time.time()
+        
         # OTA check: before entering keepalive loop, check for pending firmware
         clients = _load_clients()
         client_data = clients.get(hostname)
