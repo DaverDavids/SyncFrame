@@ -956,7 +956,9 @@ static void handleConfigPage() {
   j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
   j += "\"httpPass\":\"";       appendJsonPassword(j, cfg.httpPass);     j += "\",";
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
-  j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\"}";
+  j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\",";
+  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin);
+  j += "}";
 
   String html = FPSTR(CONFIG_HTML);
   html.replace("CFG_INJECT_PLACEHOLDER",

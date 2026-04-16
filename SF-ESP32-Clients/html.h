@@ -96,7 +96,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
     <a href="/config">Config</a>
   </footer>
 <script>
-let lastImgStamp = "";
+let lastImgStamp = null;
 async function poll() {
   try {
     const r = await fetch("/api/status",{cache:"no-store",credentials:"include"});
@@ -212,9 +212,6 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span id="s_uptime">Up: &hellip;</span>
   </div>
 
-  <h3>Current Photo</h3>
-  <img id="currentImg" alt="current photo" style="max-width:280px;display:block;border-radius:6px;margin-bottom:12px"/>
-
   <div id="saveMsg" class="msg">Settings saved!</div>
   <div id="errMsg"  class="err"></div>
 
@@ -223,9 +220,9 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <label>Photo base URL</label>
     <input type="url" name="photoBaseUrl" id="photoBaseUrl" placeholder="https://192.168.1.10:9369/syncframe/"/>
 
-    <label>Photo filename</label>
-    <div class="row">
+    <div class="row" style="align-items:flex-end">
       <div style="flex:7">
+        <label>Photo filename</label>
         <input type="text" name="photoFilename" id="photoFilename" placeholder="photo.800x480.jpg" style="width:100%"/>
       </div>
       <div style="flex:3">
@@ -369,8 +366,6 @@ async function loadStatus() {
     if (s.uptimeMs !== undefined)
       setSpan("ds_uptime", "Uptime: "+formatUptime(s.uptimeMs), null);
     if (s.hostname) document.getElementById("hostnameHint").textContent = s.hostname;
-    const currentImg = document.getElementById("currentImg");
-    if (currentImg) currentImg.src = '/img/current?t=' + Date.now();
   } catch(e) { setSpan("ds_host","Status unavailable",false); }
 }
 
