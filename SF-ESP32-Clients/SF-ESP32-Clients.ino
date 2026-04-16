@@ -787,11 +787,8 @@ static void mjpegTask(void* pv) {
         buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!buf) buf = (uint8_t*)malloc(allocSize);
       } else {
-        // Free current copy to reclaim heap before allocating frame buffer
-        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-          freeBuf(currentJpg, currentJpgLen);
-          xSemaphoreGive(drawMutex);
-        }
+		// don't pre-free; let the promote block handle it normally
+		// (accept the brief dual-buffer peak; it fits in internal RAM for one frame)
         if (allocSize > MAX_JPG) allocSize = MAX_JPG;
         buf = (uint8_t*)malloc(allocSize);
       }
@@ -1101,18 +1098,18 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  uint8_t* copy = nullptr; size_t copyLen = 0;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    if (currentJpg && currentJpgLen) {
-      copy = (uint8_t*)malloc(currentJpgLen);
-      if (copy) { memcpy(copy, currentJpg, currentJpgLen); copyLen = currentJpgLen; }
-    }
-    xSemaphoreGive(drawMutex);
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    server.send(503, "text/plain", "busy");
+    return;
   }
-  if (!copy) { server.send(404, "text/plain", "no image"); return; }
+  if (!currentJpg || !currentJpgLen) {
+    xSemaphoreGive(drawMutex);
+    server.send(404, "text/plain", "no image");
+    return;
+  }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)copy, copyLen);
-  free(copy);
+  server.send_P(200, "image/jpeg", (const char*)currentJpg, currentJpgLen);
+  xSemaphoreGive(drawMutex);
 }
 
 static void handleImgLast() {
