@@ -298,6 +298,11 @@ function apiFetch(url, opts) {
   return fetch(url, Object.assign({credentials:"include",cache:"no-store"}, opts||{}));
 }
 
+async function rebootDevice() {
+  if (!confirm("Reboot the device?")) return;
+  try { await apiFetch("/api/reboot", {method:"POST"}); } catch(e) {}
+}
+
 let logSince = 0;
 let logTimer = null;
 

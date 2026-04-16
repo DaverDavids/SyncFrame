@@ -842,6 +842,8 @@ static void mjpegTask(void* pv) {
 
     stream_done:
     client->stop();
+    delete client;
+    streamClient = nullptr;
 
     mjpegConnected = false;
     lastMjpegAttemptMs = 0;
@@ -851,8 +853,9 @@ static void mjpegTask(void* pv) {
 
 static void mjpegMaybeReconnect() {
   if (mjpegConnected) {
+    unsigned long reconnectInterval = (unsigned long)max(cfg.streamReconnectMin, 1) * 60000UL;
     if (mjpegForceReconnect ||
-        millis() - lastMjpegConnectMs >= (unsigned long)cfg.streamReconnectMin * 60000UL) {
+        millis() - lastMjpegConnectMs >= reconnectInterval) {
       mjpegRequestRefresh = true;
       lastMjpegAttemptMs = 0;
     }
@@ -1126,7 +1129,9 @@ static void handleActionReboot() {
   if (!requireWebAuth()) return;
   logEvent("WEB", "reboot requested");
   server.send(200, "application/json", "{\"ok\":true}");
-  delay(500);
+  delay(100);
+  server.handleClient();
+  delay(400);
   ESP.restart();
 }
 
