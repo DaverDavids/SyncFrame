@@ -29,21 +29,16 @@ extern bool showingLast;
 extern bool hasLastPhoto();
 extern volatile bool boardDrawActive;
 
-// board_loop() needs cfg.peekButtonPin but Config is defined later in the .ino.
-// A thin getter avoids a forward-declaring the entire struct here and avoids
-// the redefinition error that a duplicate struct definition would cause.
-extern int getCfgPeekButtonPin();
-
 void board_init() {
   gfx->begin();
   gfx->fillScreen(0x0000);
 }
 
-void board_loop() {
+void board_loop(int peekPin) {
   if (boardDrawActive) return;
-  if (getCfgPeekButtonPin() < 0) return;
+  if (peekPin < 0) return;
 
-  bool pressed = (digitalRead(getCfgPeekButtonPin()) == LOW);
+  bool pressed = (digitalRead(peekPin) == LOW);
 
   if (pressed && !showingLast && hasLastPhoto()) {
     showLastPhoto();

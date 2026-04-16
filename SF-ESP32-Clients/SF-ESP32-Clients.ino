@@ -1175,6 +1175,6 @@ void loop() {
     }
   }
 
-  board_loop();
+  board_loop(cfg.peekButtonPin);
   delay(1);
 }

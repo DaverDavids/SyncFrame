@@ -56,7 +56,8 @@ void board_init() {
   ts.setRotation(0);
 }
 
-void board_loop() {
+void board_loop(int peekPin) {
+  (void)peekPin;  // S3 uses touchscreen, not a GPIO button
   // Do not touch the display while a JPEG decode/draw is in progress.
   // The RGB panel DMA is live; an unsynchronised fillScreen here would
   // race the scanner and produce the wrap-around line-shift artifact.
