@@ -664,18 +664,20 @@ static void mjpegTask(void* pv) {
     client->print("\r\n");
 
     String statusLine = client->readStringUntil('\n');
+	
 	if (!statusLine.startsWith("HTTP/1.1 200")) {
-		logEvent("STREAM", "status %s", statusLine.c_str());
+		logEvent("STREAM", "status %s", statusLine.c_str());  // already logs it
 		client->stop();
 		delete client;
 		streamClient = nullptr;
 		mjpegConnected = false;
 
-		// If 304 Not Modified, wait longer before retrying (photo unchanged)
 		if (statusLine.indexOf("304") >= 0) {
-			lastMjpegAttemptMs = millis() - 15000 + 60000UL; // retry in ~60s
+			lastMjpegAttemptMs = millis() - 15000 + 60000UL;
+		} else if (statusLine.indexOf("503") >= 0 || statusLine.indexOf("429") >= 0) {
+			lastMjpegAttemptMs = millis();  // retry after 15s for server-busy errors
 		} else {
-			lastMjpegAttemptMs = millis(); // normal 15s retry for other errors
+			lastMjpegAttemptMs = millis();  // ← CHANGE: was same, but now log tells you what's happening
 		}
 		vTaskDelete(NULL);
 		return;
@@ -865,8 +867,9 @@ static void mjpegMaybeReconnect() {
     unsigned long reconnectInterval = (unsigned long)max(cfg.streamReconnectMin, 1) * 60000UL;
     if (mjpegForceReconnect ||
         millis() - lastMjpegConnectMs >= reconnectInterval) {
-      mjpegRequestRefresh = true;
-      lastMjpegAttemptMs = 0;
+			mjpegForceReconnect = false;
+			mjpegRequestRefresh = true;
+			lastMjpegAttemptMs = 0;
     }
     return;
   }
