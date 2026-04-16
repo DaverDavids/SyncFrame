@@ -1238,7 +1238,13 @@ def stream():
         except Exception:
             pass
 
-    logging.info(f"Stream connect: mac={mac} hostname={hostname} resolution={resolution} compiled={compiled}")
+    with _stream_lock:
+        prev = connected_stream_clients.get(mac)
+        is_reconnect = prev is not None
+    if not is_reconnect:
+        logging.info(f"Stream connect: mac={mac} hostname={hostname} resolution={resolution} compiled={compiled}")
+    else:
+        logging.debug(f"Stream reconnect: mac={mac} hostname={hostname}")
 
     with _stream_lock:
         # If MAC already connected, signal old generator to stop cleanly

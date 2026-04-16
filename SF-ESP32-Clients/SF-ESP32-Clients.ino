@@ -714,10 +714,11 @@ static void mjpegTask(void* pv) {
       // Wait for boundary line
       String boundary = "";
       while (client->connected()) {
-        if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-        boundary = client->readStringUntil('\n');
-        break;
-      }
+		  if (mjpegRequestRefresh) goto stream_done;
+		  if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+          boundary = client->readStringUntil('\n');
+          break;
+        }
       if (!boundary.startsWith("--frame")) {
         if (!client->connected()) break;
         continue;
