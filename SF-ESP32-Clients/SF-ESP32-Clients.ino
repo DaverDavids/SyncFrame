@@ -68,6 +68,7 @@ struct Config {
   String webUser;
   String webPass;
   int    streamReconnectMin;
+  int    peekButtonPin;
 } cfg;
 
 static String installedFwToken    = "";
@@ -306,6 +307,7 @@ static void loadConfig() {
   cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
   cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
   cfg.streamReconnectMin = prefs.getInt("sreconn",   10);
+  cfg.peekButtonPin      = prefs.getInt("peekpin",   -1);
   installedFwToken      = prefs.getString("fwtoken", "");
   installedFwFilename   = prefs.getString("fwfile",  "");
   prefs.end();
@@ -341,6 +343,7 @@ static void saveConfig() {
   prefs.putString("wbuser", cfg.webUser);
   prefs.putString("wbpass", cfg.webPass);
   prefs.putInt("sreconn",   cfg.streamReconnectMin);
+  prefs.putInt("peekpin",   cfg.peekButtonPin);
   prefs.end();
 }
 
@@ -803,14 +806,24 @@ static void mjpegTask(void* pv) {
         bool changed = strcmp(oldHash, currentPhotoHash) != 0;
         lastDataMs = millis();
 
-        // Transfer buffer to currentJpg (reuses buf, no second malloc)
+        // Promote current → last before overwriting (only on new content)
         if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          freeBuf(currentJpg, currentJpgLen);
-          currentJpg = buf;          // transfer ownership
+          if (changed && currentJpg && currentJpgLen) {
+            freeBuf(lastJpg, lastJpgLen);
+            lastJpg    = currentJpg;
+            lastJpgLen = currentJpgLen;
+            currentJpg    = nullptr;
+            currentJpgLen = 0;
+          } else {
+            freeBuf(currentJpg, currentJpgLen);
+          }
+          currentJpg    = buf;
           currentJpgLen = readTotal;
-          buf = nullptr;              // prevent double-free
-          board_draw_jpeg(currentJpg, currentJpgLen);
-          boardDrawActive = false;
+          buf           = nullptr;
+          if (!showingLast) {
+            board_draw_jpeg(currentJpg, currentJpgLen);
+            boardDrawActive = false;
+          }
           xSemaphoreGive(drawMutex);
         }
         logEvent("STREAM", "frame size=%u hash=%s %s heap=%u",
@@ -957,7 +970,8 @@ static void handleConfigPage() {
   j += "\"httpPass\":\"";       appendJsonPassword(j, cfg.httpPass);     j += "\",";
   j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
   j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\",";
-  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin);
+  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin); j += ",";
+  j += "\"peekButtonPin\":"; j += String(cfg.peekButtonPin);
   j += "}";
 
   String html = FPSTR(CONFIG_HTML);
@@ -992,7 +1006,8 @@ static void handleStatusJson() {
   j += "\"screenH\":"; j += String(SCREEN_H); j += ",";
   j += "\"psram\":";   j += (hasPsram() ? "true" : "false"); j += ",";
   j += "\"heapFree\":"; j += String(ESP.getFreeHeap()); j += ",";
-  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin);
+  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin); j += ",";
+  j += "\"peekButtonPin\":"; j += String(cfg.peekButtonPin);
   j += "}";
   server.send(200, "application/json", j);
 }
@@ -1054,8 +1069,12 @@ static void handlePostConfig() {
     int v = server.arg("streamReconnectMin").toInt();
     if (v >= 1 && v <= 1440) cfg.streamReconnectMin = v;
   }
+  if (server.hasArg("peekButtonPin")) {
+    cfg.peekButtonPin = server.arg("peekButtonPin").toInt();
+  }
   cfg.httpsInsecure   = server.hasArg("httpsInsecure");
   saveConfig();
+  if (cfg.peekButtonPin >= 0) pinMode(cfg.peekButtonPin, INPUT_PULLUP);
   mjpegForceReconnect = true;
   logEvent("WEB", "config saved");
   server.send(200, "application/json", "{\"ok\":true}");
@@ -1122,6 +1141,7 @@ void setup() {
   xSemaphoreGive(drawMutex);
 
   loadConfig();
+  if (cfg.peekButtonPin >= 0) pinMode(cfg.peekButtonPin, INPUT_PULLUP);
   board_init();
 
   board_draw_jpeg(splash_logo, splash_logo_len);

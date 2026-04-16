@@ -27,6 +27,7 @@ extern void showCurrentPhoto();
 extern void showLastPhoto();
 extern bool showingLast;
 extern bool hasLastPhoto();
+extern volatile bool boardDrawActive;
 
 void board_init() {
   gfx->begin();
@@ -34,5 +35,14 @@ void board_init() {
 }
 
 void board_loop() {
-  // Empty loop now that RFID is removed
+  if (boardDrawActive) return;
+  if (cfg.peekButtonPin < 0) return;
+
+  bool pressed = (digitalRead(cfg.peekButtonPin) == LOW);
+
+  if (pressed && !showingLast && hasLastPhoto()) {
+    showLastPhoto();
+  } else if (!pressed && showingLast) {
+    showCurrentPhoto();
+  }
 }

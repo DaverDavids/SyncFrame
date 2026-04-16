@@ -233,6 +233,9 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
 
     <label><input type="checkbox" name="httpsInsecure" id="httpsInsecure"/> Allow insecure HTTPS (self-signed)</label>
 
+    <label>Peek button GPIO pin <span class="small">(C3 only; -1 = disabled)</span></label>
+    <input type="number" name="peekButtonPin" id="peekButtonPin" min="-1" max="48" value="-1" style="width:120px"/>
+
     <div class="row">
       <div>
         <label>HTTP Basic auth user</label>
@@ -310,6 +313,7 @@ function applyCfg(c) {
   document.getElementById("webPass").placeholder     = c.webPass  ? "\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF\u25CF" : "(not set \u2014 auth disabled)";
   if (c.hostname) document.getElementById("hostnameHint").textContent = c.hostname;
   if (document.getElementById("streamReconnectMin")) document.getElementById("streamReconnectMin").value = c.streamReconnectMin || 10;
+  if (document.getElementById("peekButtonPin")) document.getElementById("peekButtonPin").value = (c.peekButtonPin !== undefined) ? c.peekButtonPin : -1;
 }
 
 applyCfg(c);
@@ -410,6 +414,7 @@ document.getElementById("configForm").addEventListener('submit', async (e) => {
   f.append('photoBaseUrl',       document.getElementById("photoBaseUrl").value);
   f.append('photoFilename',      document.getElementById("photoFilename").value);
   f.append('streamReconnectMin', document.getElementById("streamReconnectMin").value);
+  f.append('peekButtonPin', document.getElementById("peekButtonPin").value);
   f.append('httpUser',           document.getElementById("httpUser").value);
   const webUserVal  = document.getElementById("webUser").value;
   const httpPassVal = document.getElementById("httpPass").value;
