@@ -29,23 +29,10 @@ extern bool showingLast;
 extern bool hasLastPhoto();
 extern volatile bool boardDrawActive;
 
-// Forward declaration of Config struct and cfg instance so board_loop() can
-// reference cfg.peekButtonPin even though the full definition is in the .ino
-// (which is compiled after all headers are included).
-struct Config;
-extern struct Config {
-  String wifiSsid;
-  String wifiPass;
-  String photoBaseUrl;
-  String photoFilename;
-  bool   httpsInsecure;
-  String httpUser;
-  String httpPass;
-  String webUser;
-  String webPass;
-  int    streamReconnectMin;
-  int    peekButtonPin;
-} cfg;
+// board_loop() needs cfg.peekButtonPin but Config is defined later in the .ino.
+// A thin getter avoids a forward-declaring the entire struct here and avoids
+// the redefinition error that a duplicate struct definition would cause.
+extern int getCfgPeekButtonPin();
 
 void board_init() {
   gfx->begin();
@@ -54,9 +41,9 @@ void board_init() {
 
 void board_loop() {
   if (boardDrawActive) return;
-  if (cfg.peekButtonPin < 0) return;
+  if (getCfgPeekButtonPin() < 0) return;
 
-  bool pressed = (digitalRead(cfg.peekButtonPin) == LOW);
+  bool pressed = (digitalRead(getCfgPeekButtonPin()) == LOW);
 
   if (pressed && !showingLast && hasLastPhoto()) {
     showLastPhoto();
