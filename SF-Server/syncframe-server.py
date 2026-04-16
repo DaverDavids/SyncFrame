@@ -51,6 +51,25 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
+class _SuppressSSLHandshakeErrors(logging.Filter):
+    _SUPPRESS = {
+        "SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+        "TLSV1_ALERT_UNKNOWN_CA",
+        "SSL3_GET_CLIENT_HELLO",
+        "WRONG_VERSION_NUMBER",
+        "NO_SHARED_CIPHER",
+        "UNEXPECTED_EOF_WHILE_READING",
+        "EOF occurred in violation of protocol",
+    }
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(s in msg for s in self._SUPPRESS)
+
+logging.getLogger("gevent").addFilter(_SuppressSSLHandshakeErrors())
+logging.getLogger("gevent.ssl").addFilter(_SuppressSSLHandshakeErrors())
+logging.getLogger("gevent.pywsgi").addFilter(_SuppressSSLHandshakeErrors())
+logging.getLogger("gevent._gevent_cgreenlet").addFilter(_SuppressSSLHandshakeErrors())
+
 # ---------------------------------------------------------------------------
 # Data directory
 # ---------------------------------------------------------------------------
@@ -1992,4 +2011,25 @@ if __name__ == "__main__":
         # Direct dev-server fallback
         from gevent import monkey
         monkey.patch_all()
-        app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+        from gevent.pywsgi import WSGIServer
+        import ssl as _ssl
+
+        class _TolerantWSGIServer(WSGIServer):
+            def wrap_socket_and_handle(self, client_socket, address):
+                try:
+                    super().wrap_socket_and_handle(client_socket, address)
+                except _ssl.SSLError:
+                    pass
+
+        ssl_args = {}
+        if USE_HTTPS:
+            ssl_args["keyfile"] = KEYFILE
+            ssl_args["certfile"] = CERTFILE
+
+        http_server = _TolerantWSGIServer(
+            (SERVER_HOST, SERVER_PORT),
+            app,
+            **ssl_args
+        )
+        logging.info("Starting dev server on %s:%s", SERVER_HOST, SERVER_PORT)
+        http_server.serve_forever()
