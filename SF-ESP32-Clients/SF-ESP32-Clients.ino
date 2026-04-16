@@ -102,7 +102,7 @@ static unsigned long     lastMjpegConnectMs = 0;
 static unsigned long     lastMjpegAttemptMs = 0;
 static bool              mjpegForceReconnect = false;
 static volatile bool    mjpegRequestRefresh = false;
-static char              currentPhotoHash[12] = "";
+static char              currentPhotoEtag[24] = "";
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
@@ -643,7 +643,7 @@ static void mjpegTask(void* pv) {
   client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
   client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
   client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
-  client->print("X-SF-Photo-Hash: " + String(currentPhotoHash) + "\r\n");
+  client->print("X-SF-Photo-Etag: " + String(currentPhotoEtag) + "\r\n");
   client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
   if (cfg.httpUser.length() > 0) {
     String auth = cfg.httpUser + ":" + cfg.httpPass;
@@ -729,6 +729,12 @@ static void mjpegTask(void* pv) {
         } else if (line.startsWith("X-SF-Frame-Type:")) {
           String val = line.substring(16); val.trim();
           frameType = val;
+        } else if (line.startsWith("X-SF-Etag:")) {
+          String val = line.substring(10); val.trim();
+          if (val.length() > 0 && val.length() < sizeof(currentPhotoEtag)) {
+            strncpy(currentPhotoEtag, val.c_str(), sizeof(currentPhotoEtag) - 1);
+            currentPhotoEtag[sizeof(currentPhotoEtag) - 1] = '\0';
+          }
         }
       }
 
@@ -799,11 +805,7 @@ static void mjpegTask(void* pv) {
       }
 
       if (readTotal == contentLength) {
-        char oldHash[12];
-        strncpy(oldHash, currentPhotoHash, sizeof(oldHash));
-        uint32_t computed = crc32buf(buf, readTotal);
-        snprintf(currentPhotoHash, sizeof(currentPhotoHash), "%08lx", (unsigned long)computed);
-        bool changed = strcmp(oldHash, currentPhotoHash) != 0;
+        bool changed = true;
         lastDataMs = millis();
 
         // Promote current → last before overwriting (only on new content)
@@ -826,8 +828,8 @@ static void mjpegTask(void* pv) {
           }
           xSemaphoreGive(drawMutex);
         }
-        logEvent("STREAM", "frame size=%u hash=%s %s heap=%u",
-          (unsigned)readTotal, currentPhotoHash,
+        logEvent("STREAM", "frame size=%u etag=%s %s heap=%u",
+          (unsigned)readTotal, currentPhotoEtag,
           changed ? "NEW" : "same",
           (unsigned)ESP.getFreeHeap());
       } else {
@@ -852,6 +854,7 @@ static void mjpegMaybeReconnect() {
     if (mjpegForceReconnect ||
         millis() - lastMjpegConnectMs >= (unsigned long)cfg.streamReconnectMin * 60000UL) {
       mjpegRequestRefresh = true;
+      lastMjpegAttemptMs = 0;
     }
     return;
   }
@@ -996,7 +999,7 @@ static void handleStatusJson() {
   j += "\"ota\":";   j += (networkServicesStarted ? "true" : "false"); j += ",";
   j += "\"mjpeg\":";       j += (mjpegConnected ? "true" : "false"); j += ",";
   j += "\"lastMjpegConnectMs\":"; j += String(lastMjpegConnectMs); j += ",";
-  j += "\"photoHash\":\""; appendJsonEscaped(j, currentPhotoHash); j += "\",";
+  j += "\"photoHash\":\""; appendJsonEscaped(j, currentPhotoEtag); j += "\",";
   j += "\"lastLogSeq\":";     j += String(logSeq); j += ",";
   j += "\"installedFw\":\"";  appendJsonEscaped(j, installedFwFilename); j += "\",";
   j += "\"compiledId\":\"";   appendJsonEscaped(j, compileIdStr); j += "\",";

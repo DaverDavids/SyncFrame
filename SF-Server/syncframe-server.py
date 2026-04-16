@@ -1227,7 +1227,7 @@ def stream():
     mac = mac_raw.replace(":", "")  # strip colons
     uptime = (request.headers.get("X-SF-Uptime") or "").strip()
     compiled = (request.headers.get("X-SF-Compiled") or "").strip()
-    photo_hash = (request.headers.get("X-SF-Photo-Hash") or "").strip()
+    photo_hash = (request.headers.get("X-SF-Photo-Etag") or "").strip()
     resolution_str = (request.headers.get("X-SF-Resolution") or "").strip()
     resolution = (800, 480)  # default
     if resolution_str:
@@ -1262,7 +1262,7 @@ def stream():
     def generate():
         nonlocal mac
         last_push = time.time()
-        last_sent_hash = ""  # track what we've sent to avoid duplicates
+        last_sent_etag = ""  # track what we've sent to avoid duplicates
         q = connected_stream_clients[mac]["queue"]
         
         # OTA check: before entering keepalive loop, check for pending firmware
@@ -1287,19 +1287,21 @@ def stream():
                 except Exception as e:
                     logging.warning(f"Failed to push OTA to {hostname}: {e}")
         
-        # Photo check: push current photo if it differs from client's hash (or client has no hash)
-        if current_photo_hash and photo_hash != current_photo_hash:
+        # Photo check: push current photo if it differs from client's etag
+        if photo_upload_etag and photo_hash != photo_upload_etag:
             variant_file = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{resolution[0]}x{resolution[1]}.jpg")
             if not os.path.exists(variant_file):
                 variant_file = WATCH_FILE
             try:
                 with open(variant_file, "rb") as f:
                     jpeg_bytes = f.read()
-                yield f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpeg_bytes)}\r\n\r\n".encode()
+                yield (f"--frame\r\nContent-Type: image/jpeg\r\n"
+                       f"X-SF-Etag: {photo_upload_etag}\r\n"
+                       f"Content-Length: {len(jpeg_bytes)}\r\n\r\n").encode()
                 yield jpeg_bytes
                 last_push = time.time()
                 logging.info(f"Stream initial photo pushed to {mac}")
-                last_sent_hash = current_photo_hash  # update after sending
+                last_sent_etag = photo_upload_etag  # update after sending
                 # Drain any duplicate that _push_photo_to_stream_clients may have queued
                 try:
                     while not q.empty():
@@ -1315,16 +1317,18 @@ def stream():
                     item = q.get(timeout=1.0)
                 except queue.Empty:
                     # Check if we missed any photo pushes while blocked on queue
-                    if current_photo_hash and current_photo_hash != last_sent_hash:
+                    if photo_upload_etag and photo_upload_etag != last_sent_etag:
                         variant_file = os.path.join(os.path.dirname(WATCH_FILE), f"photo.{resolution[0]}x{resolution[1]}.jpg")
                         if not os.path.exists(variant_file):
                             variant_file = WATCH_FILE
                         try:
                             with open(variant_file, "rb") as f:
                                 jpeg_bytes = f.read()
-                            yield f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpeg_bytes)}\r\n\r\n".encode()
+                            yield (f"--frame\r\nContent-Type: image/jpeg\r\n"
+                                   f"X-SF-Etag: {photo_upload_etag}\r\n"
+                                   f"Content-Length: {len(jpeg_bytes)}\r\n\r\n").encode()
                             yield jpeg_bytes
-                            last_sent_hash = current_photo_hash
+                            last_sent_etag = photo_upload_etag
                             last_push = time.time()
                         except Exception:
                             pass
@@ -1343,7 +1347,9 @@ def stream():
                         yield b"--frame\r\n\r\n"
                         last_push = time.time()
                     else:
-                        yield f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(item)}\r\n\r\n".encode()
+                        yield (f"--frame\r\nContent-Type: image/jpeg\r\n"
+                               f"X-SF-Etag: {photo_upload_etag}\r\n"
+                               f"Content-Length: {len(item)}\r\n\r\n").encode()
                         yield item
                         last_push = time.time()
         except GeneratorExit:
