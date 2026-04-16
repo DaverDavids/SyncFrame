@@ -66,6 +66,11 @@ void board_loop(int peekPin) {
   ts.read();
   bool pressed = ts.isTouched;
 
+  // Only act on state CHANGES, not every loop tick (1ms)
+  static bool lastPressed = false;
+  if (pressed == lastPressed) return;
+  lastPressed = pressed;
+
   if (pressed && !showingLast && hasLastPhoto()) {
     showLastPhoto();
   } else if (!pressed && showingLast) {

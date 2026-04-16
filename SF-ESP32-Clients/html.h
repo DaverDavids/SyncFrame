@@ -97,6 +97,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   </footer>
 <script>
 let lastImgStamp = null;
+// Load image immediately on page open without waiting for a hash change
+document.getElementById("img").src = "/img/current?ts=" + Date.now();
 async function poll() {
   try {
     const r = await fetch("/api/status",{cache:"no-store",credentials:"include"});
@@ -104,11 +106,13 @@ async function poll() {
     if (s.ip)       document.getElementById("f_ip").textContent   = "IP: "  +s.ip;
     if (s.mac)      document.getElementById("f_mac").textContent  = "MAC: " +s.mac;
     if (s.hostname) document.getElementById("f_host").textContent = "Host: "+s.hostname;
-    if (s.photoHash && s.photoHash !== lastImgStamp) {
+    if (s.photoHash !== lastImgStamp) {
       lastImgStamp = s.photoHash;
-      document.getElementById("img").src = "/img/current?ts="+encodeURIComponent(s.photoHash);
-      document.getElementById("last-updated").textContent =
-        "Last updated: " + new Date().toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
+      document.getElementById("img").src = "/img/current?ts=" + encodeURIComponent(s.photoHash || Date.now());
+      if (s.photoHash) {
+        document.getElementById("last-updated").textContent =
+          "Last updated: " + new Date().toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
+      }
     }
   } catch(e) {}
 }
