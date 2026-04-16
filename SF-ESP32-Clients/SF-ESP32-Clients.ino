@@ -1108,24 +1108,28 @@ static void handleImgCurrent() {
     return;
   }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)currentJpg, currentJpgLen);
+  server.setContentLength(currentJpgLen);
+  server.send(200, "image/jpeg", "");
+  server.sendContent((const char*)currentJpg, currentJpgLen);
   xSemaphoreGive(drawMutex);
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  uint8_t* copy = nullptr; size_t copyLen = 0;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    if (lastJpg && lastJpgLen) {
-      copy = (uint8_t*)malloc(lastJpgLen);
-      if (copy) { memcpy(copy, lastJpg, lastJpgLen); copyLen = lastJpgLen; }
-    }
-    xSemaphoreGive(drawMutex);
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    server.send(503, "text/plain", "busy");
+    return;
   }
-  if (!copy) { server.send(404, "text/plain", "no last image"); return; }
+  if (!lastJpg || !lastJpgLen) {
+    xSemaphoreGive(drawMutex);
+    server.send(404, "text/plain", "no last image");
+    return;
+  }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)copy, copyLen);
-  free(copy);
+  server.setContentLength(lastJpgLen);
+  server.send(200, "image/jpeg", "");
+  server.sendContent((const char*)lastJpg, lastJpgLen);
+  xSemaphoreGive(drawMutex);
 }
 
 static void handleActionRefresh() {
