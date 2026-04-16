@@ -664,13 +664,22 @@ static void mjpegTask(void* pv) {
     client->print("\r\n");
 
     String statusLine = client->readStringUntil('\n');
-    if (!statusLine.startsWith("HTTP/1.1 200")) {
-      logEvent("STREAM", "status %s", statusLine.c_str());
-      client->stop();
-      mjpegConnected = false;
-      vTaskDelete(NULL);
-      return;
-    }
+	if (!statusLine.startsWith("HTTP/1.1 200")) {
+		logEvent("STREAM", "status %s", statusLine.c_str());
+		client->stop();
+		delete client;
+		streamClient = nullptr;
+		mjpegConnected = false;
+
+		// If 304 Not Modified, wait longer before retrying (photo unchanged)
+		if (statusLine.indexOf("304") >= 0) {
+			lastMjpegAttemptMs = millis() - 15000 + 60000UL; // retry in ~60s
+		} else {
+			lastMjpegAttemptMs = millis(); // normal 15s retry for other errors
+		}
+		vTaskDelete(NULL);
+		return;
+	}
 
     unsigned long lastDataMs = 0;
 
