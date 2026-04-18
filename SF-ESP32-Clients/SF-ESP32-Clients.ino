@@ -139,7 +139,7 @@ static void handleActionReboot();
 static bool requireWebAuth() {
   bool imgEndpoint = false;
   if (server.uri().startsWith("/img/")) imgEndpoint = true;
-  int threshold = imgEndpoint ? 10000 : 20000;
+  int threshold = imgEndpoint ? 10000 : 50000;
   if (ESP.getFreeHeap() < threshold) {
     server.send(503, "application/json", "{\"ok\":false,\"err\":\"low memory\"}");
     return false;
@@ -706,7 +706,7 @@ static void mjpegTask(void* pv) {
         logEvent("STREAM", "refresh requested, reconnecting");
         break;
       }
-      if (millis() - lastDataMs > 90000) {
+      if (millis() - lastDataMs > 150000) {
         logEvent("STREAM", "idle timeout");
         break;
       }
@@ -883,7 +883,12 @@ static void mjpegMaybeReconnect() {
   mjpegConnected      = true;
   lastMjpegConnectMs = millis();
   lastMjpegAttemptMs = millis();
-  BaseType_t taskCreated = xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", 16384, nullptr, 1, nullptr, APP_CORE);
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  const uint32_t STREAM_STACK = 24576;
+#else
+  const uint32_t STREAM_STACK = 16384;
+#endif
+  BaseType_t taskCreated = xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", STREAM_STACK, nullptr, 1, nullptr, APP_CORE);
   if (taskCreated != pdPASS) {
     mjpegConnected = false;
     logEvent("STREAM", "task create failed");

@@ -1278,7 +1278,14 @@ def stream():
                 connected_stream_clients[mac]["queue"].put_nowait(b"_close_")
             except Exception:
                 pass
-        connected_stream_clients[mac] = {
+    # Wait up to 2s for old generator to clean itself up
+    for _ in range(20):
+        with _stream_lock:
+            if mac not in connected_stream_clients:
+                break
+        time.sleep(0.1)
+
+    with _stream_lock:
             "response": None,
             "resolution": resolution,
             "hostname": hostname,
@@ -1367,7 +1374,7 @@ def stream():
                             last_push = time.time()
                         except Exception:
                             pass
-                    elif time.time() - last_push >= 60:
+                    elif time.time() - last_push >= 30:
                         # Keepalive frame (empty boundary with no body)
                         yield b"--frame\r\n\r\n"
                         last_push = time.time()
