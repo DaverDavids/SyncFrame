@@ -1329,8 +1329,7 @@ def stream():
                     yield fw_data
                     yield b"--frame--\r\n"
                     logging.info(f"Stream OTA pushed to {hostname}: {client_data['firmware']}")
-with _stream_lock:
-        connected_stream_clients[mac] = {
+                    with _stream_lock:
                         if mac in connected_stream_clients:
                             del connected_stream_clients[mac]
                     return
