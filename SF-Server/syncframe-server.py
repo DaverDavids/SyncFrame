@@ -1292,6 +1292,7 @@ def stream():
         time.sleep(0.1)
 
     with _stream_lock:
+        connected_stream_clients[mac] = {
             "response": None,
             "resolution": resolution,
             "hostname": hostname,
@@ -1328,7 +1329,8 @@ def stream():
                     yield fw_data
                     yield b"--frame--\r\n"
                     logging.info(f"Stream OTA pushed to {hostname}: {client_data['firmware']}")
-                    with _stream_lock:
+with _stream_lock:
+        connected_stream_clients[mac] = {
                         if mac in connected_stream_clients:
                             del connected_stream_clients[mac]
                     return
