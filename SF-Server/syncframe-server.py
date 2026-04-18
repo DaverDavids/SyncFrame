@@ -1379,6 +1379,12 @@ def stream():
                                    f"Content-Length: {len(jpeg_bytes)}\r\n\r\n").encode()
                             yield jpeg_bytes
                             last_push = time.time()
+                            # drain any duplicate the push thread already queued
+                            try:
+                                while not q.empty():
+                                    q.get_nowait()
+                            except Exception:
+                                pass
                         except Exception:
                             pass
                     elif time.time() - last_push >= 30:
@@ -1396,11 +1402,18 @@ def stream():
                         yield b"--frame\r\n\r\n"
                         last_push = time.time()
                     else:
+                        last_sent_etag = photo_upload_etag  # update BEFORE yield
                         yield (f"--frame\r\nContent-Type: image/jpeg\r\n"
                                f"X-SF-Etag: {photo_upload_etag}\r\n"
                                f"Content-Length: {len(item)}\r\n\r\n").encode()
                         yield item
                         last_push = time.time()
+                        # drain any duplicate the push thread already queued
+                        try:
+                            while not q.empty():
+                                q.get_nowait()
+                        except Exception:
+                            pass
         except GeneratorExit:
             pass
         finally:
