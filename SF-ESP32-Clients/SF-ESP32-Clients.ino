@@ -817,14 +817,12 @@ static void mjpegTask(void* pv) {
         bool changed = true;
         lastDataMs = millis();
 
-        // Consume trailing \r\n after frame body
+        // Non-blocking drain of trailing \r\n — just peek and consume what's there
         {
-          unsigned long drainStart = millis();
-          while (client->connected() && millis() - drainStart < 200) {
-            if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
-            char c = client->read();
-            if (c == '\n') break;
-          }
+            size_t avail = client->available();
+            uint8_t tmp[2];
+            if (avail >= 2) client->read(tmp, 2);
+            else if (avail == 1) client->read(tmp, 1);
         }
 
         // Promote current → last before overwriting (only on new content)
