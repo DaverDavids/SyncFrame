@@ -817,6 +817,16 @@ static void mjpegTask(void* pv) {
         bool changed = true;
         lastDataMs = millis();
 
+        // Consume trailing \r\n after frame body
+        {
+          unsigned long drainStart = millis();
+          while (client->connected() && millis() - drainStart < 200) {
+            if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+            char c = client->read();
+            if (c == '\n') break;
+          }
+        }
+
         // Promote current → last before overwriting (only on new content)
         if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
           if (changed && currentJpg && currentJpgLen) {

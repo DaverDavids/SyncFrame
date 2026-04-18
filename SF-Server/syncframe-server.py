@@ -1352,6 +1352,7 @@ def stream():
                        f"X-SF-Etag: {photo_upload_etag}\r\n"
                        f"Content-Length: {len(jpeg_bytes)}\r\n\r\n").encode()
                 yield jpeg_bytes
+                yield b"\r\n"
                 last_push = time.time()
                 logging.info(f"Stream initial photo pushed to {mac}")
                 last_sent_etag = photo_upload_etag  # update after sending
@@ -1382,6 +1383,7 @@ def stream():
                                    f"X-SF-Etag: {photo_upload_etag}\r\n"
                                    f"Content-Length: {len(jpeg_bytes)}\r\n\r\n").encode()
                             yield jpeg_bytes
+                            yield b"\r\n"
                             last_push = time.time()
                             # drain any duplicate the push thread already queued
                             try:
@@ -1411,6 +1413,7 @@ def stream():
                                f"X-SF-Etag: {photo_upload_etag}\r\n"
                                f"Content-Length: {len(item)}\r\n\r\n").encode()
                         yield item
+                        yield b"\r\n"
                         last_push = time.time()
                         # drain any duplicate the push thread already queued
                         try:
