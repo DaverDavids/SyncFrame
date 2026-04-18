@@ -2002,13 +2002,15 @@ else:
 # Background startup — runs once whether launched via gunicorn or directly.
 # Starts mosquitto, the file watcher, and the desaturation scheduler.
 # ---------------------------------------------------------------------------
-_startup_done = threading.Event()
-
 
 def _do_startup():
-    if _startup_done.is_set():
+    pid_file = os.path.join(MOSQ_DIR, "syncframe.pid")
+    try:
+        with open(pid_file, "x") as f:
+            f.write(str(os.getpid()))
+    except FileExistsError:
+        logging.info("Another worker already started mosquitto - skipping broker launch")
         return
-    _startup_done.set()
 
     write_mosquitto_conf()
     generate_mqtt_certificates()
