@@ -1,4 +1,5 @@
 import configparser
+import sys
 import io
 import hashlib
 import json
@@ -78,7 +79,7 @@ logging.getLogger("gevent.ssl").addFilter(_SuppressSSLHandshakeErrors())
 logging.getLogger("gevent.pywsgi").addFilter(_SuppressSSLHandshakeErrors())
 logging.getLogger("gevent._gevent_cgreenlet").addFilter(_SuppressSSLHandshakeErrors())
 
-import sys
+
 class _SuppressSSLStderr:
     _SUPPRESS = {
         "SSLV3_ALERT_CERTIFICATE_UNKNOWN",
