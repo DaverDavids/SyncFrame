@@ -2003,32 +2003,40 @@ else:
 # Starts mosquitto, the file watcher, and the desaturation scheduler.
 # ---------------------------------------------------------------------------
 
+def _broker_already_running():
+    pid_file = os.path.join(MOSQ_DIR, "mosquitto.pid")
+    if not os.path.exists(pid_file):
+        return False
+    try:
+        with open(pid_file) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, ProcessLookupError, PermissionError):
+        return False
+
+
 def _do_startup():
-    pid_file = os.path.join(MOSQ_DIR, "syncframe.pid")
-    try:
-        with open(pid_file, "x") as f:
-            f.write(str(os.getpid()))
-    except FileExistsError:
-        logging.info("Another worker already started mosquitto - skipping broker launch")
-        return
+    if _broker_already_running():
+        logging.info("Mosquitto already running - skipping broker launch")
+    else:
+        write_mosquitto_conf()
+        generate_mqtt_certificates()
+        create_mqtt_password_file()
 
-    write_mosquitto_conf()
-    generate_mqtt_certificates()
-    create_mqtt_password_file()
-
-    mosq_conf = os.path.join(MOSQ_DIR, "mosquitto.conf")
-    logging.info("Starting Mosquitto MQTT broker...")
-    broker_process = None
-    try:
-        broker_process = subprocess.Popen(
-            ["/usr/sbin/mosquitto", "-c", mosq_conf],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        logging.warning(
-            "mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start."
-        )
+        mosq_conf = os.path.join(MOSQ_DIR, "mosquitto.conf")
+        logging.info("Starting Mosquitto MQTT broker...")
+        broker_process = None
+        try:
+            broker_process = subprocess.Popen(
+                ["/usr/sbin/mosquitto", "-c", mosq_conf],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            logging.warning(
+                "mosquitto binary not found at /usr/sbin/mosquitto; skipping broker start."
+            )
 
     logging.info("Watcher started. Monitoring file changes on %s...", WATCH_FILE)
     logging.info('URL prefix is: "%s"', URL_PREFIX or "/")
