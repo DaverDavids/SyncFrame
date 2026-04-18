@@ -51,20 +51,28 @@ except Exception:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
-class _SuppressSSLHandshakeErrors(logging.Filter):
-    _SUPPRESS = {
-        "SSLV3_ALERT_CERTIFICATE_UNKNOWN",
-        "TLSV1_ALERT_UNKNOWN_CA",
-        "SSL3_GET_CLIENT_HELLO",
-        "WRONG_VERSION_NUMBER",
-        "NO_SHARED_CIPHER",
-        "UNEXPECTED_EOF_WHILE_READING",
-        "EOF occurred in violation of protocol",
+class _SuppressSSLStderr:
+    _TRIGGERS = {
+        "failed with SSLError",
+        "failed with SSLEOFError",
     }
-    def filter(self, record):
-        msg = record.getMessage()
-        return not any(s in msg for s in self._SUPPRESS)
+    def __init__(self, orig):
+        self._orig = orig
+        self._suppressing = False
 
+    def write(self, s):
+        if any(t in s for t in self._TRIGGERS):
+            self._suppressing = True
+        if self._suppressing:
+            if s == "\n" or s.strip() == "":
+                self._suppressing = False
+            return
+        self._orig.write(s)
+
+    def flush(self):
+        self._orig.flush()
+
+sys.stderr = _SuppressSSLStderr(sys.stderr)
 logging.getLogger("gevent").addFilter(_SuppressSSLHandshakeErrors())
 logging.getLogger("gevent.ssl").addFilter(_SuppressSSLHandshakeErrors())
 logging.getLogger("gevent.pywsgi").addFilter(_SuppressSSLHandshakeErrors())
