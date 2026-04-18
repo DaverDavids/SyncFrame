@@ -63,7 +63,7 @@ void board_loop(int peekPin) {
   // race the scanner and produce the wrap-around line-shift artifact.
   if (boardDrawActive) return;
 
-  ts.read();
+  //ts.read();
   bool pressed = ts.isTouched;
 
   // Only act on state CHANGES, not every loop tick (1ms)

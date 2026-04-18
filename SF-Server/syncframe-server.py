@@ -2024,6 +2024,17 @@ def _do_startup():
         generate_mqtt_certificates()
         create_mqtt_password_file()
 
+        # Ensure mosquitto files are owned correctly
+        try:
+            import pwd
+            mosq = pwd.getpwnam("mosquitto")
+            for f in os.listdir(MOSQ_DIR):
+                fpath = os.path.join(MOSQ_DIR, f)
+                if os.path.isfile(fpath):
+                    os.chown(fpath, mosq.pw_uid, mosq.pw_gid)
+        except Exception as e:
+            logging.warning("Could not chown mosq files: %s", e)
+
         mosq_conf = os.path.join(MOSQ_DIR, "mosquitto.conf")
         logging.info("Starting Mosquitto MQTT broker...")
         broker_process = None
