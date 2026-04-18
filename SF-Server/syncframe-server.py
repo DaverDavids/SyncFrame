@@ -319,6 +319,12 @@ def _push_photo_to_stream_clients():
         if not os.path.exists(variant_file):
             variant_file = WATCH_FILE
         try:
+            # Drain stale items first to prevent duplicates
+            try:
+                while not client["queue"].empty():
+                    client["queue"].get_nowait()
+            except Exception:
+                pass
             with open(variant_file, "rb") as f:
                 jpeg_bytes = f.read()
             client["queue"].put_nowait(jpeg_bytes)
@@ -1366,11 +1372,11 @@ def stream():
                         try:
                             with open(variant_file, "rb") as f:
                                 jpeg_bytes = f.read()
+                            last_sent_etag = photo_upload_etag  # update BEFORE yield to close race window
                             yield (f"--frame\r\nContent-Type: image/jpeg\r\n"
                                    f"X-SF-Etag: {photo_upload_etag}\r\n"
                                    f"Content-Length: {len(jpeg_bytes)}\r\n\r\n").encode()
                             yield jpeg_bytes
-                            last_sent_etag = photo_upload_etag
                             last_push = time.time()
                         except Exception:
                             pass
