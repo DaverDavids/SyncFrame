@@ -97,8 +97,9 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   </footer>
 <script>
 let lastImgStamp = null;
-// Load image immediately on page open without waiting for a hash change
-document.getElementById("img").src = "/img/current?ts=" + Date.now();
+const imgEl = document.getElementById("img");
+imgEl.onerror = function() { setTimeout(()=>{ imgEl.src = "/img/current?ts=" + Date.now(); }, 3000); };
+imgEl.src = "/img/current?ts=" + Date.now();
 async function poll() {
   try {
     const r = await fetch("/api/status",{cache:"no-store",credentials:"include"});
@@ -106,8 +107,9 @@ async function poll() {
     if (s.ip)       document.getElementById("f_ip").textContent   = "IP: "  +s.ip;
     if (s.mac)      document.getElementById("f_mac").textContent  = "MAC: " +s.mac;
     if (s.hostname) document.getElementById("f_host").textContent = "Host: "+s.hostname;
-    if (s.photoHash !== lastImgStamp) {
-      lastImgStamp = s.photoHash;
+    const newStamp = s.photoHash || "";
+    if (newStamp !== lastImgStamp) {
+      lastImgStamp = newStamp;
       document.getElementById("img").src = "/img/current?ts=" + encodeURIComponent(s.photoHash || Date.now());
       if (s.photoHash) {
         document.getElementById("last-updated").textContent =
