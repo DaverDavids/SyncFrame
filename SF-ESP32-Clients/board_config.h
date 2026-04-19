@@ -50,10 +50,6 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
   int clipW = ((int)x + (int)w > SCREEN_W) ? (SCREEN_W - (int)x) : (int)w;
   int clipH = ((int)y + (int)h > SCREEN_H) ? (SCREEN_H - (int)y) : (int)h;
 
-  if (clipW < (int)w || clipH < (int)h) {
-    gfx->fillRect(x, y, w, h, 0x0000);
-  }
-
   if (clipW == (int)w && clipH == (int)h) {
     gfx->draw16bitRGBBitmap(x, y, data, w, h);
   } else {
@@ -127,8 +123,18 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   int x = (SCREEN_W - scaledW) / 2;  if (x < 0) x = 0;
   int y = (SCREEN_H - scaledH) / 2;  if (y < 0) y = 0;
 
-  // For small screens (280x240), full fillScreen is safe and avoids stale-pixel glitch
-  gfx->fillScreen(0x0000);
+  // ---- Step 4: fill ONLY the letterbox bars (not the whole screen) -------
+  // Each fillRect covers a small strip; it completes before the DMA scanner
+  // reaches that region, so there is no race. For full-frame images (y==0,
+  // x==0) none of these fire.
+  if (y > 0) {
+    gfx->fillRect(0, 0,           SCREEN_W, y,                         0x0000); // top bar
+    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH),  0x0000); // bottom bar
+  }
+  if (x > 0) {
+    gfx->fillRect(0,           y, x,                         scaledH, 0x0000); // left bar
+    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH,  0x0000); // right bar
+  }
 
   // ---- Step 5: configure decoder and draw --------------------------------
   TJpgDec.setJpgScale((uint8_t)bestScale);
@@ -144,8 +150,8 @@ inline void board_draw_jpeg_from_stream(fs::File& f) {
   size_t len = f.size();
   uint8_t* buf = (uint8_t*)malloc(len);
   if (!buf) return;
-  size_t got = f.read(buf, len);
-  if (got < len) memset(buf + got, 0, len - got);
+  f.read(buf, len);
+  vTaskDelay(1);
   board_draw_jpeg(buf, len);
   free(buf);
 }

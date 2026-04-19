@@ -139,7 +139,7 @@ static void handleActionReboot();
 static bool requireWebAuth() {
   bool imgEndpoint = false;
   if (server.uri().startsWith("/img/")) imgEndpoint = true;
-  int threshold = imgEndpoint ? 20000 : 50000;
+  int threshold = imgEndpoint ? 10000 : 50000;
   if (ESP.getFreeHeap() < threshold) {
     server.send(503, "application/json", "{\"ok\":false,\"err\":\"low memory\"}");
     return false;
@@ -1117,40 +1117,20 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
-    server.send(503, "text/plain", "busy");
-    return;
-  }
   File f = LittleFS.open(PATH_CURRENT, "r");
-  if (!f) { xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no image"); return; }
-  size_t len = f.size();
-  uint8_t* buf = (uint8_t*)malloc(len);
-  if (!buf) { f.close(); xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
-  f.read(buf, len);
-  f.close();
-  xSemaphoreGive(drawMutex);
+  if (!f) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)buf, len);
-  free(buf);
+  server.streamFile(f, "image/jpeg");
+  f.close();
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
-    server.send(503, "text/plain", "busy");
-    return;
-  }
   File f = LittleFS.open(PATH_PREV, "r");
-  if (!f) { xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no last image"); return; }
-  size_t len = f.size();
-  uint8_t* buf = (uint8_t*)malloc(len);
-  if (!buf) { f.close(); xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
-  f.read(buf, len);
-  f.close();
-  xSemaphoreGive(drawMutex);
+  if (!f) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)buf, len);
-  free(buf);
+  server.streamFile(f, "image/jpeg");
+  f.close();
 }
 
 static void handleActionRefresh() {
