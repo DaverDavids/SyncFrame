@@ -1445,14 +1445,14 @@ def _update_ota_client(mac, compiled, resolution, hostname, uptime):
         clients[hostname]["compiled"] = compiled
         clients[hostname]["resolution"] = f"{resolution[0]}x{resolution[1]}"
         clients[hostname]["uptime"] = uptime
-        clients[hostname]["last_seen"] = int(time.time())
+        clients[hostname]["last_seen"] = datetime.now(timezone.utc).isoformat()
     else:
         clients[hostname] = {
             "hostname": hostname,
             "compiled": compiled,
             "resolution": f"{resolution[0]}x{resolution[1]}",
             "uptime": uptime,
-            "last_seen": int(time.time()),
+            "last_seen": datetime.now(timezone.utc).isoformat(),
         }
     _save_clients(clients)
 
@@ -1466,135 +1466,6 @@ def allowed_firmware(filename):
         "." in filename
         and filename.rsplit(".", 1)[1].lower() in ALLOWED_FIRMWARE_EXTENSIONS
     )
-
-
-# ---------------------------------------------------------------------------
-# OTA public endpoint
-# ---------------------------------------------------------------------------
-
-
-@bp.route("/ota")
-def ota_check():
-    hostname = (request.headers.get("X-SF-Hostname") or "").strip()
-    mac = (request.headers.get("X-SF-MAC") or "").strip().upper()
-    compiled = (request.headers.get("X-SF-Compiled") or "").strip()
-    uptime = (request.headers.get("X-SF-Uptime") or "").strip()
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    with _ota_lock:
-        clients = _load_clients()
-
-        # --- entry lookup ---
-        mac_match = None
-        hostname_match = None
-
-        if mac:
-            for k, v in clients.items():
-                if v.get("mac") == mac:
-                    mac_match = k
-                    break
-
-        for k, v in clients.items():
-            if v.get("hostname", k) == hostname and v.get("mac", "") in (
-                "",
-                "0000000000",
-            ):
-                hostname_match = k
-                break
-
-        matched_key = None
-
-        if mac_match is not None:
-            matched_key = mac_match
-        elif hostname_match is not None:
-            matched_key = hostname_match
-            if mac:
-                existing_mac = clients[hostname_match].get("mac", "")
-                if (
-                    existing_mac
-                    and existing_mac not in ("", "0000000000")
-                    and existing_mac != mac
-                ):
-                    new_key = f"{hostname}--{mac}"
-                    clients[new_key] = {
-                        "hostname": hostname,
-                        "mac": mac,
-                        "label": new_key,
-                        "last_seen": now_iso,
-                        "compiled": compiled or None,
-                        "uptime": uptime or None,
-                        "firmware": None,
-                        "fw_compile_id": None,
-                        "last_flashed": None,
-                    }
-                    matched_key = new_key
-                else:
-                    clients[hostname_match]["mac"] = mac
-        else:
-            matched_key = hostname
-            clients[matched_key] = {
-                "hostname": hostname,
-                "mac": mac,
-                "label": hostname,
-                "last_seen": now_iso,
-                "compiled": compiled or None,
-                "uptime": uptime or None,
-                "firmware": None,
-                "fw_compile_id": None,
-                "last_flashed": None,
-            }
-
-        if matched_key not in clients:
-            clients[matched_key] = {
-                "hostname": hostname,
-                "mac": mac,
-                "label": hostname,
-                "last_seen": now_iso,
-                "compiled": compiled or None,
-                "uptime": uptime or None,
-                "firmware": None,
-                "fw_compile_id": None,
-                "last_flashed": None,
-            }
-
-        clients[matched_key]["last_seen"] = now_iso
-        if compiled:
-            clients[matched_key]["compiled"] = compiled
-        if uptime:
-            clients[matched_key]["uptime"] = uptime
-
-        entry = clients[matched_key]
-        fw_compile_id = entry.get("fw_compile_id")
-        firmware_file = entry.get("firmware")
-
-        if fw_compile_id and compiled == fw_compile_id:
-            entry["firmware"] = None
-            entry["fw_compile_id"] = None
-            entry["last_flashed"] = now_iso
-            _save_clients(clients)
-            logging.info(
-                "OTA: %s already at %s — cleared pending firmware",
-                matched_key,
-                compiled,
-            )
-            return Response("", status=204)
-
-        if fw_compile_id and compiled != fw_compile_id and firmware_file:
-            fw_path = os.path.join(OTA_FIRMWARE_DIR, firmware_file)
-            if os.path.exists(fw_path):
-                _save_clients(clients)
-                logging.info(
-                    "OTA: sending %s to %s (compiled=%s)",
-                    firmware_file,
-                    matched_key,
-                    compiled,
-                )
-                return send_file(fw_path, mimetype="application/octet-stream")
-
-        _save_clients(clients)
-
-    return Response("", status=204)
 
 
 # ---------------------------------------------------------------------------
@@ -1771,19 +1642,8 @@ ADMIN_HTML = """
     </tbody>
   </table>
   {% else %}
-  <p class="no-clients">No clients registered yet.</p>
-  {% endif %}
-</div>
-
-<div class="card">
-  <h2>OTA Endpoint</h2>
-  <p style="font-size:0.85em;color:var(--text-dim);">
-    Devices GET <span class="mono" style="color:var(--accent2);">{{ ota_url }}</span><br>
-    Required headers: <span class="mono" style="color:var(--accent);">X-SF-Hostname</span> &nbsp;
-    <span class="mono" style="color:var(--accent);">X-SF-MAC</span> &nbsp;
-    <span class="mono" style="color:var(--accent);">X-SF-Compiled</span> &nbsp;
-    <span class="mono" style="color:var(--accent);">X-SF-Uptime</span>
-  </p>
+<p class="no-clients">No clients registered yet.</p>
+{% endif %}
 </div>
 
 <script>
@@ -1816,20 +1676,20 @@ def _humanize(iso_str):
     if not iso_str:
         return None
     try:
-        dt = datetime.fromisoformat(iso_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            dt = datetime.fromtimestamp(int(iso_str), tz=timezone.utc)
+        except (ValueError, TypeError):
+            dt = datetime.fromisoformat(str(iso_str))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
         s = int((datetime.now(timezone.utc) - dt).total_seconds())
-        if s < 60:
-            return f"{s}s ago"
-        if s < 3600:
-            return f"{s // 60} min ago"
+        if s < 60:   return f"{s}s ago"
+        if s < 3600: return f"{s // 60} min ago"
         if s < 86400:
-            h = s // 3600
-            return f"{h} hr ago" if h == 1 else f"{h} hrs ago"
-        return f"{s // 86400} day{'s' if s // 86400 != 1 else ''} ago"
+            h = s // 3600; return f"{h} hr ago" if h == 1 else f"{h} hrs ago"
+        d = s // 86400; return f"{d} day ago" if d == 1 else f"{d} days ago"
     except Exception:
-        return iso_str
+        return str(iso_str)
 
 
 def _humanize_uptime(seconds_str):
@@ -1884,13 +1744,11 @@ def admin_page():
             entry["fresh"] = False
             entry["staleness"] = "unknown"
         clients[hostname] = entry
-    ota_url = (URL_PREFIX or "") + "/ota"
     return render_template_string(
         ADMIN_HTML,
         clients=clients,
         flash_ok=flash_ok,
         flash_err=flash_err,
-        ota_url=ota_url,
         home_url=url_for("syncframe.index"),
         add_url=url_for("syncframe.admin_add_client"),
         remove_url=url_for("syncframe.admin_remove_client"),

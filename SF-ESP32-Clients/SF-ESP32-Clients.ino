@@ -892,9 +892,11 @@ static void mjpegMaybeReconnect() {
   lastMjpegConnectMs = millis();
   lastMjpegAttemptMs = millis();
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-  const uint32_t STREAM_STACK = 24576;
+  const uint32_t STREAM_STACK = 28672;  // 28KB for S3
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+  const uint32_t STREAM_STACK = 20480;  // 20KB for C3 — was 16KB, not enough
 #else
-  const uint32_t STREAM_STACK = 16384;
+  const uint32_t STREAM_STACK = 20480;  // 20KB default
 #endif
   static StaticTask_t mjpegTaskBuffer;
   static StackType_t mjpegStack[STREAM_STACK / sizeof(StackType_t)];

@@ -9,7 +9,7 @@ set "IDF_PATH=C:\esp\v6.0\esp-idf"
 set "TOOLS_ROOT=%USERPROFILE%\.espressif\tools"
 set "ESP_COREDUMP=%IDF_PATH%\components\espcoredump\espcoredump.py"
 set "ROM_ELF=C:\esp\rom-elfs\esp32c3_rev0_rom.elf"
-set "GDB_EXE=C:\Users\rawdr\.espressif\tools\riscv32-esp-elf-gdb\16.3_20250913\riscv32-esp-elf-gdb\bin\riscv32-esp32c3-elf-gdb.exe"
+set "GDB_EXE=C:\Users\rawdr\.espressif\tools\riscv32-esp-elf-gdb\16.3_20250913\riscv32-esp-elf-gdb\bin\riscv32-esp-elf-gdb.exe"
 
 if not exist "%BIN_FILE%" (
     echo coredump file not found:
