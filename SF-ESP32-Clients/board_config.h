@@ -127,8 +127,10 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   int x = (SCREEN_W - scaledW) / 2;  if (x < 0) x = 0;
   int y = (SCREEN_H - scaledH) / 2;  if (y < 0) y = 0;
 
-  // For small screens (280x240), full fillScreen is safe and avoids stale-pixel glitch
-  gfx->fillScreen(0x0000);
+  // Clear screen only if JPEG doesn't fill the screen (avoids stale-pixel glitch)
+  if (imgW < SCREEN_W || imgH < SCREEN_H) {
+    gfx->fillScreen(0x0000);
+  }
 
   // ---- Step 5: configure decoder and draw --------------------------------
   TJpgDec.setJpgScale((uint8_t)bestScale);
