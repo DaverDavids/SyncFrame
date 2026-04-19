@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
@@ -88,11 +89,10 @@ static bool webServerStarted = false;
 unsigned long lastWifiAttemptMs  = 0;
 bool wifiEverConnected  = false;
 
-// Note: currentJpg/lastJpg no longer used for streaming, but kept for /img endpoints
-uint8_t* currentJpg    = nullptr;
-size_t   currentJpgLen = 0;
-uint8_t* lastJpg       = nullptr;
-size_t   lastJpgLen    = 0;
+static const char* PATH_CURRENT = "/current.jpg";
+static const char* PATH_PREV    = "/prev.jpg";
+static size_t      currentJpgLen = 0;
+static size_t      lastJpgLen    = 0;
 bool showingLast        = false;
 
 // Stream (mjpeg)
@@ -151,27 +151,23 @@ static bool requireWebAuth() {
 }
 
 // ---------------------- Hardware Callbacks ----------------------
-bool hasLastPhoto() { return (lastJpg != nullptr && lastJpgLen > 0); }
+bool hasLastPhoto() { return LittleFS.exists(PATH_PREV); }
 
 void showCurrentPhoto() {
-  if (currentJpg && currentJpgLen) {
-    showingLast = false;
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      board_draw_jpeg(currentJpg, currentJpgLen);
-      boardDrawActive = false;
-      xSemaphoreGive(drawMutex);
-    }
+  showingLast = false;
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    File f = LittleFS.open(PATH_CURRENT, "r");
+    if (f) { board_draw_jpeg_from_stream(f); f.close(); boardDrawActive = false; }
+    xSemaphoreGive(drawMutex);
   }
 }
 
 void showLastPhoto() {
-  if (lastJpg && lastJpgLen) {
-    showingLast = true;
-    if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      board_draw_jpeg(lastJpg, lastJpgLen);
-      boardDrawActive = false;
-      xSemaphoreGive(drawMutex);
-    }
+  showingLast = true;
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    File f = LittleFS.open(PATH_PREV, "r");
+    if (f) { board_draw_jpeg_from_stream(f); f.close(); boardDrawActive = false; }
+    xSemaphoreGive(drawMutex);
   }
 }
 
@@ -269,11 +265,6 @@ static void appendJsonEscaped(String& out, const char* s) {
 static void appendJsonEscaped(String& out, const String& s) { appendJsonEscaped(out, s.c_str()); }
 static void appendJsonPassword(String& out, const String& pass) {
   if (pass.length() > 0) appendJsonEscaped(out, String("********"));
-}
-
-static void freeBuf(uint8_t*& p, size_t& n) {
-  if (p) { free(p); p = nullptr; }
-  n = 0;
 }
 
 static uint32_t crc32buf(const uint8_t* data, size_t len) {
@@ -814,41 +805,45 @@ static void mjpegTask(void* pv) {
       }
 
       if (readTotal == contentLength) {
-        bool changed = true;
         lastDataMs = millis();
 
-        // Non-blocking drain of trailing \r\n — just peek and consume what's there
-        {
-            size_t avail = client->available();
-            uint8_t tmp[2];
-            if (avail >= 2) client->read(tmp, 2);
-            else if (avail == 1) client->read(tmp, 1);
-        }
+        // Drain trailing \r\n
+        { uint8_t tmp[2]; size_t av = client->available();
+          if (av >= 2) client->read(tmp, 2); else if (av == 1) client->read(tmp, 1); }
 
-        // Promote current → last before overwriting (only on new content)
         if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          if (changed && currentJpg && currentJpgLen) {
-            freeBuf(lastJpg, lastJpgLen);
-            lastJpg    = currentJpg;
+          // Promote current → prev
+          if (LittleFS.exists(PATH_CURRENT)) {
+            LittleFS.remove(PATH_PREV);
+            LittleFS.rename(PATH_CURRENT, PATH_PREV);
             lastJpgLen = currentJpgLen;
-            currentJpg    = nullptr;
-            currentJpgLen = 0;
-          } else {
-            freeBuf(currentJpg, currentJpgLen);
           }
-          currentJpg    = buf;
-          currentJpgLen = readTotal;
-          buf           = nullptr;
+
+          // Write new frame to /current.jpg
+          File f = LittleFS.open(PATH_CURRENT, "w", true);
+          if (f) {
+            f.write(buf, readTotal);
+            f.close();
+            currentJpgLen = readTotal;
+          }
+          free(buf); buf = nullptr;
+
+          // Draw from flash
           if (!showingLast) {
-            board_draw_jpeg(currentJpg, currentJpgLen);
+            File df = LittleFS.open(PATH_CURRENT, "r");
+            if (df) {
+              board_draw_jpeg_from_stream(df);
+              df.close();
+            }
             boardDrawActive = false;
           }
           xSemaphoreGive(drawMutex);
+        } else {
+          free(buf); buf = nullptr;
         }
-        logEvent("STREAM", "frame size=%u etag=%s %s heap=%u",
-          (unsigned)readTotal, currentPhotoEtag,
-          changed ? "NEW" : "same",
-          (unsigned)ESP.getFreeHeap());
+
+        logEvent("STREAM", "frame size=%u etag=%s heap=%u",
+          (unsigned)readTotal, currentPhotoEtag, (unsigned)ESP.getFreeHeap());
       } else {
         logEvent("STREAM", "frame INCOMPLETE read=%u expected=%u", (unsigned)readTotal, (unsigned)contentLength);
         break;
@@ -1122,38 +1117,20 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    server.send(503, "text/plain", "busy");
-    return;
-  }
-  if (!currentJpg || !currentJpgLen) {
-    xSemaphoreGive(drawMutex);
-    server.send(404, "text/plain", "no image");
-    return;
-  }
+  File f = LittleFS.open(PATH_CURRENT, "r");
+  if (!f) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.setContentLength(currentJpgLen);
-  server.send(200, "image/jpeg", "");
-  server.sendContent((const char*)currentJpg, currentJpgLen);
-  xSemaphoreGive(drawMutex);
+  server.streamFile(f, "image/jpeg");
+  f.close();
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    server.send(503, "text/plain", "busy");
-    return;
-  }
-  if (!lastJpg || !lastJpgLen) {
-    xSemaphoreGive(drawMutex);
-    server.send(404, "text/plain", "no last image");
-    return;
-  }
+  File f = LittleFS.open(PATH_PREV, "r");
+  if (!f) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.setContentLength(lastJpgLen);
-  server.send(200, "image/jpeg", "");
-  server.sendContent((const char*)lastJpg, lastJpgLen);
-  xSemaphoreGive(drawMutex);
+  server.streamFile(f, "image/jpeg");
+  f.close();
 }
 
 static void handleActionRefresh() {
@@ -1189,6 +1166,10 @@ void setup() {
   loadConfig();
   if (cfg.peekButtonPin >= 0) pinMode(cfg.peekButtonPin, INPUT_PULLUP);
   board_init();
+
+  if (!LittleFS.begin(true)) {
+    logEvent("FS", "LittleFS mount failed, formatted");
+  }
 
   board_draw_jpeg(splash_logo, splash_logo_len);
   board_draw_boot_status("Connecting to Wi-Fi...");

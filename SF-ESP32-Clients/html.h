@@ -214,6 +214,9 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
     <span id="s_dl">Photo: &hellip;</span>
     <span id="s_ota">OTA: &hellip;</span>
     <span id="s_uptime">Up: &hellip;</span>
+    <span id="s_host">Host: &hellip;</span>
+    <span id="s_mac">MAC: &hellip;</span>
+    <span id="s_ip">IP: &hellip;</span>
   </div>
 
   <div id="saveMsg" class="msg">Settings saved!</div>
@@ -272,18 +275,6 @@ static const char CONFIG_HTML[] PROGMEM = R"HTML(
       &#10003; Save Settings
     </button>
   </form>
-
-  <h3 style="margin-top:24px">Live Status</h3>
-  <div id="debugStatus" class="status-box small">
-    <span id="ds_host">Host: &hellip;</span>
-    <span id="ds_mac">MAC: &hellip;</span>
-    <span id="ds_ip">IP: &hellip;</span>
-    <span id="ds_wifi">WiFi: &hellip;</span>
-    <span id="ds_stream">Stream: &hellip;</span>
-    <span id="ds_photo">Photo: &hellip;</span>
-    <span id="ds_ota">OTA: idle</span>
-    <span id="ds_uptime">Uptime: &hellip;</span>
-  </div>
 
   <h3 style="margin-top:20px">Live Console</h3>
   <div class="toolbar">
@@ -355,7 +346,7 @@ function setSpan(id, text, ok) {
 async function loadStatus() {
   try {
     const r = await apiFetch("/api/status");
-    if (!r.ok) { setSpan("ds_host","Status unavailable (HTTP "+r.status+")",false); return; }
+    if (!r.ok) { setSpan("s_host","Status unavailable (HTTP "+r.status+")",false); return; }
     const s = await r.json();
     setPill("s_wifi", "WiFi",  !!s.wifi);
     setPill("s_mdns", "mDNS",  !!s.mdns);
@@ -368,18 +359,12 @@ async function loadStatus() {
       const el = document.getElementById("s_uptime");
       if (el) el.textContent = "Up: " + formatUptime(s.uptimeMs);
     }
-    setSpan("ds_host",  "Host: "+(s.hostname||"-"),       null);
-    setSpan("ds_mac",   "MAC: " +(s.mac     ||"-"),       null);
-    setSpan("ds_ip",    "IP: "  +(s.ip      ||"offline"), null);
-    setSpan("ds_wifi",  "WiFi: "+(s.wifi  ?"connected":"disconnected"), !!s.wifi);
-    setSpan("ds_stream", "Stream: "+(s.mjpeg?"connected":"disconnected"), !!s.mjpeg);
-    setSpan("ds_mjpeg", "MJPEG: "+(s.mjpeg?"connected":"disconnected"), !!s.mjpeg);
-    setSpan("ds_photo", "Photo hash: "+(s.photoHash||"none"), !!s.photoHash);
-    setSpan("ds_ota",   "OTA: idle", true);
-    if (s.uptimeMs !== undefined)
-      setSpan("ds_uptime", "Uptime: "+formatUptime(s.uptimeMs), null);
+    // Host/MAC/IP in pill bar
+    setSpan("s_host",  "Host: "+(s.hostname||"-"),       null);
+    setSpan("s_mac",   "MAC: " +(s.mac     ||"-"),       null);
+    setSpan("s_ip",    "IP: "  +(s.ip      ||"offline"), !!s.ip);
     if (s.hostname) document.getElementById("hostnameHint").textContent = s.hostname;
-  } catch(e) { setSpan("ds_host","Status unavailable",false); }
+  } catch(e) { setSpan("s_host","Status unavailable",false); }
 }
 
 function appendLogLine(item) {
