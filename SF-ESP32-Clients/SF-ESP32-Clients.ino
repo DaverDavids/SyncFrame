@@ -47,7 +47,6 @@ static char compileIdStr[16];
 const char SF_COMPILE_ID[] __attribute__((used, section(".rodata"))) = "SFID:" __DATE__ " " __TIME__;
 
 static SemaphoreHandle_t drawMutex = nullptr;
-static TaskHandle_t drawMutexOwnerTask = nullptr;
 static unsigned long bootTimeMs = 0;
 
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
@@ -95,7 +94,6 @@ static const char* PATH_PREV    = "/prev.jpg";
 static size_t      currentJpgLen = 0;
 static size_t      lastJpgLen    = 0;
 bool showingLast        = false;
-static uint32_t    lastDrawMs   = 0;
 
 // Stream (mjpeg)
 static WiFiClientSecure* streamClient     = nullptr;
@@ -158,10 +156,8 @@ bool hasLastPhoto() { return LittleFS.exists(PATH_PREV); }
 void showCurrentPhoto() {
   showingLast = false;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    drawMutexOwnerTask = xTaskGetCurrentTaskHandle();
     File f = LittleFS.open(PATH_CURRENT, "r");
     if (f) { board_draw_jpeg_from_stream(f); f.close(); boardDrawActive = false; }
-    drawMutexOwnerTask = NULL;
     xSemaphoreGive(drawMutex);
   }
 }
@@ -169,10 +165,8 @@ void showCurrentPhoto() {
 void showLastPhoto() {
   showingLast = true;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    drawMutexOwnerTask = xTaskGetCurrentTaskHandle();
     File f = LittleFS.open(PATH_PREV, "r");
     if (f) { board_draw_jpeg_from_stream(f); f.close(); boardDrawActive = false; }
-    drawMutexOwnerTask = NULL;
     xSemaphoreGive(drawMutex);
   }
 }
@@ -818,7 +812,6 @@ static void mjpegTask(void* pv) {
           if (av >= 2) client->read(tmp, 2); else if (av == 1) client->read(tmp, 1); }
 
         if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          drawMutexOwnerTask = xTaskGetCurrentTaskHandle();
           // Promote current → prev
           if (LittleFS.exists(PATH_CURRENT)) {
             LittleFS.remove(PATH_PREV);
@@ -835,17 +828,15 @@ static void mjpegTask(void* pv) {
           }
           free(buf); buf = nullptr;
 
-          // Draw from flash only if we haven't drawn recently (prevents double-draw on boot/reconnect)
-          if (!showingLast && millis() - lastDrawMs > 30000) {
+          // Draw from flash
+          if (!showingLast) {
             File df = LittleFS.open(PATH_CURRENT, "r");
             if (df) {
               board_draw_jpeg_from_stream(df);
               df.close();
             }
             boardDrawActive = false;
-            lastDrawMs = millis();
           }
-          drawMutexOwnerTask = NULL;
           xSemaphoreGive(drawMutex);
         } else {
           free(buf); buf = nullptr;
@@ -940,22 +931,6 @@ static void startNetworkServicesOnce() {
     server.on("/api/reboot",  HTTP_GET,  handleActionReboot);
     server.on("/img/current", HTTP_GET,  handleImgCurrent);
     server.on("/img/last",    HTTP_GET,  handleImgLast);
-    server.on("/api/debug", HTTP_GET, []() {
-      if (!requireWebAuth()) return;
-      File f = LittleFS.open(PATH_CURRENT, "r");
-      size_t fileSize = f ? f.size() : 0;
-      if (f) f.close();
-      String json = "{";
-      json += "\"fileSize\":" + String(fileSize) + ",";
-      json += "\"heapFree\":" + String(ESP.getFreeHeap()) + ",";
-      json += "\"heapMinFree\":" + String(ESP.getMinFreeHeap()) + ",";
-      json += "\"taskStack\":" + String(uxTaskGetStackHighWaterMark(NULL)) + ",";
-      json += "\"drawActive\":" + String(boardDrawActive ? "true" : "false") + ",";
-      json += "\"mutexOwner\":\"" + String(drawMutexOwnerTask ? pcTaskGetName(drawMutexOwnerTask) : "none") + "\"";
-      json += "}";
-      server.sendHeader("Cache-Control", "no-store");
-      server.send(200, "application/json", json);
-    });
     setupCoredumpRoute();
     server.on("/panic-test", HTTP_GET, []() {
       server.send(200, "text/plain", "Crashing in 1s...");
@@ -1146,20 +1121,17 @@ static void handleImgCurrent() {
     server.send(503, "text/plain", "busy");
     return;
   }
-  drawMutexOwnerTask = xTaskGetCurrentTaskHandle();
   File f = LittleFS.open(PATH_CURRENT, "r");
-  if (!f) { drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no image"); return; }
+  if (!f) { xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no image"); return; }
   size_t len = f.size();
   uint8_t* buf = (uint8_t*)malloc(len);
-  if (!buf) { f.close(); drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
+  if (!buf) { f.close(); xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
   f.read(buf, len);
   f.close();
-  drawMutexOwnerTask = NULL;
   xSemaphoreGive(drawMutex);
   server.sendHeader("Cache-Control", "no-store");
   server.send_P(200, "image/jpeg", (const char*)buf, len);
   free(buf);
-  lastDrawMs = millis();
 }
 
 static void handleImgLast() {
@@ -1168,20 +1140,17 @@ static void handleImgLast() {
     server.send(503, "text/plain", "busy");
     return;
   }
-  drawMutexOwnerTask = xTaskGetCurrentTaskHandle();
   File f = LittleFS.open(PATH_PREV, "r");
-  if (!f) { drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no last image"); return; }
+  if (!f) { xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no last image"); return; }
   size_t len = f.size();
   uint8_t* buf = (uint8_t*)malloc(len);
-  if (!buf) { f.close(); drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
+  if (!buf) { f.close(); xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
   f.read(buf, len);
   f.close();
-  drawMutexOwnerTask = NULL;
   xSemaphoreGive(drawMutex);
   server.sendHeader("Cache-Control", "no-store");
   server.send_P(200, "image/jpeg", (const char*)buf, len);
   free(buf);
-  lastDrawMs = millis();
 }
 
 static void handleActionRefresh() {
