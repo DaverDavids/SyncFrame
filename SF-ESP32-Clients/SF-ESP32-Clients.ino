@@ -1142,57 +1142,46 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  File f = LittleFS.open(PATH_CURRENT, "r");
-  if (!f) { server.send(404, "text/plain", "no image"); return; }
-  size_t fileSize = f.size();
-
-  WiFiClient client = server.client();
-  client.print("HTTP/1.1 200 OK\r\n");
-  client.print("Content-Type: image/jpeg\r\n");
-  client.print("Content-Length: " + String(fileSize) + "\r\n");
-  client.print("Cache-Control: no-store\r\n");
-  client.print("Connection: close\r\n\r\n");
-
-  uint8_t buf[512];
-  size_t sent = 0;
-  while (sent < fileSize) {
-    size_t toRead = min((size_t)512, fileSize - sent);
-    size_t got = f.read(buf, toRead);
-    if (got == 0) break;
-    client.write(buf, got);
-    sent += got;
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    server.send(503, "text/plain", "busy");
+    return;
   }
+  drawMutexOwnerTask = xTaskGetCurrentTaskHandle();
+  File f = LittleFS.open(PATH_CURRENT, "r");
+  if (!f) { drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no image"); return; }
+  size_t len = f.size();
+  uint8_t* buf = (uint8_t*)malloc(len);
+  if (!buf) { f.close(); drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
+  f.read(buf, len);
   f.close();
-  client.stop();
-  server.client().stop();
+  drawMutexOwnerTask = NULL;
+  xSemaphoreGive(drawMutex);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send_P(200, "image/jpeg", (const char*)buf, len);
+  free(buf);
   lastDrawMs = millis();
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  File f = LittleFS.open(PATH_PREV, "r");
-  if (!f) { server.send(404, "text/plain", "no last image"); return; }
-  size_t fileSize = f.size();
-
-  WiFiClient client = server.client();
-  client.print("HTTP/1.1 200 OK\r\n");
-  client.print("Content-Type: image/jpeg\r\n");
-  client.print("Content-Length: " + String(fileSize) + "\r\n");
-  client.print("Cache-Control: no-store\r\n");
-  client.print("Connection: close\r\n\r\n");
-
-  uint8_t buf[512];
-  size_t sent = 0;
-  while (sent < fileSize) {
-    size_t toRead = min((size_t)512, fileSize - sent);
-    size_t got = f.read(buf, toRead);
-    if (got == 0) break;
-    client.write(buf, got);
-    sent += got;
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    server.send(503, "text/plain", "busy");
+    return;
   }
+  drawMutexOwnerTask = xTaskGetCurrentTaskHandle();
+  File f = LittleFS.open(PATH_PREV, "r");
+  if (!f) { drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no last image"); return; }
+  size_t len = f.size();
+  uint8_t* buf = (uint8_t*)malloc(len);
+  if (!buf) { f.close(); drawMutexOwnerTask = NULL; xSemaphoreGive(drawMutex); server.send(503, "text/plain", "oom"); return; }
+  f.read(buf, len);
   f.close();
-  client.stop();
-  server.client().stop();
+  drawMutexOwnerTask = NULL;
+  xSemaphoreGive(drawMutex);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send_P(200, "image/jpeg", (const char*)buf, len);
+  free(buf);
+  lastDrawMs = millis();
 }
 
 static void handleActionRefresh() {
