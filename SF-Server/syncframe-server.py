@@ -1631,6 +1631,11 @@ ADMIN_HTML = """
   .badge-gray   { background: rgba(139,148,158,0.15); color: var(--text-dim); border: 1px solid rgba(139,148,158,0.2); }
   .badge-blue   { background: rgba(88,166,255,0.15);  color: var(--accent);  border: 1px solid rgba(88,166,255,0.3); }
   .badge-yellow { background: rgba(210,153,34,0.15);  color: #e3b341;        border: 1px solid rgba(210,153,34,0.3); }
+  .badge-danger { background: rgba(248,81,73,0.15);  color: var(--warn);  border: 1px solid rgba(248,81,73,0.3); }
+  tr.stale-minutes td { background: rgba(210,153,34,0.08); }
+  tr.stale-hours    td { background: rgba(248,150,30,0.14); }
+  tr.stale-days     td { background: rgba(248,81,73,0.12); }
+  tr.stale-weeks    td { background: rgba(180,30,180,0.15); }
   input[type=text], input[type=file] {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 7px 12px; font-size: 0.9em; width: 100%;
@@ -1701,13 +1706,18 @@ ADMIN_HTML = """
     </tr></thead>
     <tbody>
     {% for hostname, info in clients.items() %}
-      <tr>
+      <tr class="stale-{{ info.staleness }}">
         <td class="mono">{{ hostname }}</td>
         <td class="mono">{{ info.mac if info.mac else '\u2014' }}</td>
         <td>{{ info.label or '\u2014' }}</td>
         <td>
           {% if info.last_seen %}
-            <span class="badge {{ 'badge-green' if info.fresh else 'badge-gray' }}">{{ info.last_seen_human }}</span>
+            <span class="badge
+              {% if info.staleness == 'fresh' %}badge-green
+              {% elif info.staleness == 'minutes' %}badge-yellow
+              {% elif info.staleness == 'hours' %}badge-yellow
+              {% elif info.staleness == 'days' %}badge-danger
+              {% else %}badge-gray{% endif %}">{{ info.last_seen_human }}</span>
           {% else %}<span class="badge badge-gray">Never</span>{% endif %}
         </td>
         <td>
@@ -1813,10 +1823,11 @@ def _humanize(iso_str):
         if s < 60:
             return f"{s}s ago"
         if s < 3600:
-            return f"{s // 60}m ago"
+            return f"{s // 60} min ago"
         if s < 86400:
-            return f"{s // 3600}h ago"
-        return f"{s // 86400}d ago"
+            h = s // 3600
+            return f"{h} hr ago" if h == 1 else f"{h} hrs ago"
+        return f"{s // 86400} day{'s' if s // 86400 != 1 else ''} ago"
     except Exception:
         return iso_str
 
@@ -1857,9 +1868,21 @@ def admin_page():
             dt = datetime.fromisoformat(info["last_seen"])
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            entry["fresh"] = (datetime.now(timezone.utc) - dt).total_seconds() < 86400
+            age = (datetime.now(timezone.utc) - dt).total_seconds()
+            entry["fresh"] = age < 300
+            if age < 300:
+                entry["staleness"] = "fresh"
+            elif age < 3600:
+                entry["staleness"] = "minutes"
+            elif age < 86400:
+                entry["staleness"] = "hours"
+            elif age < 604800:
+                entry["staleness"] = "days"
+            else:
+                entry["staleness"] = "weeks"
         except Exception:
             entry["fresh"] = False
+            entry["staleness"] = "unknown"
         clients[hostname] = entry
     ota_url = (URL_PREFIX or "") + "/ota"
     return render_template_string(

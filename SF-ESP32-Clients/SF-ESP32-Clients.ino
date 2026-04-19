@@ -896,10 +896,19 @@ static void mjpegMaybeReconnect() {
 #else
   const uint32_t STREAM_STACK = 16384;
 #endif
-  BaseType_t taskCreated = xTaskCreatePinnedToCore(mjpegTask, "mjpegTask", STREAM_STACK, nullptr, 1, nullptr, APP_CORE);
-  if (taskCreated != pdPASS) {
+  static StaticTask_t mjpegTaskBuffer;
+  static StackType_t mjpegStack[STREAM_STACK / sizeof(StackType_t)];
+  TaskHandle_t h = xTaskCreateStaticPinnedToCore(
+      mjpegTask, "mjpegTask",
+      STREAM_STACK / sizeof(StackType_t),
+      nullptr, 1,
+      mjpegStack, &mjpegTaskBuffer,
+      APP_CORE
+  );
+  if (h == nullptr) {
     mjpegConnected = false;
-    logEvent("STREAM", "task create failed");
+    logEvent("STREAM", "task create failed heap=%u maxAlloc=%u",
+        ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   }
 }
 
