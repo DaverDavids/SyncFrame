@@ -151,6 +151,7 @@ inline void board_draw_jpeg_from_stream(fs::File& f) {
   uint8_t* buf = (uint8_t*)malloc(len);
   if (!buf) return;
   f.read(buf, len);
+  vTaskDelay(1);
   board_draw_jpeg(buf, len);
   free(buf);
 }
