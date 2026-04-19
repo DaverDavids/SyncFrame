@@ -609,12 +609,25 @@ static void mjpegTask(void* pv) {
 
   String path = (slashPos > 0) ? url.substring(slashPos) : "/";
 
-  WiFiClient* client = streamClient;
-  if (!client) {
-    client = new WiFiClientSecure();
-    streamClient = (WiFiClientSecure*)client;
+  if (streamClient) {
+    streamClient->stop();
+    delete streamClient;
+    streamClient = nullptr;
   }
+  WiFiClientSecure* secClient = new WiFiClientSecure();
+  streamClient = secClient;
+  WiFiClient* client = secClient;
   if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    logEvent("STREAM", "WiFi not connected");
+    delete client;
+    streamClient = nullptr;
+    mjpegConnected = false;
+    lastMjpegAttemptMs = millis();
+    vTaskDelete(NULL);
+    return;
+  }
 
   if (!client->connect(host.c_str(), port)) {
     logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
@@ -836,7 +849,7 @@ static void mjpegTask(void* pv) {
           free(buf); buf = nullptr;
 
           // Draw from flash only if we haven't drawn recently (prevents double-draw on boot/reconnect)
-          if (!showingLast && millis() - lastDrawMs > 30000) {
+          if (!showingLast && (lastDrawMs == 0 || millis() - lastDrawMs > 30000)) {
             File df = LittleFS.open(PATH_CURRENT, "r");
             if (df) {
               board_draw_jpeg_from_stream(df);
@@ -1153,18 +1166,18 @@ static void handleImgCurrent() {
   client.print("Cache-Control: no-store\r\n");
   client.print("Connection: close\r\n\r\n");
 
-  uint8_t buf[512];
+  uint8_t buf[4096];
   size_t sent = 0;
   while (sent < fileSize) {
-    size_t toRead = min((size_t)512, fileSize - sent);
+    size_t toRead = min((size_t)4096, fileSize - sent);
     size_t got = f.read(buf, toRead);
     if (got == 0) break;
     client.write(buf, got);
     sent += got;
   }
   f.close();
+  client.flush();
   client.stop();
-  server.client().stop();
   lastDrawMs = millis();
 }
 
@@ -1181,18 +1194,18 @@ static void handleImgLast() {
   client.print("Cache-Control: no-store\r\n");
   client.print("Connection: close\r\n\r\n");
 
-  uint8_t buf[512];
+  uint8_t buf[4096];
   size_t sent = 0;
   while (sent < fileSize) {
-    size_t toRead = min((size_t)512, fileSize - sent);
+    size_t toRead = min((size_t)4096, fileSize - sent);
     size_t got = f.read(buf, toRead);
     if (got == 0) break;
     client.write(buf, got);
     sent += got;
   }
   f.close();
+  client.flush();
   client.stop();
-  server.client().stop();
 }
 
 static void handleActionRefresh() {
