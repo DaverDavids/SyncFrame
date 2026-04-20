@@ -98,6 +98,7 @@ bool showingLast        = false;
 // Stream (mjpeg)
 static WiFiClientSecure* streamClient     = nullptr;
 static bool              mjpegConnected   = false;
+static volatile bool      mjpegTaskRunning = false;
 static unsigned long     lastMjpegConnectMs = 0;
 static unsigned long     lastMjpegAttemptMs = ULONG_MAX - 15000UL;  // skip cooldown on first boot
 static bool              mjpegForceReconnect = false;
@@ -279,6 +280,7 @@ static uint32_t crc32buf(const uint8_t* data, size_t len) {
 }
 
 static void applyWifiDefaults() {
+  WiFi.setHostname(HOSTNAME);
   WiFi.mode(WIFI_STA);
   WiFi.setTxPower(WIFI_POWER_15dBm);
   WiFi.setAutoReconnect(true);
@@ -597,24 +599,24 @@ static void mjpegTask(void* pv) {
   if (host.length() == 0 || host.startsWith("/")) {
     logEvent("STREAM", "bad host parse: %s", host.c_str());
     mjpegConnected = false;
+    mjpegTaskRunning = false;
     vTaskDelete(NULL);
     return;
   }
 
   String path = (slashPos > 0) ? url.substring(slashPos) : "/";
 
-  WiFiClient* client = streamClient;
-  if (!client) {
-    client = new WiFiClientSecure();
-    streamClient = (WiFiClientSecure*)client;
-  }
-  if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
+  WiFiClientSecure* secClient = new WiFiClientSecure();
+  if (cfg.httpsInsecure) secClient->setInsecure();
+  streamClient = secClient;
+  WiFiClient* client = secClient;
 
   if (!client->connect(host.c_str(), port)) {
     logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
     delete client;
     streamClient = nullptr;
     mjpegConnected = false;
+    mjpegTaskRunning = false;
     lastMjpegAttemptMs = millis();
     vTaskDelete(NULL);
     return;
@@ -662,6 +664,7 @@ static void mjpegTask(void* pv) {
 		delete client;
 		streamClient = nullptr;
 		mjpegConnected = false;
+		mjpegTaskRunning = false;
 
 		if (statusLine.indexOf("304") >= 0) {
 			lastMjpegAttemptMs = millis() - 15000 + 60000UL;
@@ -858,6 +861,7 @@ static void mjpegTask(void* pv) {
     streamClient = nullptr;
 
     mjpegConnected = false;
+    mjpegTaskRunning = false;
     lastMjpegAttemptMs = 0;
     logEvent("STREAM", "task ended");
     vTaskDelete(NULL);
@@ -881,9 +885,11 @@ static void mjpegMaybeReconnect() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
   if (millis() - lastMjpegAttemptMs < 15000) return;
+  if (mjpegTaskRunning) return;   // previous task not yet reclaimed — skip
 
   mjpegRequestRefresh = false;  // clear flag before spawning new task
   mjpegConnected      = true;
+  mjpegTaskRunning  = true;
   lastMjpegConnectMs = millis();
   lastMjpegAttemptMs = millis();
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -904,6 +910,7 @@ static void mjpegMaybeReconnect() {
   );
   if (h == nullptr) {
     mjpegConnected = false;
+    mjpegTaskRunning = false;
     logEvent("STREAM", "task create failed heap=%u maxAlloc=%u",
         ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   }
@@ -1121,11 +1128,16 @@ static void handleImgCurrent() {
     server.send(503, "text/plain", "busy"); return;
   }
   File f = LittleFS.open(PATH_CURRENT, "r");
+  size_t len = f ? f.size() : 0;
+  uint8_t* buf = len ? (uint8_t*)malloc(len) : nullptr;
+  if (buf && f) f.read(buf, len);
+  if (f) f.close();
   xSemaphoreGive(drawMutex);
-  if (!f) { server.send(404, "text/plain", "no image"); return; }
+
+  if (!buf) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.streamFile(f, "image/jpeg");
-  f.close();
+  server.send_P(200, "image/jpeg", (const char*)buf, len);
+  free(buf);
 }
 
 static void handleImgLast() {
@@ -1134,11 +1146,16 @@ static void handleImgLast() {
     server.send(503, "text/plain", "busy"); return;
   }
   File f = LittleFS.open(PATH_PREV, "r");
+  size_t len = f ? f.size() : 0;
+  uint8_t* buf = len ? (uint8_t*)malloc(len) : nullptr;
+  if (buf && f) f.read(buf, len);
+  if (f) f.close();
   xSemaphoreGive(drawMutex);
-  if (!f) { server.send(404, "text/plain", "no last image"); return; }
+
+  if (!buf) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.streamFile(f, "image/jpeg");
-  f.close();
+  server.send_P(200, "image/jpeg", (const char*)buf, len);
+  free(buf);
 }
 
 static void handleActionRefresh() {
