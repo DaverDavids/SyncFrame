@@ -140,12 +140,6 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   TJpgDec.setCallback(jpegDrawCallback);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
 
-  // Clear any stale pixels in right margin and bottom margin post-draw
-  if (x + scaledW < SCREEN_W)
-    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH, 0x0000);
-  if (y + scaledH < SCREEN_H)
-    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH), 0x0000);
-
   // Clear flag here - ownership is inside this function, not the caller.
   boardDrawActive = false;
 }
