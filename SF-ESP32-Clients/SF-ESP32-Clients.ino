@@ -99,7 +99,6 @@ bool showingLast        = false;
 static WiFiClientSecure* streamClient     = nullptr;
 static bool              mjpegConnected   = false;
 static volatile bool      mjpegTaskRunning = false;
-static TaskHandle_t     mjpegTaskHandle = nullptr;
 static unsigned long     lastMjpegConnectMs = 0;
 static unsigned long     lastMjpegAttemptMs = ULONG_MAX - 15000UL;  // skip cooldown on first boot
 static bool              mjpegForceReconnect = false;
@@ -601,7 +600,6 @@ static void mjpegTask(void* pv) {
     logEvent("STREAM", "bad host parse: %s", host.c_str());
     mjpegConnected = false;
     mjpegTaskRunning = false;
-    mjpegTaskHandle = nullptr;
     vTaskDelete(NULL);
     return;
   }
@@ -619,7 +617,6 @@ static void mjpegTask(void* pv) {
     streamClient = nullptr;
     mjpegConnected = false;
     mjpegTaskRunning = false;
-    mjpegTaskHandle = nullptr;
     lastMjpegAttemptMs = millis();
     vTaskDelete(NULL);
     return;
@@ -668,7 +665,6 @@ static void mjpegTask(void* pv) {
 		streamClient = nullptr;
 		mjpegConnected = false;
 		mjpegTaskRunning = false;
-		mjpegTaskHandle = nullptr;
 
 		if (statusLine.indexOf("304") >= 0) {
 			lastMjpegAttemptMs = millis() - 15000 + 60000UL;
@@ -834,7 +830,6 @@ static void mjpegTask(void* pv) {
             currentJpgLen = readTotal;
           }
           free(buf); buf = nullptr;
-          xSemaphoreGive(drawMutex);
 
           // Draw from flash
           if (!showingLast) {
@@ -845,6 +840,7 @@ static void mjpegTask(void* pv) {
             }
             boardDrawActive = false;
           }
+          xSemaphoreGive(drawMutex);
         } else {
           free(buf); buf = nullptr;
         }
@@ -866,7 +862,6 @@ static void mjpegTask(void* pv) {
 
     mjpegConnected = false;
     mjpegTaskRunning = false;
-    mjpegTaskHandle = nullptr;
     lastMjpegAttemptMs = 0;
     logEvent("STREAM", "task ended");
     vTaskDelete(NULL);
@@ -890,7 +885,7 @@ static void mjpegMaybeReconnect() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
   if (millis() - lastMjpegAttemptMs < 15000) return;
-  if (mjpegTaskRunning || mjpegTaskHandle != nullptr) return;   // previous task not yet reclaimed — skip
+  if (mjpegTaskRunning) return;   // previous task not yet reclaimed — skip
 
   mjpegRequestRefresh = false;  // clear flag before spawning new task
   mjpegConnected      = true;
@@ -905,15 +900,15 @@ static void mjpegMaybeReconnect() {
   const uint32_t STREAM_STACK = 20480;  // 20KB default
 #endif
   static StaticTask_t mjpegTaskBuffer;
-  static StackType_t mjpegStack[20480 / sizeof(StackType_t)];
-  mjpegTaskHandle = xTaskCreateStaticPinnedToCore(
+  static StackType_t mjpegStack[STREAM_STACK / sizeof(StackType_t)];
+  TaskHandle_t h = xTaskCreateStaticPinnedToCore(
       mjpegTask, "mjpegTask",
       STREAM_STACK / sizeof(StackType_t),
       nullptr, 1,
       mjpegStack, &mjpegTaskBuffer,
       APP_CORE
   );
-  if (mjpegTaskHandle == nullptr) {
+  if (h == nullptr) {
     mjpegConnected = false;
     mjpegTaskRunning = false;
     logEvent("STREAM", "task create failed heap=%u maxAlloc=%u",
@@ -1190,7 +1185,8 @@ void setup() {
   logEvent("BOOT", "%s mac=%s reset=%s compileId=%s",
            HOSTNAME, MAC_STR, resetReasonToStr(esp_reset_reason()), compileIdStr);
 
-  drawMutex = xSemaphoreCreateMutex();
+  drawMutex = xSemaphoreCreateBinary();
+  xSemaphoreGive(drawMutex);
 
   loadConfig();
   if (cfg.peekButtonPin >= 0) pinMode(cfg.peekButtonPin, INPUT_PULLUP);
