@@ -1117,11 +1117,7 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
-    server.send(503, "text/plain", "busy"); return;
-  }
   File f = LittleFS.open(PATH_CURRENT, "r");
-  xSemaphoreGive(drawMutex);
   if (!f) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
   server.streamFile(f, "image/jpeg");
@@ -1130,11 +1126,7 @@ static void handleImgCurrent() {
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
-    server.send(503, "text/plain", "busy"); return;
-  }
   File f = LittleFS.open(PATH_PREV, "r");
-  xSemaphoreGive(drawMutex);
   if (!f) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
   server.streamFile(f, "image/jpeg");

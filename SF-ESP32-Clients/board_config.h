@@ -124,15 +124,17 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   int y = (SCREEN_H - scaledH) / 2;  if (y < 0) y = 0;
 
   // ---- Step 4: fill ONLY the letterbox bars (not the whole screen) -------
-  // Always clear all four margins, regardless of origin position
-  if (y > 0)
-    gfx->fillRect(0, 0, SCREEN_W, y, 0x0000);                           // top
-  if (y + scaledH < SCREEN_H)
-    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H-(y+scaledH), 0x0000); // bottom
-  if (x > 0)
-    gfx->fillRect(0, y, x, scaledH, 0x0000);                            // left
-  if (x + scaledW < SCREEN_W)
-    gfx->fillRect(x+scaledW, y, SCREEN_W-(x+scaledW), scaledH, 0x0000); // right
+  // Each fillRect covers a small strip; it completes before the DMA scanner
+  // reaches that region, so there is no race. For full-frame images (y==0,
+  // x==0) none of these fire.
+  if (y > 0) {
+    gfx->fillRect(0, 0,           SCREEN_W, y,                         0x0000); // top bar
+    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH),  0x0000); // bottom bar
+  }
+  if (x > 0) {
+    gfx->fillRect(0,           y, x,                         scaledH, 0x0000); // left bar
+    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH,  0x0000); // right bar
+  }
 
   // ---- Step 5: configure decoder and draw --------------------------------
   TJpgDec.setJpgScale((uint8_t)bestScale);
