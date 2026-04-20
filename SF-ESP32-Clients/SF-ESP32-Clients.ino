@@ -96,7 +96,6 @@ static size_t      lastJpgLen    = 0;
 bool showingLast        = false;
 
 // Stream (mjpeg)
-static WiFiClientSecure* streamClient     = nullptr;
 static bool              mjpegConnected   = false;
 static volatile bool      mjpegTaskRunning = false;
 static TaskHandle_t     mjpegTaskHandle = nullptr;
@@ -610,13 +609,12 @@ static void mjpegTask(void* pv) {
 
   WiFiClientSecure* secClient = new WiFiClientSecure();
   if (cfg.httpsInsecure) secClient->setInsecure();
-  streamClient = secClient;
+  secClient->setTimeout(10);
   WiFiClient* client = secClient;
 
   if (!client->connect(host.c_str(), port)) {
     logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
     delete client;
-    streamClient = nullptr;
     mjpegConnected = false;
     mjpegTaskRunning = false;
     mjpegTaskHandle = nullptr;
@@ -665,7 +663,6 @@ static void mjpegTask(void* pv) {
 		logEvent("STREAM", "status %s", statusLine.c_str());  // already logs it
 		client->stop();
 		delete client;
-		streamClient = nullptr;
 		mjpegConnected = false;
 		mjpegTaskRunning = false;
 		mjpegTaskHandle = nullptr;
@@ -862,7 +859,6 @@ static void mjpegTask(void* pv) {
     stream_done:
     client->stop();
     delete client;
-    streamClient = nullptr;
 
     mjpegConnected = false;
     mjpegTaskRunning = false;
