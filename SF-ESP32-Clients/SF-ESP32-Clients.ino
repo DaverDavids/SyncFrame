@@ -96,8 +96,10 @@ static size_t      lastJpgLen    = 0;
 bool showingLast        = false;
 
 // Stream (mjpeg)
-static WiFiClientSecure* streamClient     = nullptr;
 static bool              mjpegConnected   = false;
+static TaskHandle_t     mjpegTaskHandle = nullptr;
+static StaticTask_t   mjpegTaskBuffer;
+static StackType_t    mjpegStack[20480 / sizeof(StackType_t)];
 static unsigned long     lastMjpegConnectMs = 0;
 static unsigned long     lastMjpegAttemptMs = ULONG_MAX - 15000UL;  // skip cooldown on first boot
 static bool              mjpegForceReconnect = false;
@@ -603,17 +605,14 @@ static void mjpegTask(void* pv) {
 
   String path = (slashPos > 0) ? url.substring(slashPos) : "/";
 
-  WiFiClient* client = streamClient;
-  if (!client) {
-    client = new WiFiClientSecure();
-    streamClient = (WiFiClientSecure*)client;
-  }
-  if (cfg.httpsInsecure) ((WiFiClientSecure*)client)->setInsecure();
+  WiFiClientSecure* secClient = new WiFiClientSecure();
+  if (cfg.httpsInsecure) secClient->setInsecure();
+  secClient->setTimeout(10);
+  WiFiClient* client = secClient;
 
   if (!client->connect(host.c_str(), port)) {
     logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
     delete client;
-    streamClient = nullptr;
     mjpegConnected = false;
     lastMjpegAttemptMs = millis();
     vTaskDelete(NULL);
@@ -660,7 +659,6 @@ static void mjpegTask(void* pv) {
 		logEvent("STREAM", "status %s", statusLine.c_str());  // already logs it
 		client->stop();
 		delete client;
-		streamClient = nullptr;
 		mjpegConnected = false;
 
 		if (statusLine.indexOf("304") >= 0) {
@@ -688,6 +686,7 @@ static void mjpegTask(void* pv) {
     }
 
     logEvent("STREAM", "connected");
+    mjpegConnected = true;
     lastMjpegConnectMs = millis();
     lastDataMs = millis();
   	
@@ -855,9 +854,9 @@ static void mjpegTask(void* pv) {
     stream_done:
     client->stop();
     delete client;
-    streamClient = nullptr;
 
     mjpegConnected = false;
+    mjpegTaskHandle = nullptr;
     lastMjpegAttemptMs = 0;
     logEvent("STREAM", "task ended");
     vTaskDelete(NULL);
@@ -881,10 +880,9 @@ static void mjpegMaybeReconnect() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
   if (millis() - lastMjpegAttemptMs < 15000) return;
+  if (mjpegTaskHandle != nullptr) return;  // previous task still alive
 
   mjpegRequestRefresh = false;  // clear flag before spawning new task
-  mjpegConnected      = true;
-  lastMjpegConnectMs = millis();
   lastMjpegAttemptMs = millis();
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   const uint32_t STREAM_STACK = 28672;  // 28KB for S3
@@ -902,6 +900,7 @@ static void mjpegMaybeReconnect() {
       mjpegStack, &mjpegTaskBuffer,
       APP_CORE
   );
+  mjpegTaskHandle = h;
   if (h == nullptr) {
     mjpegConnected = false;
     logEvent("STREAM", "task create failed heap=%u maxAlloc=%u",
