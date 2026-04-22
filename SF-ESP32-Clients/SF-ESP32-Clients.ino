@@ -571,7 +571,12 @@ static inline bool hasPsram() {
 // ---------------------- MJPEG Stream ----------------------
 static void mjpegTask(void* pv) {
   (void)pv;
-  String url = cfg.photoBaseUrl;
+
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    mjpegRequestRefresh = false;
+    vTaskDelay(pdMS_TO_TICKS(500));  // wait for WiFi to stabilize before TLS connect
+    String url = cfg.photoBaseUrl;
   if (!url.startsWith("http://") && !url.startsWith("https://")) {
     url = "https://" + url;
   }
@@ -599,15 +604,14 @@ static void mjpegTask(void* pv) {
   if (host.length() == 0 || host.startsWith("/")) {
     logEvent("STREAM", "bad host parse: %s", host.c_str());
     mjpegConnected = false;
-    vTaskDelete(NULL);
-    return;
+    continue;
   }
 
   String path = (slashPos > 0) ? url.substring(slashPos) : "/";
 
   WiFiClientSecure* secClient = new WiFiClientSecure();
   if (cfg.httpsInsecure) secClient->setInsecure();
-  secClient->setTimeout(10);
+  secClient->setTimeout(15);  // 15s connect timeout
   WiFiClient* client = secClient;
 
   if (!client->connect(host.c_str(), port)) {
@@ -615,9 +619,11 @@ static void mjpegTask(void* pv) {
     delete client;
     mjpegConnected = false;
     lastMjpegAttemptMs = millis();
-    vTaskDelete(NULL);
-    return;
+    continue;
   }
+
+  // Restore for streaming
+  client->setTimeout(60);
 
   // Build MAC without colons
   char macNaked[13] = {};
@@ -651,11 +657,14 @@ static void mjpegTask(void* pv) {
   }
   client->print("Accept: multipart/x-mixed-replace\r\n");
   client->print("Connection: keep-alive\r\n");
-    client->print("\r\n");
+client->print("\r\n");
 
+    unsigned long t0 = millis();
+    while (!client->available() && client->connected() && millis() - t0 < 8000)
+      vTaskDelay(pdMS_TO_TICKS(10));
     String statusLine = client->readStringUntil('\n');
-	
-	if (!statusLine.startsWith("HTTP/1.1 200")) {
+
+if (!statusLine.startsWith("HTTP/1.1 200")) {
 		logEvent("STREAM", "status %s", statusLine.c_str());  // already logs it
 		client->stop();
 		delete client;
@@ -668,8 +677,7 @@ static void mjpegTask(void* pv) {
 		} else {
 			lastMjpegAttemptMs = millis();  // ← CHANGE: was same, but now log tells you what's happening
 		}
-		vTaskDelete(NULL);
-		return;
+		continue;
 	}
 
     unsigned long lastDataMs = 0;
@@ -686,8 +694,8 @@ static void mjpegTask(void* pv) {
     }
 
     logEvent("STREAM", "connected");
-    mjpegConnected = true;
     lastMjpegConnectMs = millis();
+    mjpegConnected = true;
     lastDataMs = millis();
   	
     while (client->connected() || client->available()) {
@@ -856,10 +864,9 @@ static void mjpegTask(void* pv) {
     delete client;
 
     mjpegConnected = false;
-    mjpegTaskHandle = nullptr;
     lastMjpegAttemptMs = 0;
-    logEvent("STREAM", "task ended");
-    vTaskDelete(NULL);
+    logEvent("STREAM", "task ended, sleeping");
+  }
 }
 
 static void mjpegMaybeReconnect() {
@@ -880,31 +887,21 @@ static void mjpegMaybeReconnect() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
   if (millis() - lastMjpegAttemptMs < 15000) return;
-  if (mjpegTaskHandle != nullptr) return;  // previous task still alive
 
-  mjpegRequestRefresh = false;  // clear flag before spawning new task
-  lastMjpegAttemptMs = millis();
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-  const uint32_t STREAM_STACK = 28672;  // 28KB for S3
-#elif defined(CONFIG_IDF_TARGET_ESP32C3)
-  const uint32_t STREAM_STACK = 20480;  // 20KB for C3 — was 16KB, not enough
-#else
-  const uint32_t STREAM_STACK = 20480;  // 20KB default
-#endif
-  static StaticTask_t mjpegTaskBuffer;
-  static StackType_t mjpegStack[STREAM_STACK / sizeof(StackType_t)];
-  TaskHandle_t h = xTaskCreateStaticPinnedToCore(
-      mjpegTask, "mjpegTask",
-      STREAM_STACK / sizeof(StackType_t),
-      nullptr, 1,
-      mjpegStack, &mjpegTaskBuffer,
-      APP_CORE
-  );
-  mjpegTaskHandle = h;
-  if (h == nullptr) {
-    mjpegConnected = false;
-    logEvent("STREAM", "task create failed heap=%u maxAlloc=%u",
-        ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  // Create task exactly once
+  if (mjpegTaskHandle == nullptr) {
+    mjpegTaskHandle = xTaskCreateStaticPinnedToCore(
+        mjpegTask, "mjpegTask",
+        20480 / sizeof(StackType_t),
+        nullptr, 0,
+        mjpegStack, &mjpegTaskBuffer,
+        APP_CORE
+    );
+  }
+
+  // Wake the sleeping task
+  if (mjpegTaskHandle != nullptr) {
+    xTaskNotifyGive(mjpegTaskHandle);
   }
 }
 
