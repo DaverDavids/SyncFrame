@@ -16,16 +16,14 @@
 // ---------------------------------------------------------------------------
 // boardDrawActive
 // Set true during board_draw_jpeg() to block board_loop() from triggering
-// a re-entrant draw (showCurrentPhoto / showLastPhoto) while the panel DMA
-// is being written. A concurrent full-screen write races the DMA scanner
-// and produces a wrap-around line-shift artifact (always same height at
-// bottom that should be at top) - this flag is the primary fix for that.
+// a re-entrant draw (showCurrentPhoto / showLastPhoto) while a frame is
+// being written to the back buffer.
+//
+// In double-buffer (S3) mode this guards the back buffer write;
+// in single-buffer (C3) mode it guards the live SPI framebuffer write.
 //
 // The flag is set at entry and cleared at exit of board_draw_jpeg() on
-// every code path (including early-return on bad dimensions). The caller
-// (.ino) must NOT clear it after calling board_draw_jpeg(); that was the
-// previous arrangement but it left a window where the flag stayed true
-// between the function returning and the caller's boardDrawActive=false line.
+// every code path (including early-return on bad dimensions).
 // ---------------------------------------------------------------------------
 volatile bool boardDrawActive = false;
 
@@ -33,29 +31,31 @@ volatile bool boardDrawActive = false;
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV)
   #include "config_c3.h"
   #define BOARD_IS_C3 1
+  #define BOARD_IS_S3 0
 #elif defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
   #include "config_s3.h"
   #define BOARD_IS_C3 0
+  #define BOARD_IS_S3 1
 #else
   #warning "Board target not automatically identified. Defaulting to ESP32-S3 configuration."
   #include "config_s3.h"
   #define BOARD_IS_C3 0
+  #define BOARD_IS_S3 1
 #endif
 
+// ---------------------------------------------------------------------------
+// SPI transaction guard (ESP32-C3 only)
+//
 // On ESP32-C3 the WiFi radio and HSPI share the same SPI peripheral.
 // Wrapping the entire JPEG decode+draw in SPI.beginTransaction() acquires
 // the Arduino SPI mutex for the full frame duration, preventing WiFi from
-// stealing the bus mid-MCU-block write, which causes:
-//   - wrap-around line-shift  (MCU block write split across two WiFi slots)
-//   - permanent right-shift   (ST7789 column address counter desynced when
-//                              CS/DC toggled unexpectedly mid-frame)
-// The S3 uses a dedicated parallel RGB panel — no SPI contention possible,
-// so these guards compile away to nothing on that target.
+// stealing the bus mid-MCU-block write.
+//
+// The S3 uses a dedicated parallel RGB panel — no SPI contention possible.
+// These macros compile away to nothing on S3.
+// ---------------------------------------------------------------------------
 #if BOARD_IS_C3
   #include <SPI.h>
-  // Match the bus speed configured by Arduino_GFX for the ST7789 (80 MHz).
-  // Using a lower cap here is safe; the SPI transaction just needs to hold
-  // the mutex — the actual clock is set by Arduino_GFX's own beginTransaction.
   static SPISettings _sfSpiSettings(80000000, MSBFIRST, SPI_MODE0);
   #define SF_SPI_BEGIN() SPI.beginTransaction(_sfSpiSettings)
   #define SF_SPI_END()   SPI.endTransaction()
@@ -67,6 +67,11 @@ volatile bool boardDrawActive = false;
 // ---------------------------------------------------------------------------
 // TJpg_Decoder callback - called for each 16x16 decoded MCU block.
 // x/y are absolute screen coordinates (TJpgDec adds the drawJpg origin).
+//
+// On S3 (double-buffer): writes into the back buffer only. flush() is
+// called once after drawJpg() completes in board_draw_jpeg() — NEVER here.
+// On C3 (single-buffer + SPI guard): writes directly to the display
+// under the SPI transaction lock held by board_draw_jpeg().
 // ---------------------------------------------------------------------------
 static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* data) {
   if (x >= SCREEN_W || y >= SCREEN_H) return true;
@@ -90,34 +95,28 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 // Decodes a JPEG from a RAM buffer and draws it centred on the display.
 // Scaling is power-of-2 only (1x, 1/2, 1/4, 1/8).
 //
-// THE GLITCH FIX:
-// We must NEVER call fillScreen() while the RGB panel DMA is scanning.
-// The DMA runs continuously at 16 MHz pixel clock regardless of CPU activity.
-// fillScreen writes 384,000 pixels sequentially; if the DMA read pointer
-// laps the CPU write pointer (or vice versa) you get a scanline wrap:
-// the bottom N rows appear at the top - always the same height because the
-// DMA period is fixed. The fix is to only fill the letterbox bars (the
-// regions the JPEG does NOT paint), which are small, fast, and don't
-// race the scanner because they complete before the DMA reaches them.
-// For a full 800x480 image, x==0 and y==0 so NO fillRect fires at all.
+// S3 DOUBLE-BUFFER PATH:
+//   All MCU block writes go into the back buffer (DMA scans front only).
+//   After drawJpg() returns, gfx->flush() atomically swaps front/back.
+//   The display never shows a partially-decoded frame.
+//   flush() must ONLY be called here, never in the callback.
 //
-// SPI CONTENTION FIX (ESP32-C3 only):
-// The entire decode+draw is wrapped in SF_SPI_BEGIN / SF_SPI_END which
-// acquires the Arduino SPI mutex for the full frame. This prevents the
-// WiFi driver from stealing the SPI bus mid-MCU-block, which was the
-// remaining cause of line-shift and permanent right-shift artifacts.
+// C3 SPI GUARD PATH:
+//   SF_SPI_BEGIN/END hold the Arduino SPI mutex for the full frame,
+//   preventing WiFi from stealing the bus mid-MCU-block write.
+//   A dummy 1x1 fillRect resets the ST7789 CASET/RASET counters before
+//   each frame, eliminating the permanent right-shift artifact.
 //
-// ADDRESS RESYNC FIX (ESP32-C3 / ST7789 only):
-// A dummy 1x1 fillRect at (0,0) before decode re-homes the ST7789's
-// internal column/row address counter. If a previous SPI transaction was
-// interrupted mid-frame the counter can be left at an arbitrary offset,
-// causing all subsequent pixel writes to start from the wrong column
-// ("shifted right" permanently). The 1-pixel write costs ~1 µs and
-// always resets CASET/RASET to a known state.
+// LETTERBOX FIX (both targets):
+//   Only the letterbox bars (regions the JPEG does NOT paint) are filled
+//   with black. fillScreen() is never called during a live draw.
 // ---------------------------------------------------------------------------
 void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   if (!jpg || !len) return;
 
+  // Safety: always start with boardDrawActive false so a previously-
+  // interrupted draw cannot permanently block future frames.
+  boardDrawActive = false;
   boardDrawActive = true;
 
   // ---- Step 1: read image dimensions without full decode -----------------
@@ -162,39 +161,44 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   int x = (SCREEN_W - scaledW) / 2;  if (x < 0) x = 0;
   int y = (SCREEN_H - scaledH) / 2;  if (y < 0) y = 0;
 
-  // ---- Step 4: acquire SPI bus (C3 only) and resync display address ------
-  // On C3: hold the SPI mutex for the full frame so WiFi cannot interleave.
-  // Then write a dummy 1x1 pixel to reset the ST7789 column/row address
-  // counter to a known state — prevents the "shifted right permanently" bug
-  // caused by a prior interrupted transaction leaving the counter offset.
+  // ---- Step 4: acquire SPI bus (C3) or no-op (S3) -----------------------
+  // C3: hold SPI mutex for full frame to block WiFi bus contention.
+  // C3: reset ST7789 CASET/RASET address counters (prevents right-shift).
   SF_SPI_BEGIN();
 #if BOARD_IS_C3
   gfx->fillRect(0, 0, 1, 1, 0x0000);  // address resync — resets CASET/RASET
 #endif
 
-  // ---- Step 5: fill ONLY the letterbox bars (not the whole screen) -------
-  // Each fillRect covers a small strip; it completes before the DMA scanner
-  // reaches that region, so there is no race. For full-frame images (y==0,
-  // x==0) none of these fire.
+  // ---- Step 5: fill ONLY the letterbox bars ------------------------------
+  // Small strips that complete before the DMA scanner reaches them.
+  // For full-frame images (y==0, x==0) none of these fire.
   if (y > 0) {
-    gfx->fillRect(0, 0,           SCREEN_W, y,                         0x0000); // top bar
-    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH),  0x0000); // bottom bar
+    gfx->fillRect(0, 0,           SCREEN_W, y,                         0x0000);
+    gfx->fillRect(0, y + scaledH, SCREEN_W, SCREEN_H - (y + scaledH),  0x0000);
   }
   if (x > 0) {
-    gfx->fillRect(0,           y, x,                         scaledH, 0x0000); // left bar
-    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH,  0x0000); // right bar
+    gfx->fillRect(0,           y, x,                         scaledH, 0x0000);
+    gfx->fillRect(x + scaledW, y, SCREEN_W - (x + scaledW), scaledH,  0x0000);
   }
 
-  // ---- Step 6: configure decoder and draw --------------------------------
+  // ---- Step 6: decode and draw into back buffer (S3) or display (C3) ----
   TJpgDec.setJpgScale((uint8_t)bestScale);
   TJpgDec.setSwapBytes(JPEG_SWAP_BYTES);
   TJpgDec.setCallback(jpegDrawCallback);
   TJpgDec.drawJpg((int32_t)x, (int32_t)y, jpg, (uint32_t)len);
 
-  // Release SPI bus (C3 only) now that the full frame is written.
+  // ---- Step 7: atomic buffer swap (S3 only) ------------------------------
+  // All MCU blocks are now in the back buffer. Swap atomically so the
+  // display transitions from the previous complete frame directly to the
+  // new complete frame — no tearing, no partial frames visible.
+  // This call must ONLY appear here, never in jpegDrawCallback.
+#if BOARD_IS_S3
+  gfx->flush();
+#endif
+
+  // Release SPI bus (C3 only).
   SF_SPI_END();
 
-  // Clear flag here - ownership is inside this function, not the caller.
   boardDrawActive = false;
 }
 
@@ -203,10 +207,6 @@ inline void board_draw_jpeg_from_stream(fs::File& f) {
   uint8_t* buf = (uint8_t*)malloc(len);
   if (!buf) return;
   f.read(buf, len);
-  // No vTaskDelay(1) here: the SPI transaction guard in board_draw_jpeg
-  // holds the bus for the full frame, so there is no yield point needed
-  // to separate file-read from draw. Yielding here would re-open the
-  // contention window we just closed.
   board_draw_jpeg(buf, len);
   free(buf);
 }
@@ -231,4 +231,7 @@ void board_draw_boot_status(const char* text) {
   gfx->setTextColor(0xFFFF);
   gfx->setCursor(10, barY + padding);
   gfx->print(text);
+#if BOARD_IS_S3
+  gfx->flush();  // push boot status text to front buffer
+#endif
 }

@@ -71,7 +71,7 @@ Fix: Remaining SPI bus contention glitch and permanent right-shift on ESP32-C3
 Root cause: ESP32-C3 shares one SPI peripheral between the WiFi radio
 and HSPI (TFT). WiFi reconnect / TLS activity can steal the bus mid-
 MCU-block write from TJpgDec, causing line-shift or leaving the ST7789
-column address counter offset ("shifted right permanently").
+column address counter offset (permanent right-shift).
 
 - Added SF_SPI_BEGIN / SF_SPI_END macros (C3 only) that wrap the entire
   board_draw_jpeg() decode+draw in SPI.beginTransaction / endTransaction,
@@ -84,4 +84,34 @@ column address counter offset ("shifted right permanently").
 - Removed vTaskDelay(1) from board_draw_jpeg_from_stream(): it was
   creating a yield point mid-setup that re-opened the contention window
   the SPI transaction guard now closes properly.
+```
+
+5-11-2026 (3):
+```
+Fix: S3 RGB panel DMA race (line-shift, permanent right-shift) via proper double-buffer
+
+All reported glitches are on the S3, not C3. Root cause: single-buffer
+mode on the RGB panel means the DMA scanner and TJpgDec MCU writes
+contest the same 768 KB PSRAM framebuffer simultaneously.
+
+Previous double-buffer attempt failed because flush() was called mid-
+render (inside the callback or per-frame), which swapped buffers with a
+partially-decoded frame visible and caused Core 0 WDT reboots from
+reentrant GFX calls.
+
+- config_s3.h: changed Arduino_RGB_Display constructor useDataBuf from
+  false to true, re-enabling double-buffer mode.
+- board_init() now calls gfx->flush() after initial fillScreen to push
+  the black frame to the front buffer on startup.
+- board_draw_jpeg(): added gfx->flush() call AFTER TJpgDec.drawJpg()
+  returns (full frame complete), using #if BOARD_IS_S3 guard.
+  flush() now appears in exactly one place and is never called from
+  jpegDrawCallback(). Back buffer is fully written before swap.
+- board_draw_boot_status(): added gfx->flush() on S3 so status text
+  reaches the front buffer during setup.
+- Added boardDrawActive = false reset at top of board_draw_jpeg() as a
+  safety measure: a previously-interrupted draw cannot permanently block
+  future frames by leaving the flag stuck true.
+- BOARD_IS_S3 / BOARD_IS_C3 defines added alongside target include for
+  clean conditional compilation.
 ```

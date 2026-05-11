@@ -25,12 +25,27 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   0, 8, 4, 24,
   0, 8, 4, 24,
   1, 16000000,
-  true, 0, 0, 800*20  // bounce buffer: 800*20 is correct; larger values cause boot failures
+  true, 0, 0, 800*20  // bounce buffer: 800*20 px is correct; larger causes boot failures
 );
 
-// Single-buffer mode. Double-buffer was removed: flush() mid-JPEG-render
-// caused partial frames, and reentrant GFX from Core 0 caused watchdog reboots.
-Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, false);
+// Double-buffer mode (useDataBuf = true).
+//
+// Why double-buffer, and why it failed before:
+// The RGB panel DMA scans the framebuffer continuously at 16 MHz pixel
+// clock. In single-buffer mode, CPU writes from TJpgDec MCU blocks race
+// the DMA read pointer, producing the wrap-around line-shift artifact.
+//
+// The previous double-buffer attempt called flush() inside the MCU draw
+// callback (or too early), which swapped buffers mid-render and caused
+// partial frames and Core 0 WDT reboots from reentrant GFX calls.
+//
+// Correct usage: TJpgDec writes all MCU blocks into the back buffer
+// during drawJpg(). After drawJpg() returns (full frame complete),
+// board_draw_jpeg() calls gfx->flush() ONCE to atomically swap
+// front/back. The DMA scanner never sees a partially-written frame.
+// The flush() call must ONLY appear in board_draw_jpeg(), never in
+// jpegDrawCallback() or anywhere else.
+Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true /* useDataBuf = double-buffer */);
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 20
@@ -49,7 +64,8 @@ void board_init() {
   digitalWrite(GFX_BL, HIGH);
 
   gfx->begin();
-  gfx->fillScreen(0x0000);  // safe here: DMA not scanning content yet
+  gfx->fillScreen(0x0000);
+  gfx->flush();  // push black frame to front buffer on init
 
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();
@@ -59,8 +75,8 @@ void board_init() {
 void board_loop(int peekPin) {
   (void)peekPin;  // S3 uses touchscreen, not a GPIO button
   // Do not touch the display while a JPEG decode/draw is in progress.
-  // The RGB panel DMA is live; an unsynchronised fillScreen here would
-  // race the scanner and produce the wrap-around line-shift artifact.
+  // In double-buffer mode the back buffer is being written; an
+  // unsynchronised draw here would corrupt it before flush().
   if (boardDrawActive) return;
 
   //ts.read();
