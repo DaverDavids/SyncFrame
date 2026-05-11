@@ -106,6 +106,12 @@ static bool              mjpegForceReconnect = false;
 static volatile bool    mjpegRequestRefresh = false;
 static char              currentPhotoEtag[24] = "";
 
+// pendingDraw: set by mjpegTask after writing a new frame to LittleFS.
+// Consumed by loop() to trigger showCurrentPhoto() from the main-loop
+// context, keeping all SPI/LCD DMA writes off the mjpegTask stack and
+// away from concurrent WiFi interrupt activity.
+static volatile bool pendingDraw = false;
+
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
 
@@ -818,6 +824,10 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
         { uint8_t tmp[2]; size_t av = client->available();
           if (av >= 2) client->read(tmp, 2); else if (av == 1) client->read(tmp, 1); }
 
+        // Write frame to LittleFS under mutex, then signal loop() to draw.
+        // The LCD draw itself is intentionally NOT done here — keeping SPI/DMA
+        // writes off the mjpegTask stack prevents races with WiFi interrupts
+        // that share the SPI bus on ESP32-C3 during reconnect / TLS activity.
         if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
           // Promote current → prev
           if (LittleFS.exists(PATH_CURRENT)) {
@@ -834,17 +844,11 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
             currentJpgLen = readTotal;
           }
           free(buf); buf = nullptr;
-
-          // Draw from flash
-          if (!showingLast) {
-            File df = LittleFS.open(PATH_CURRENT, "r");
-            if (df) {
-              board_draw_jpeg_from_stream(df);
-              df.close();
-            }
-            boardDrawActive = false;
-          }
           xSemaphoreGive(drawMutex);
+
+          // Signal the main loop to draw the new frame.
+          // Do NOT draw here — see comment above.
+          if (!showingLast) pendingDraw = true;
         } else {
           free(buf); buf = nullptr;
         }
@@ -1193,6 +1197,14 @@ void loop() {
 
       mjpegMaybeReconnect();
     }
+  }
+
+  // Draw any pending frame from the stream task.
+  // This runs from the main loop (Arduino task), not from mjpegTask,
+  // so the SPI/LCD DMA writes are isolated from WiFi interrupt activity.
+  if (pendingDraw && !showingLast) {
+    pendingDraw = false;
+    showCurrentPhoto();
   }
 
   board_loop(cfg.peekButtonPin);
