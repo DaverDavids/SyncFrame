@@ -49,7 +49,7 @@ Fix: Redundant double-reconnect after config save
 - Fixed timestamp race condition: lastMjpegConnectMs is now updated before mjpegConnected is set to true, preventing the main loop from preempting and triggering a false interval timeout.
 ```
 
-5-11-2026:
+5-11-2026 (1):
 ```
 Fix: LCD glitch (line-shift artifact) during WiFi traffic / stream reconnects
 
@@ -62,4 +62,26 @@ Fix: LCD glitch (line-shift artifact) during WiFi traffic / stream reconnects
 - drawMutex hold time in mjpegTask reduced to LittleFS write only.
 - No changes to task priority, notify/wake pattern, timeout logic,
   peek button path, or boardDrawActive guard.
+```
+
+5-11-2026 (2):
+```
+Fix: Remaining SPI bus contention glitch and permanent right-shift on ESP32-C3
+
+Root cause: ESP32-C3 shares one SPI peripheral between the WiFi radio
+and HSPI (TFT). WiFi reconnect / TLS activity can steal the bus mid-
+MCU-block write from TJpgDec, causing line-shift or leaving the ST7789
+column address counter offset ("shifted right permanently").
+
+- Added SF_SPI_BEGIN / SF_SPI_END macros (C3 only) that wrap the entire
+  board_draw_jpeg() decode+draw in SPI.beginTransaction / endTransaction,
+  holding the Arduino SPI mutex for the full frame so WiFi cannot
+  interleave. Compiles away to nothing on S3 (parallel RGB panel).
+- Added a dummy 1x1 fillRect at (0,0) before decode on C3 to re-home
+  the ST7789 CASET/RASET address counters before each frame. Cost ~1us;
+  eliminates the permanent right-shift caused by a prior interrupted
+  transaction leaving the column counter at an arbitrary offset.
+- Removed vTaskDelay(1) from board_draw_jpeg_from_stream(): it was
+  creating a yield point mid-setup that re-opened the contention window
+  the SPI transaction guard now closes properly.
 ```
