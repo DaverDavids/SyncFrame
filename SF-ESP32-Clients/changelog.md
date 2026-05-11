@@ -51,24 +51,15 @@ Fix: Redundant double-reconnect after config save
 
 5-11-2026:
 ```
-Fix: LCD glitch / line-shift artifact during WiFi traffic / stream reconnects
+Fix: LCD glitch (line-shift artifact) during WiFi traffic / stream reconnects
 
-- Root cause: board_draw_jpeg_from_stream() was being called from
-  mjpegTask (priority 0) while holding drawMutex. During reconnects
-  and general WiFi traffic, WiFi ISR / lwIP DMA activity on the shared
-  SPI bus races the TJpg_Decoder MCU-block DMA writes, producing the
-  characteristic line-shift wrap artifact (bottom rows appearing at top).
-- Fix: mjpegTask no longer draws to the LCD. It now only writes the
-  received frame to LittleFS and sets a volatile pendingDraw flag,
-  then immediately releases drawMutex.
-- loop() checks pendingDraw each iteration and calls showCurrentPhoto()
-  from the main Arduino task context, where SPI/LCD DMA is not
-  contending with WiFi interrupt activity.
-- drawMutex critical section in mjpegTask is now LittleFS-write only
-  (much shorter hold time), reducing the contention window that
-  previously caused the 1s timeout race with handleImgCurrent().
-- showCurrentPhoto() / showLastPhoto() (peek button) are unchanged.
-- boardDrawActive guard in board_draw_boot_status() is unchanged.
-- No interaction with any prior fix (task priority, notify pattern,
-  timeout splits, or reconnect flag logic are all untouched).
+- mjpegTask no longer calls board_draw_jpeg_from_stream() directly.
+  WiFi ISR activity was racing TJpg_Decoder SPI DMA writes on the
+  shared bus, causing the bottom-rows-at-top wrap artifact.
+- Added volatile pendingDraw flag; mjpegTask sets it after writing the
+  frame to LittleFS and releasing drawMutex. loop() picks it up and
+  calls showCurrentPhoto() from the main Arduino task context instead.
+- drawMutex hold time in mjpegTask reduced to LittleFS write only.
+- No changes to task priority, notify/wake pattern, timeout logic,
+  peek button path, or boardDrawActive guard.
 ```
