@@ -1117,20 +1117,35 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
+  // Hold drawMutex for the full duration of streamFile() so mjpegTask
+  // cannot rename/overwrite current.jpg mid-stream, which was causing
+  // a torn LittleFS read and triggering the LCD glitch ~1s after refresh.
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    server.send(503, "text/plain", "busy");
+    return;
+  }
   File f = LittleFS.open(PATH_CURRENT, "r");
-  if (!f) { server.send(404, "text/plain", "no image"); return; }
+  if (!f) { xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
   server.streamFile(f, "image/jpeg");
   f.close();
+  xSemaphoreGive(drawMutex);
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
+  // Same guard as handleImgCurrent() — prev.jpg can be replaced by the
+  // rename in mjpegTask while we are mid-stream without this mutex.
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    server.send(503, "text/plain", "busy");
+    return;
+  }
   File f = LittleFS.open(PATH_PREV, "r");
-  if (!f) { server.send(404, "text/plain", "no last image"); return; }
+  if (!f) { xSemaphoreGive(drawMutex); server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
   server.streamFile(f, "image/jpeg");
   f.close();
+  xSemaphoreGive(drawMutex);
 }
 
 static void handleActionRefresh() {
