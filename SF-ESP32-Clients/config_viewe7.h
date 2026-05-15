@@ -37,8 +37,8 @@ const size_t splash_logo_len = sizeof(logo_480);
 //   DATA3  (B3) = 13    DATA11 (R0) = 40
 //   DATA4  (B4) = 14    DATA12 (R1) = 41
 //   DATA5  (G0) = 21    DATA13 (R2) = 42
-//   DATA6  (G1) = 47    DATA14 (R3) = 2
-//   DATA7  (G2) = 48    DATA15 (R4) = 1
+//   DATA6  (G1) = 8    DATA14 (R3) = 2
+//   DATA7  (G2) = 18    DATA15 (R4) = 1
 // ---------------------------------------------------------------------------
 Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   // DE,  VSYNC, HSYNC, PCLK
@@ -46,13 +46,13 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   // R4, R3, R2, R1, R0
   1,  2,  42, 41, 40,
   // G5, G4, G3, G2, G1, G0
-  39, 38, 45, 48, 47, 21,
+  39, 38, 45, 18, 8, 21,
   // B4, B3, B2, B1, B0
   14, 13, 12, 11, 10,
   // hsync_polarity, hsync_front_porch, hsync_pulse_width, hsync_back_porch
-  0, 20, 10, 10,
+  0, 48, 40, 40,
   // vsync_polarity, vsync_front_porch, vsync_pulse_width, vsync_back_porch
-  0, 10, 10, 10,
+  0, 13, 23, 32,
   // pclk_active_neg, prefer_speed
   0, 16000000,
   // auto_flush, bounce_buffer_size (800*10 avoids drift on S3)
