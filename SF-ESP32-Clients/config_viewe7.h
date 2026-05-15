@@ -5,9 +5,21 @@
 //
 // ESP32-S3, 800x480 16-bit RGB565 parallel panel, GT911 capacitive touch.
 //
-// Pin assignments sourced directly from VIEWESMART's own board example:
-// https://github.com/VIEWESMART/UEDX80480070ESP32-7inch-Touch-Display
-//   esp_panel_board_custom_conf.h (RGB section, 16-bit data width)
+// Pin assignments sourced from VIEWESMART's own driver examples:
+//   lcd_single_rgb.ino  → RGB panel GPIOs and timing
+//   touch_i2c.ino       → GT911 SDA/SCL/RST/INT
+//
+// KEY HARDWARE QUIRK — shared GPIOs:
+//   GPIO 8  = RGB G1 data line  AND  GT911 SDA
+//   GPIO 18 = RGB G2 data line  AND  GT911 SCL
+//   GPIO 3  = RGB VSYNC         AND  GT911 INT (cannot use INT after panel init)
+//   GPIO 48 = GT911 RST (used only during address-config sequence at boot)
+//
+// The GT911 uses RST+INT toggling at startup to latch its I2C address.
+// Touch MUST be initialized before gfx->begin() so those GPIOs are free
+// for the address-config pulse sequence. After that, the RGB panel DMA
+// takes over GPIO 8/18 as data lines and the GT911 responds via I2C at
+// its latched address. Touch is polled (INT=3 conflicts with VSYNC).
 // ---------------------------------------------------------------------------
 
 #include <Arduino_GFX_Library.h>
@@ -25,51 +37,66 @@ const size_t splash_logo_len = sizeof(logo_480);
 #define DEFAULT_PHOTO_FILE "photo.800x480.jpg"
 #define APP_CORE 1
 
-// Backlight — GPIO 38 (active high, per board config)
+// Backlight — GPIO 38, active high
+// NOTE: GPIO 38 is also RGB G4 data line. The panel drives it as a data
+// pin during normal operation; setting it HIGH before gfx->begin() is
+// enough to turn the backlight on (the panel controller takes it over
+// after init and the backlight remains on via the data activity).
 #define GFX_BL 38
 
 // ---------------------------------------------------------------------------
 // RGB panel — 16-bit RGB565, 800x480 @ 16 MHz
-// Pin mapping (DATA0..15 = B0..B4, G0..G5, R0..R4 in RGB565 order):
-//   DATA0  (B0) = 10    DATA8  (G3) = 45
-//   DATA1  (B1) = 11    DATA9  (G4) = 38   <-- also used as BL; board shares
-//   DATA2  (B2) = 12    DATA10 (G5) = 39
-//   DATA3  (B3) = 13    DATA11 (R0) = 40
-//   DATA4  (B4) = 14    DATA12 (R1) = 41
-//   DATA5  (G0) = 21    DATA13 (R2) = 42
-//   DATA6  (G1) = 8    DATA14 (R3) = 2
-//   DATA7  (G2) = 18    DATA15 (R4) = 1
+//
+// Arduino_ESP32RGBPanel constructor arg order (matches config_s3.h pattern):
+//   (de, vsync, hsync, pclk,
+//    r0,r1,r2,r3,r4,
+//    g0,g1,g2,g3,g4,g5,
+//    b0,b1,b2,b3,b4,
+//    hsync_pol, hsync_fp, hsync_pw, hsync_bp,
+//    vsync_pol, vsync_fp, vsync_pw, vsync_bp,
+//    pclk_active_neg, prefer_speed,
+//    auto_flush, ?, ?, bounce_buf_pixels)
+//
+// Timing from lcd_single_rgb.ino: HPW=40 HBP=40 HFP=48 VPW=23 VBP=32 VFP=13
+//
+// DATA pin mapping (DATA0..15 = B0..B4, G0..G5, R0..R4):
+//   B0=10 B1=11 B2=12 B3=13 B4=14
+//   G0=21 G1=8  G2=18 G3=45 G4=38 G5=39
+//   R0=40 R1=41 R2=42 R3=2  R4=1
+//   DE=17 VSYNC=3 HSYNC=46 PCLK=9
 // ---------------------------------------------------------------------------
 Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   // DE,  VSYNC, HSYNC, PCLK
   17,    3,     46,    9,
-  // R4, R3, R2, R1, R0
-  1,  2,  42, 41, 40,
-  // G5, G4, G3, G2, G1, G0
-  39, 38, 45, 18, 8, 21,
-  // B4, B3, B2, B1, B0
-  14, 13, 12, 11, 10,
-  // hsync_polarity, hsync_front_porch, hsync_pulse_width, hsync_back_porch
+  // R0, R1, R2, R3, R4
+  40, 41, 42,  2,  1,
+  // G0, G1, G2, G3, G4, G5
+  21,  8, 18, 45, 38, 39,
+  // B0, B1, B2, B3, B4
+  10, 11, 12, 13, 14,
+  // hsync_pol, hsync_fp, hsync_pw, hsync_bp
   0, 48, 40, 40,
-  // vsync_polarity, vsync_front_porch, vsync_pulse_width, vsync_back_porch
+  // vsync_pol, vsync_fp, vsync_pw, vsync_bp
   0, 13, 23, 32,
   // pclk_active_neg, prefer_speed
   0, 16000000,
-  // auto_flush, bounce_buffer_size (800*10 avoids drift on S3)
-  true, 0, 0, 800 * 10
+  // auto_flush, unused, unused, bounce_buf_pixels (match s3: 800*20)
+  true, 0, 0, 800 * 20
 );
 
-// Double-buffer: DMA always scans the front buffer; JPEG decode writes into
-// the back buffer and gfx->flush() swaps atomically — no tearing.
+// Double-buffer: DMA scans front buffer; JPEG writes to back; flush() swaps atomically.
 Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true);
 
 // ---------------------------------------------------------------------------
-// GT911 touch — I2C on SCL=18, SDA=8; INT and RST unused (-1)
+// GT911 touch
+//   SDA=8, SCL=18 (shared with RGB G1/G2 — init BEFORE gfx->begin())
+//   RST=48 — used to latch I2C address during GT911 startup sequence
+//   INT=3  — conflicts with VSYNC; pass -1 so TAMC_GT911 polls via I2C
 // ---------------------------------------------------------------------------
-#define TOUCH_SDA  8
+#define TOUCH_SDA   8
 #define TOUCH_SCL  18
+#define TOUCH_RST  48
 #define TOUCH_INT  (-1)
-#define TOUCH_RST  (-1)
 TAMC_GT911 ts(TOUCH_SDA, TOUCH_SCL, TOUCH_INT, TOUCH_RST, SCREEN_W, SCREEN_H);
 
 extern void showCurrentPhoto();
@@ -79,16 +106,19 @@ extern bool hasLastPhoto();
 extern volatile bool boardDrawActive;
 
 void board_init() {
-  pinMode(GFX_BL, OUTPUT);
-  digitalWrite(GFX_BL, HIGH);
-
-  gfx->begin();
-  gfx->fillScreen(0x0000);
-  gfx->flush();
-
+  // --- Touch FIRST (GPIO 8/18 free before panel DMA takes them) ---
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();
   ts.setRotation(0);
+
+  // --- Backlight on before panel init so screen lights up immediately ---
+  pinMode(GFX_BL, OUTPUT);
+  digitalWrite(GFX_BL, HIGH);
+
+  // --- Panel init — RGB DMA now owns GPIO 8/18 as data lines ---
+  gfx->begin();
+  gfx->fillScreen(0x0000);
+  gfx->flush();
 }
 
 void board_loop(int peekPin) {
