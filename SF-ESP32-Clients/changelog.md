@@ -129,3 +129,29 @@ Fix: drawMutex not held during /img/current and /img/last HTTP stream
   2000ms rather than proceeding with an unguarded read.
 - No changes to the draw path, pendingDraw flag, or task structure.
 ```
+
+5-16-2026 — INVESTIGATION NOTES (no display regression):
+```
+Status: stream receiving frames (51578 bytes, etag confirmed) but LCD
+shows nothing. All attempts below failed or were not confirmed working.
+
+What is known:
+- The pendingDraw refactor (5-11 entry 1) was committed to the changelog
+  but the corresponding loop() consumer was never pushed to the .ino.
+  mjpegTask sets pendingDraw=true; nothing in loop() reads it and calls
+  showCurrentPhoto(). Frames land in LittleFS and are never drawn.
+- The .ino on main still carries SHA 538ccf5 — it predates the
+  pendingDraw changes, meaning the draw-from-task code may also be
+  absent, leaving no draw path at all.
+
+Attempts that did not resolve it:
+1. SPI transaction guards (SF_SPI_BEGIN/END macros) — addressed glitch
+   artifact but not the no-display regression.
+2. drawMutex guards on /img/* endpoints — correct fix for a separate
+   race but unrelated to the blank screen.
+3. pendingDraw flag added to mjpegTask — correct idea, but the
+   loop() consumer `if (pendingDraw) { pendingDraw=false; showCurrentPhoto(); }`
+   was never committed.
+
+Next step: add pendingDraw consumer to loop() and push the .ino.
+```
