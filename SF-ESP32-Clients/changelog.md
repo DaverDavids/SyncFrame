@@ -115,3 +115,17 @@ reentrant GFX calls.
 - BOARD_IS_S3 / BOARD_IS_C3 defines added alongside target include for
   clean conditional compilation.
 ```
+
+5-15-2026:
+```
+Fix: drawMutex not held during /img/current and /img/last HTTP stream
+
+- handleImgCurrent() and handleImgLast() now acquire drawMutex before
+  calling server.streamFile() and release it after f.close().
+  Without this, mjpegTask could rename/overwrite current.jpg or prev.jpg
+  mid-stream, producing a torn LittleFS read and triggering the LCD
+  glitch approximately 1s after a browser refresh of the web UI.
+- Both handlers return HTTP 503 if the mutex cannot be acquired within
+  2000ms rather than proceeding with an unguarded read.
+- No changes to the draw path, pendingDraw flag, or task structure.
+```
