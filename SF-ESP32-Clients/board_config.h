@@ -27,11 +27,21 @@
 // ---------------------------------------------------------------------------
 volatile bool boardDrawActive = false;
 
+// ---------------------------------------------------------------------------
 // Target identification
+//
+// BOARD_TARGET_VIEWE7 is injected via build.extra_flags in sketch.yaml
+// (SF-VIEWE7 profile) so the two S3-based boards can share the same
+// CONFIG_IDF_TARGET_ESP32S3 define but pick different config headers.
+// ---------------------------------------------------------------------------
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV)
   #include "config_c3.h"
   #define BOARD_IS_C3 1
-  #define BOARD_IS_S3 0
+  #define BOARD_IS_S3 1
+#elif defined(BOARD_TARGET_VIEWE7)
+  #include "config_viewe7.h"
+  #define BOARD_IS_C3 0
+  #define BOARD_IS_S3 1
 #elif defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
   #include "config_s3.h"
   #define BOARD_IS_C3 0
