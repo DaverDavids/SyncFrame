@@ -1,7 +1,7 @@
 profiles:
   viewe7:
     fqbn: esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,DebugLevel=none,PSRAM=opi
-    build_properties:
+    build_property:
       - build.extra_flags=-DBOARD_TARGET_VIEWE7
     platforms:
       - platform: esp32:esp32 (3.1.1)
