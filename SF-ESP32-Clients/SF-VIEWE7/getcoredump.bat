@@ -1,1 +1,1 @@
-curl syncframe-05d.local/coredump -o build/coredump.bin
+curl syncframe-d52.local/coredump -o build/coredump.bin
