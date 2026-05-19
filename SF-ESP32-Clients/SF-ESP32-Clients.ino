@@ -290,7 +290,7 @@ static uint32_t crc32buf(const uint8_t* data, size_t len) {
 
 static void applyWifiDefaults() {
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_15dBm);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
   WiFi.setSleep(false);
