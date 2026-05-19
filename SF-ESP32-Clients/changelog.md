@@ -129,3 +129,53 @@ Fix: drawMutex not held during /img/current and /img/last HTTP stream
   2000ms rather than proceeding with an unguarded read.
 - No changes to the draw path, pendingDraw flag, or task structure.
 ```
+
+5-19-2026 — UNRESOLVED: S3 RGB panel line-shift glitch debug log
+```
+Status: glitch still present as of this writing. Summary of what is
+known, what was tried, and where we are confused.
+
+Symptom:
+  Line-shift / wrap artifact on S3 RGB panel on first frame after boot
+  and on many subsequent reconnects. Does not occur on C3 (SPI TFT).
+
+What is confirmed NOT the cause:
+  - Which FreeRTOS core draws (tried both, no change)
+  - WiFi TX power (reduced to 8.5 dBm, no change)
+  - Power rail brownout (ruled out by TX power test having no effect)
+  - boardDrawActive re-entrancy (extra false→true set removed, no change)
+  - vTaskDelay(1) yield in jpegDrawCallback (tried, no change)
+  - flush() called in wrong places (all flush() calls audited and removed
+    or confirmed correct; comments about flush() in code are now stale
+    and do not reflect actual calls)
+  - startNetworkServicesOnce() drawing over active frame (guarded, no change)
+  - drawMutex not held during web UI image stream (fixed 5-15, separate issue)
+
+What has been tried and had partial effect:
+  - Moving draw from mjpegTask to loop() via pendingDraw flag: reduced
+    frequency significantly but did not eliminate glitch
+  - Increasing bounce buffer from 800*20 to 800*40: marginal reduction,
+    probably noise
+  - Double-buffer (useDataBuf=true) + single flush() after drawJpg():
+    enabled, then disabled (AI suggested disabling it), then re-enabled;
+    current state is re-enabled with one flush() after drawJpg(); glitch
+    still present
+
+Where we are confused:
+  - Double-buffer should prevent any DMA/write race by definition. If
+    double-buffer is correctly enabled and flush() is called exactly once
+    after a complete frame is written to the back buffer, the DMA scanner
+    should never see a partial frame. Yet the glitch persists with
+    double-buffer enabled. Either (a) double-buffer is not actually
+    active at runtime despite the constructor flag, (b) flush() is being
+    called at the wrong time or not at all in the current build, or
+    (c) the glitch source is not a write race at all and has not been
+    identified yet.
+  - The glitch occurs on the very first frame, before any reconnect,
+    which rules out reconnect-specific code paths as the sole trigger.
+
+Next: verify at runtime whether double-buffer is actually allocating two
+framebuffers (check ESP.getFreePsram() before and after gfx->begin()),
+and confirm flush() is being reached in the current build by adding a
+temporary log or LED toggle after the flush() call.
+```
