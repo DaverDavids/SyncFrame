@@ -25,7 +25,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   0, 8, 4, 24,
   0, 8, 4, 24,
   1, 16000000,
-  true, 0, 0, 800*20  // bounce buffer: 800*20 px is correct; larger causes boot failures
+  true, 0, 0, 800*40  // bounce buffer: 800*20 px is correct; larger causes boot failures
 );
 
 // Double-buffer mode (useDataBuf = true).
@@ -45,7 +45,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
 // front/back. The DMA scanner never sees a partially-written frame.
 // The flush() call must ONLY appear in board_draw_jpeg(), never in
 // jpegDrawCallback() or anywhere else.
-Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true /* useDataBuf = double-buffer */);
+Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, false /* useDataBuf = double-buffer */);
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 20
@@ -65,7 +65,7 @@ void board_init() {
 
   gfx->begin();
   gfx->fillScreen(0x0000);
-  gfx->flush();  // push black frame to front buffer on init
+    // push black frame to front buffer on init
 
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();

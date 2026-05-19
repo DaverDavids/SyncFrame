@@ -203,7 +203,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   // new complete frame — no tearing, no partial frames visible.
   // This call must ONLY appear here, never in jpegDrawCallback.
 #if BOARD_IS_S3
-  gfx->flush();
+  
 #endif
 
   // Release SPI bus (C3 only).
@@ -242,6 +242,6 @@ void board_draw_boot_status(const char* text) {
   gfx->setCursor(10, barY + padding);
   gfx->print(text);
 #if BOARD_IS_S3
-  gfx->flush();  // push boot status text to front buffer
+    // push boot status text to front buffer
 #endif
 }
