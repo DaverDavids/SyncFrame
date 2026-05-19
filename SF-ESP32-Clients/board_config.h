@@ -97,6 +97,7 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
       gfx->draw16bitRGBBitmap(x, y + row, data + row * w, clipW, 1);
     }
   }
+  if (x == 0) vTaskDelay(1);  // yield at start of each new row of MCU blocks
   return true;
 }
 
