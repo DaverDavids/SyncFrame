@@ -126,7 +126,6 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
 
   // Safety: always start with boardDrawActive false so a previously-
   // interrupted draw cannot permanently block future frames.
-  boardDrawActive = false;
   boardDrawActive = true;
 
   // ---- Step 1: read image dimensions without full decode -----------------
