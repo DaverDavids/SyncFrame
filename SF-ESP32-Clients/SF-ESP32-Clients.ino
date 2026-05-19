@@ -168,6 +168,8 @@ void showCurrentPhoto() {
     File f = LittleFS.open(PATH_CURRENT, "r");
     if (f) { board_draw_jpeg_from_stream(f); f.close(); boardDrawActive = false; }
     xSemaphoreGive(drawMutex);
+  } else {
+	  boardDrawActive = false;
   }
 }
 
@@ -952,7 +954,9 @@ static void startNetworkServicesOnce() {
   logEvent("NET",  "mdns=%s ota=on web=on psram=%s heapFree=%u",
            mdnsOk ? "on" : "off", hasPsram() ? "yes" : "no", (unsigned)ESP.getFreeHeap());
 
+  if (!wifiEverConnected) {
   board_draw_boot_status(("IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR)).c_str());
+  }
 }
 
 static void ensureWifi() {
