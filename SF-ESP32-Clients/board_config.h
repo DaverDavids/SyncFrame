@@ -37,7 +37,7 @@ volatile bool boardDrawActive = false;
 #if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(ARDUINO_ESP32C3_DEV)
   #include "config_c3.h"
   #define BOARD_IS_C3 1
-  #define BOARD_IS_S3 1
+  #define BOARD_IS_S3 0
 #elif defined(BOARD_TARGET_VIEWE7)
   #include "config_viewe7.h"
   #define BOARD_IS_C3 0
@@ -203,7 +203,7 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   // new complete frame — no tearing, no partial frames visible.
   // This call must ONLY appear here, never in jpegDrawCallback.
 #if BOARD_IS_S3
-  
+  gfx->flush()
 #endif
 
   // Release SPI bus (C3 only).

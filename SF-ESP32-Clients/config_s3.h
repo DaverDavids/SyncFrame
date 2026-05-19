@@ -45,7 +45,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
 // front/back. The DMA scanner never sees a partially-written frame.
 // The flush() call must ONLY appear in board_draw_jpeg(), never in
 // jpegDrawCallback() or anywhere else.
-Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, false /* useDataBuf = double-buffer */);
+Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true /* useDataBuf = double-buffer */);
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 20
