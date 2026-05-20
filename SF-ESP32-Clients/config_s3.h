@@ -25,7 +25,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   0, 8, 4, 24,
   0, 8, 4, 24,
   1, 16000000,
-  true, 0, 0, 800*40  // bounce buffer: 800*20 px is correct; larger causes boot failures
+  true, 0, 0, 800*20  // 800*20 is correct; larger values cause boot failures
 );
 
 // Double-buffer mode (useDataBuf = true).
@@ -63,9 +63,30 @@ void board_init() {
   pinMode(GFX_BL, OUTPUT);
   digitalWrite(GFX_BL, HIGH);
 
+  // PSRAM debug: log free PSRAM before and after gfx->begin() to confirm
+  // whether double-buffer actually allocates two full 768KB framebuffers.
+  // Expected: freePsram drops by ~1536KB (2 x 800*480*2 bytes) if active.
+  // If it only drops by ~768KB, double-buffer silently fell back to single.
+  uint32_t psramBefore = ESP.getFreePsram();
+  Serial.printf("[BOARD] PSRAM before gfx->begin(): %u bytes\n", (unsigned)psramBefore);
+
   gfx->begin();
+
+  uint32_t psramAfter = ESP.getFreePsram();
+  Serial.printf("[BOARD] PSRAM after  gfx->begin(): %u bytes (delta: %u)\n",
+                (unsigned)psramAfter, (unsigned)(psramBefore - psramAfter));
+  Serial.printf("[BOARD] Double-buffer check: expected delta ~%u, got %u — %s\n",
+                (unsigned)(SCREEN_W * SCREEN_H * 2 * 2),
+                (unsigned)(psramBefore - psramAfter),
+                (psramBefore - psramAfter >= (uint32_t)(SCREEN_W * SCREEN_H * 2 * 2) * 85 / 100)
+                  ? "DOUBLE-BUFFER ACTIVE" : "WARNING: may be single-buffer");
+
+  // Initialize front buffer to black. fillScreen() writes to the back buffer;
+  // flush() swaps it to the front so the DMA scanner starts on a clean black
+  // frame instead of garbage PSRAM data. Without this flush, the first frame
+  // shown is whatever was left in PSRAM, causing the first-frame glitch.
   gfx->fillScreen(0x0000);
-    // push black frame to front buffer on init
+  gfx->flush();  // push black frame to front buffer before DMA scanning begins
 
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();

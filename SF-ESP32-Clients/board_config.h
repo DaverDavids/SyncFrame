@@ -97,7 +97,8 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
       gfx->draw16bitRGBBitmap(x, y + row, data + row * w, clipW, 1);
     }
   }
-  if (x == 0) vTaskDelay(1);  // yield at start of each new row of MCU blocks
+  // NOTE: no vTaskDelay(1) here. Any yield mid-decode re-opens a preemption
+  // window that the double-buffer / SPI guard is specifically designed to close.
   return true;
 }
 
@@ -242,6 +243,6 @@ void board_draw_boot_status(const char* text) {
   gfx->setCursor(10, barY + padding);
   gfx->print(text);
 #if BOARD_IS_S3
-    // push boot status text to front buffer
+  gfx->flush();  // push boot status text to front buffer
 #endif
 }
