@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <WiFi.h>
@@ -106,13 +107,21 @@ static bool              mjpegForceReconnect = false;
 static volatile bool    mjpegRequestRefresh = false;
 static char              currentPhotoEtag[24] = "";
 
-// pendingDraw: set by mjpegTask after writing a new frame to LittleFS.
-// Consumed by loop() to trigger showCurrentPhoto() from the main-loop
-// context, keeping all SPI/LCD DMA writes off the mjpegTask stack and
-// away from concurrent WiFi interrupt activity.
+// pendingDraw: set by mjpegTask when a new JPEG frame has been received
+// into PSRAM (pendingFrameBuf/pendingFrameLen).  loop() draws it via
+// board_draw_jpeg() and THEN, once DMA is idle, calls commitFrameToFs()
+// to persist the frame to LittleFS.
+//
+// KEY RULE: LittleFS flash I/O must NEVER overlap an active RGB DMA scan.
+// All f.write() / LittleFS.rename() calls live exclusively in loop(), in
+// the dead time after board_draw_jpeg() returns.  mjpegTask only fills
+// the PSRAM buffer and signals; it never touches the filesystem directly.
 static volatile bool pendingDraw = false;
 static uint8_t* pendingFrameBuf = nullptr;
 static size_t   pendingFrameLen = 0;
+// pendingCommit: set by loop() after drawing, consumed by commitFrameToFs()
+// in the same loop iteration to write current.jpg / promote prev.jpg.
+static volatile bool pendingCommit = false;
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
@@ -832,35 +841,32 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
         { uint8_t tmp[2]; size_t av = client->available();
           if (av >= 2) client->read(tmp, 2); else if (av == 1) client->read(tmp, 1); }
 
-        // Write frame to LittleFS under mutex, then signal loop() to draw.
-        // The LCD draw itself is intentionally NOT done here — keeping SPI/DMA
-        // writes off the mjpegTask stack prevents races with WiFi interrupts
-        // that share the SPI bus on ESP32-C3 during reconnect / TLS activity.
-        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          // Promote current → prev
-          if (LittleFS.exists(PATH_CURRENT)) {
-            LittleFS.remove(PATH_PREV);
-            LittleFS.rename(PATH_CURRENT, PATH_PREV);
-            lastJpgLen = currentJpgLen;
-          }
-
-          // Write new frame to /current.jpg for the Web UI
-          File f = LittleFS.open(PATH_CURRENT, "w", true);
-          if (f) {
-            f.write(buf, readTotal);
-            f.close();
-            currentJpgLen = readTotal;
-          }
-          xSemaphoreGive(drawMutex);
-
-          // HANDOFF TO MAIN LOOP (Do not free buf here!)
+        // HANDOFF TO MAIN LOOP — no LittleFS I/O here.
+        // mjpegTask only deposits the frame into a PSRAM buffer and sets
+        // pendingDraw.  ALL flash writes (rename + write) are deferred to
+        // loop() via the pendingCommit path, which runs after board_draw_jpeg()
+        // returns (DMA idle).  This eliminates the bus-fabric stall that
+        // caused the horizontal scan-line shift on the JC8048 RGB panel.
+        {
           if (pendingFrameBuf) free(pendingFrameBuf);
           pendingFrameBuf = buf;
           pendingFrameLen = readTotal;
-
-          if (!showingLast) pendingDraw = true;
-        } else {
-          free(buf); // Only free if we failed to get the mutex
+          if (!showingLast) {
+            pendingDraw   = true;
+            pendingCommit = true;  // loop() will write to LittleFS after draw
+          } else {
+            // User is viewing prev — no draw pending so DMA is idle; commit now.
+            if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+              if (LittleFS.exists(PATH_CURRENT)) {
+                LittleFS.remove(PATH_PREV);
+                LittleFS.rename(PATH_CURRENT, PATH_PREV);
+                lastJpgLen = currentJpgLen;
+              }
+              File f = LittleFS.open(PATH_CURRENT, "w", true);
+              if (f) { f.write(buf, readTotal); f.close(); currentJpgLen = readTotal; }
+              xSemaphoreGive(drawMutex);
+            }
+          }
         }
 
         logEvent("STREAM", "frame size=%u etag=%s heap=%u",
@@ -1227,14 +1233,34 @@ void loop() {
   }
 
   // Draw any pending frame from the stream task.
-  // This runs from the main loop (Arduino task), not from mjpegTask,
-  // so the SPI/LCD DMA writes are isolated from WiFi interrupt activity.
+  // board_draw_jpeg() is called here (main loop / Arduino task) so that
+  // SPI/LCD DMA writes are isolated from WiFi interrupt activity on C3,
+  // and from the mjpegTask stack on S3.
   if (pendingDraw && !showingLast) {
     pendingDraw = false;
     if (pendingFrameBuf) {
-      xSemaphoreTake(drawMutex, portMAX_DELAY);
+      // --- DRAW (DMA active during this call) ---
       board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
-      xSemaphoreGive(drawMutex);
+      // board_draw_jpeg() returns only after all MCU blocks are pushed;
+      // the DMA engine is now idle between frames — safe window for FS I/O.
+
+      // --- COMMIT to LittleFS (DMA idle, safe window) ---
+      if (pendingCommit) {
+        pendingCommit = false;
+        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+          // promote current → prev
+          if (LittleFS.exists(PATH_CURRENT)) {
+            LittleFS.remove(PATH_PREV);
+            LittleFS.rename(PATH_CURRENT, PATH_PREV);
+            lastJpgLen = currentJpgLen;
+          }
+          // write new frame for Web UI
+          File fsf = LittleFS.open(PATH_CURRENT, "w", true);
+          if (fsf) { fsf.write(pendingFrameBuf, pendingFrameLen); fsf.close(); currentJpgLen = pendingFrameLen; }
+          xSemaphoreGive(drawMutex);
+        }
+      }
+
       free(pendingFrameBuf);
       pendingFrameBuf = nullptr;
     }
