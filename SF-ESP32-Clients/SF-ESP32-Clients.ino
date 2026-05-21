@@ -1,4 +1,3 @@
-
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <WiFi.h>
@@ -94,34 +93,41 @@ static const char* PATH_CURRENT = "/current.jpg";
 static const char* PATH_PREV    = "/prev.jpg";
 static size_t      currentJpgLen = 0;
 static size_t      lastJpgLen    = 0;
-bool showingLast        = false;
+bool showingLast = false;
 
 // Stream (mjpeg)
 static bool              mjpegConnected   = false;
-static TaskHandle_t     mjpegTaskHandle = nullptr;
-static StaticTask_t   mjpegTaskBuffer;
-static StackType_t    mjpegStack[20480 / sizeof(StackType_t)];
-static unsigned long     lastMjpegConnectMs = 0;
-static unsigned long     lastMjpegAttemptMs = ULONG_MAX - 15000UL;  // skip cooldown on first boot
+static TaskHandle_t      mjpegTaskHandle  = nullptr;
+static StaticTask_t      mjpegTaskBuffer;
+static StackType_t       mjpegStack[20480 / sizeof(StackType_t)];
+static unsigned long     lastMjpegConnectMs  = 0;
+static unsigned long     lastMjpegAttemptMs  = ULONG_MAX - 15000UL;
 static bool              mjpegForceReconnect = false;
-static volatile bool    mjpegRequestRefresh = false;
+static volatile bool     mjpegRequestRefresh = false;
 static char              currentPhotoEtag[24] = "";
 
-// pendingDraw: set by mjpegTask when a new JPEG frame has been received
-// into PSRAM (pendingFrameBuf/pendingFrameLen).  loop() draws it via
-// board_draw_jpeg() and THEN, once DMA is idle, calls commitFrameToFs()
-// to persist the frame to LittleFS.
+// ---------------------------------------------------------------------------
+// Pending-frame handoff
+// ---------------------------------------------------------------------------
+// mjpegTask deposits each received JPEG frame into pendingFrameBuf (PSRAM)
+// and raises pendingDraw + pendingCommit.  It NEVER touches LittleFS.
 //
-// KEY RULE: LittleFS flash I/O must NEVER overlap an active RGB DMA scan.
-// All f.write() / LittleFS.rename() calls live exclusively in loop(), in
-// the dead time after board_draw_jpeg() returns.  mjpegTask only fills
-// the PSRAM buffer and signals; it never touches the filesystem directly.
-static volatile bool pendingDraw = false;
-static uint8_t* pendingFrameBuf = nullptr;
-static size_t   pendingFrameLen = 0;
-// pendingCommit: set by loop() after drawing, consumed by commitFrameToFs()
-// in the same loop iteration to write current.jpg / promote prev.jpg.
+// loop() services the flags in this order every iteration:
+//   1. pendingDraw  -> board_draw_jpeg()             (DMA active)
+//   2. pendingCommit -> LittleFS rename + write       (DMA idle -- safe)
+//   3. server.handleClient()                          (after FS work done)
+//
+// This ordering guarantees that flash I/O never overlaps an active RGB DMA
+// scan, eliminating the horizontal scan-line shift artifact on the JC8048.
+//
+// drawMutex is held for the entire draw+commit block so that web-server
+// handlers (handleImgCurrent/Last) cannot open a LittleFS file while loop()
+// is writing it, and vice versa.
+// ---------------------------------------------------------------------------
+static volatile bool pendingDraw   = false;
 static volatile bool pendingCommit = false;
+static uint8_t*      pendingFrameBuf = nullptr;
+static size_t        pendingFrameLen = 0;
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
@@ -156,8 +162,7 @@ static void handleActionReboot();
 // Web Authentication
 // ============================================================
 static bool requireWebAuth() {
-  bool imgEndpoint = false;
-  if (server.uri().startsWith("/img/")) imgEndpoint = true;
+  bool imgEndpoint = server.uri().startsWith("/img/");
   int threshold = imgEndpoint ? 10000 : 50000;
   if (ESP.getFreeHeap() < threshold) {
     server.send(503, "application/json", "{\"ok\":false,\"err\":\"low memory\"}");
@@ -169,34 +174,39 @@ static bool requireWebAuth() {
   return false;
 }
 
-// ---------------------- Hardware Callbacks ----------------------
+// ============================================================
+// Hardware callbacks (called from board_loop via button press)
+// ============================================================
 bool hasLastPhoto() { return LittleFS.exists(PATH_PREV); }
 
+// showCurrentPhoto / showLastPhoto are called from board_loop() which runs
+// at the BOTTOM of loop(), AFTER the draw+commit block has already completed
+// for this iteration.  DMA is therefore idle when these run.
+// Both read from LittleFS into a heap buffer then call board_draw_jpeg() --
+// the same safe pattern as every other non-streaming draw path.
 void showCurrentPhoto() {
   showingLast = false;
-  boardDrawActive = true;
-  if (pendingFrameBuf) {
-    board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
-  } else if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+  // Use the already-committed LittleFS file.  Reading from flash here is
+  // safe: loop() runs draw+commit before board_loop(), so DMA is idle.
+  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     File f = LittleFS.open(PATH_CURRENT, "r");
     if (f) { board_draw_jpeg_from_stream(f); f.close(); }
     xSemaphoreGive(drawMutex);
   }
-  boardDrawActive = false;
 }
 
 void showLastPhoto() {
   showingLast = true;
-  boardDrawActive = true;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     File f = LittleFS.open(PATH_PREV, "r");
     if (f) { board_draw_jpeg_from_stream(f); f.close(); }
     xSemaphoreGive(drawMutex);
   }
-  boardDrawActive = false;
 }
 
-// ---------------------- Helpers ----------------------
+// ============================================================
+// Helpers
+// ============================================================
 static void buildHostAndClientId() {
   uint64_t fullMac = ESP.getEfuseMac();
   uint8_t m[6];
@@ -313,19 +323,19 @@ static void applyWifiDefaults() {
 
 static void loadConfig() {
   prefs.begin(PREF_NS, true);
-  cfg.wifiSsid          = prefs.getString("wssid",   "");
-  cfg.wifiPass          = prefs.getString("wpsk",    "");
-  cfg.photoBaseUrl      = prefs.getString("pbase",   DEFAULT_PHOTO_BASEURL);
-  cfg.photoFilename     = prefs.getString("pfile",   DEFAULT_PHOTO_FILE);
-  cfg.httpsInsecure     = prefs.getBool("pinsec",    true);
-  cfg.httpUser          = prefs.getString("puser",   DEFAULT_HTTP_USER);
-  cfg.httpPass          = prefs.getString("ppass",   String(test_http_password));
-  cfg.webUser           = prefs.getString("wbuser",  DEFAULT_WEB_USER);
-  cfg.webPass           = prefs.getString("wbpass",  DEFAULT_WEB_PASS);
+  cfg.wifiSsid           = prefs.getString("wssid",  "");
+  cfg.wifiPass           = prefs.getString("wpsk",   "");
+  cfg.photoBaseUrl       = prefs.getString("pbase",  DEFAULT_PHOTO_BASEURL);
+  cfg.photoFilename      = prefs.getString("pfile",  DEFAULT_PHOTO_FILE);
+  cfg.httpsInsecure      = prefs.getBool("pinsec",   true);
+  cfg.httpUser           = prefs.getString("puser",  DEFAULT_HTTP_USER);
+  cfg.httpPass           = prefs.getString("ppass",  String(test_http_password));
+  cfg.webUser            = prefs.getString("wbuser", DEFAULT_WEB_USER);
+  cfg.webPass            = prefs.getString("wbpass", DEFAULT_WEB_PASS);
   cfg.streamReconnectMin = prefs.getInt("sreconn",   10);
   cfg.peekButtonPin      = prefs.getInt("peekpin",   -1);
-  installedFwToken      = prefs.getString("fwtoken", "");
-  installedFwFilename   = prefs.getString("fwfile",  "");
+  installedFwToken       = prefs.getString("fwtoken", "");
+  installedFwFilename    = prefs.getString("fwfile",  "");
   prefs.end();
 
   bool webPassValid = true;
@@ -496,11 +506,11 @@ static void setupPortalRoutes() {
     server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/", true);
     server.send(302, "text/plain", "");
   });
-  server.on("/generate_204",        HTTP_GET,  handleCaptiveRedirect);
-  server.on("/gen_204",             HTTP_GET,  handleCaptiveRedirect);
-  server.on("/ncsi.txt",            HTTP_GET,  handleCaptiveRedirect);
-  server.on("/connecttest.txt",     HTTP_GET,  handleCaptiveRedirect);
-  server.on("/redirect",            HTTP_GET,  handleCaptiveRedirect);
+  server.on("/generate_204",    HTTP_GET, handleCaptiveRedirect);
+  server.on("/gen_204",         HTTP_GET, handleCaptiveRedirect);
+  server.on("/ncsi.txt",        HTTP_GET, handleCaptiveRedirect);
+  server.on("/connecttest.txt", HTTP_GET, handleCaptiveRedirect);
+  server.on("/redirect",        HTTP_GET, handleCaptiveRedirect);
   server.on("/scan", HTTP_GET, []() {
     int16_t n = WiFi.scanComplete();
     if (n == WIFI_SCAN_RUNNING) {
@@ -553,9 +563,9 @@ static void startPortalMode() {
     ArduinoOTA.setPassword(ARDUINO_OTA_PASSWORD);
   ArduinoOTA.begin();
 
-  portalActive  = true;
-  portalDone    = false;
-  portalStartMs = millis();
+  portalActive     = true;
+  portalDone       = false;
+  portalStartMs    = millis();
   wifiAttemptCount = 0;
   logEvent("PORTAL", "active ip=%s", WiFi.softAPIP().toString().c_str());
 }
@@ -582,7 +592,6 @@ static void handlePortalLoop() {
   }
 }
 
-// Returns true if this build has PSRAM available at runtime.
 static inline bool hasPsram() {
 #if defined(BOARD_HAS_PSRAM)
   return (ESP.getPsramSize() > 0);
@@ -591,121 +600,120 @@ static inline bool hasPsram() {
 #endif
 }
 
-// ---------------------- MJPEG Stream ----------------------
+// ============================================================
+// MJPEG stream task (Core 0)
+// ============================================================
+// CRITICAL CONTRACT:
+//   This task NEVER calls LittleFS.open/write/rename/exists.
+//   It only:
+//     1. Allocates a PSRAM buffer and reads the JPEG payload into it.
+//     2. Atomically replaces pendingFrameBuf with the new buffer.
+//     3. Sets pendingDraw = pendingCommit = true.
+//   loop() (Core 1, Arduino task) owns ALL flash I/O.
+// ============================================================
 static void mjpegTask(void* pv) {
   (void)pv;
 
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     mjpegRequestRefresh = false;
-    vTaskDelay(pdMS_TO_TICKS(500));  // wait for WiFi to stabilize before TLS connect
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     String url = cfg.photoBaseUrl;
-  if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    url = "https://" + url;
-  }
-  if (!url.endsWith("/")) url += "/";
-  url += "stream";
+    if (!url.startsWith("http://") && !url.startsWith("https://"))
+      url = "https://" + url;
+    if (!url.endsWith("/")) url += "/";
+    url += "stream";
 
-  bool isHttps = url.startsWith("https://");
-  int port = isHttps ? 443 : 80;
-  String host;
-  int slashPos = url.indexOf("/", 8);
-  if (slashPos > 0) {
-    String hostPart = url.substring(8, slashPos);
-    if (hostPart.indexOf(":") > 0) {
+    bool isHttps  = url.startsWith("https://");
+    int  port     = isHttps ? 443 : 80;
+    String host;
+    int slashPos = url.indexOf("/", 8);
+    if (slashPos > 0) {
+      String hostPart = url.substring(8, slashPos);
       int colonPos = hostPart.indexOf(":");
-      host = hostPart.substring(0, colonPos);
-      port = hostPart.substring(colonPos + 1).toInt();
+      if (colonPos > 0) {
+        host = hostPart.substring(0, colonPos);
+        port = hostPart.substring(colonPos + 1).toInt();
+      } else {
+        host = hostPart;
+      }
     } else {
-      host = hostPart;
+      host = url.substring(url.indexOf("//") + 2);
     }
-  } else {
-    host = url.substring(url.indexOf("//") + 2);
-  }
 
-  // Guard against bad parse
-  if (host.length() == 0 || host.startsWith("/")) {
-    logEvent("STREAM", "bad host parse: %s", host.c_str());
-    mjpegConnected = false;
-    continue;
-  }
-
-  String path = (slashPos > 0) ? url.substring(slashPos) : "/";
-
-  WiFiClientSecure* secClient = new WiFiClientSecure();
-  if (cfg.httpsInsecure) secClient->setInsecure();
-  secClient->setTimeout(15);  // 15s connect timeout
-  WiFiClient* client = secClient;
-
-  if (!client->connect(host.c_str(), port)) {
-    logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
-    delete client;
-    mjpegConnected = false;
-    lastMjpegAttemptMs = millis();
-    continue;
-  }
-
-  // Restore for streaming
-  client->setTimeout(60);
-
-  // Build MAC without colons
-  char macNaked[13] = {};
-  int mi = 0;
-  for (int i = 0; MAC_STR[i] && mi < 12; i++) {
-    if (MAC_STR[i] != ':') macNaked[mi++] = MAC_STR[i];
-  }
-
-  client->print("GET " + path + " HTTP/1.1\r\n");
-  client->print("Host: " + host + "\r\n");
-  client->print("User-Agent: SyncFrame/1.0\r\n");
-  client->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
-  client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
-  client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
-  client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
-  client->print("X-SF-Photo-Etag: " + String(currentPhotoEtag) + "\r\n");
-  client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
-  if (cfg.httpUser.length() > 0) {
-    String auth = cfg.httpUser + ":" + cfg.httpPass;
-    size_t len = auth.length();
-    size_t b64BufSize = ((len + 2) / 3) * 4 + 1;
-    uint8_t* buf = (uint8_t*)malloc(b64BufSize);
-    if (buf) {
-      size_t outLen = 0;
-      mbedtls_base64_encode(buf, b64BufSize, &outLen, (const uint8_t*)auth.c_str(), len);
-      client->print("Authorization: Basic ");
-      client->write(buf, outLen);
-      client->print("\r\n");
-      free(buf);
+    if (host.length() == 0 || host.startsWith("/")) {
+      logEvent("STREAM", "bad host parse: %s", host.c_str());
+      mjpegConnected = false;
+      continue;
     }
-  }
-  client->print("Accept: multipart/x-mixed-replace\r\n");
-  client->print("Connection: keep-alive\r\n");
-client->print("\r\n");
+
+    String path = (slashPos > 0) ? url.substring(slashPos) : "/";
+
+    WiFiClientSecure* secClient = new WiFiClientSecure();
+    if (cfg.httpsInsecure) secClient->setInsecure();
+    secClient->setTimeout(15);
+    WiFiClient* client = secClient;
+
+    if (!client->connect(host.c_str(), port)) {
+      logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
+      delete client;
+      mjpegConnected     = false;
+      lastMjpegAttemptMs = millis();
+      continue;
+    }
+    client->setTimeout(60);
+
+    char macNaked[13] = {};
+    int mi = 0;
+    for (int i = 0; MAC_STR[i] && mi < 12; i++)
+      if (MAC_STR[i] != ':') macNaked[mi++] = MAC_STR[i];
+
+    client->print("GET " + path + " HTTP/1.1\r\n");
+    client->print("Host: " + host + "\r\n");
+    client->print("User-Agent: SyncFrame/1.0\r\n");
+    client->print("X-SF-Hostname: " + String(HOSTNAME) + "\r\n");
+    client->print("X-SF-MAC: " + String(macNaked) + "\r\n");
+    client->print("X-SF-Uptime: " + String((unsigned long)(millis() / 1000)) + "\r\n");
+    client->print("X-SF-Compiled: " + String(compileIdStr) + "\r\n");
+    client->print("X-SF-Photo-Etag: " + String(currentPhotoEtag) + "\r\n");
+    client->print("X-SF-Resolution: " + String(SCREEN_W) + "x" + String(SCREEN_H) + "\r\n");
+    if (cfg.httpUser.length() > 0) {
+      String auth     = cfg.httpUser + ":" + cfg.httpPass;
+      size_t len      = auth.length();
+      size_t b64Size  = ((len + 2) / 3) * 4 + 1;
+      uint8_t* b64buf = (uint8_t*)malloc(b64Size);
+      if (b64buf) {
+        size_t outLen = 0;
+        mbedtls_base64_encode(b64buf, b64Size, &outLen, (const uint8_t*)auth.c_str(), len);
+        client->print("Authorization: Basic ");
+        client->write(b64buf, outLen);
+        client->print("\r\n");
+        free(b64buf);
+      }
+    }
+    client->print("Accept: multipart/x-mixed-replace\r\n");
+    client->print("Connection: keep-alive\r\n");
+    client->print("\r\n");
 
     unsigned long t0 = millis();
     while (!client->available() && client->connected() && millis() - t0 < 8000)
       vTaskDelay(pdMS_TO_TICKS(10));
     String statusLine = client->readStringUntil('\n');
 
-if (!statusLine.startsWith("HTTP/1.1 200")) {
-		logEvent("STREAM", "status %s", statusLine.c_str());  // already logs it
-		client->stop();
-		delete client;
-		mjpegConnected = false;
+    if (!statusLine.startsWith("HTTP/1.1 200")) {
+      logEvent("STREAM", "status %s", statusLine.c_str());
+      client->stop();
+      delete client;
+      mjpegConnected = false;
+      if (statusLine.indexOf("304") >= 0)
+        lastMjpegAttemptMs = millis() - 15000 + 60000UL;
+      else
+        lastMjpegAttemptMs = millis();
+      continue;
+    }
 
-		if (statusLine.indexOf("304") >= 0) {
-			lastMjpegAttemptMs = millis() - 15000 + 60000UL;
-		} else if (statusLine.indexOf("503") >= 0 || statusLine.indexOf("429") >= 0) {
-			lastMjpegAttemptMs = millis();  // retry after 15s for server-busy errors
-		} else {
-			lastMjpegAttemptMs = millis();  // ← CHANGE: was same, but now log tells you what's happening
-		}
-		continue;
-	}
-
-    unsigned long lastDataMs = 0;
-
-    // Drain HTTP response headers — wait for data, don't bail early
+    // Drain HTTP response headers
     while (client->connected()) {
       while (!client->available()) {
         if (!client->connected()) goto stream_done;
@@ -718,9 +726,10 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
 
     logEvent("STREAM", "connected");
     lastMjpegConnectMs = millis();
-    mjpegConnected = true;
-    lastDataMs = millis();
-  	
+    mjpegConnected     = true;
+    {
+    unsigned long lastDataMs = millis();
+
     while (client->connected() || client->available()) {
       if (mjpegRequestRefresh) {
         mjpegRequestRefresh = false;
@@ -732,21 +741,21 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
         break;
       }
 
-      // Wait for boundary line
-      String boundary = "";
+      // Wait for MIME boundary
+      String boundary;
       while (client->connected()) {
-		  if (mjpegRequestRefresh) goto stream_done;
-		  if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-          boundary = client->readStringUntil('\n');
-          break;
-        }
+        if (mjpegRequestRefresh) goto stream_done;
+        if (!client->available()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+        boundary = client->readStringUntil('\n');
+        break;
+      }
       if (!boundary.startsWith("--frame")) {
         if (!client->connected()) break;
         continue;
       }
 
-      // Drain frame headers
-      int contentLength = 0;
+      // Read per-frame headers
+      int    contentLength = 0;
       String frameType;
       while (client->connected()) {
         while (!client->available()) {
@@ -773,10 +782,11 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
 
       if (contentLength == 0) { lastDataMs = millis(); continue; }
 
+      // OTA frame
       if (frameType == "ota") {
         logEvent("STREAM", "OTA frame size=%d", contentLength);
         if (Update.begin(contentLength)) {
-          size_t written = Update.writeStream(*client);
+          Update.writeStream(*client);
           if (Update.end() && Update.isFinished()) {
             logEvent("STREAM", "OTA flash ok");
             delay(500);
@@ -786,6 +796,7 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
         break;
       }
 
+      // Allocate receive buffer (PSRAM preferred)
       uint8_t* buf = nullptr;
       size_t allocSize = contentLength;
       static const size_t C3_MAX_PREALLOC = 20480;
@@ -804,86 +815,60 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
         continue;
       }
 
-      if (hasPsram()) {
+      if (hasPsram())
         buf = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!buf) buf = (uint8_t*)malloc(allocSize);
-      } else {
-		// don't pre-free; let the promote block handle it normally
-		// (accept the brief dual-buffer peak; it fits in internal RAM for one frame)
+      if (!buf) {
         if (allocSize > MAX_JPG) allocSize = MAX_JPG;
         buf = (uint8_t*)malloc(allocSize);
       }
-
       if (!buf) {
         logEvent("STREAM", "alloc failed %d", contentLength);
         break;
       }
 
-      size_t remaining = contentLength;
-      size_t readTotal = 0;
+      // Read frame payload
+      size_t remaining = contentLength, readTotal = 0;
       while (remaining > 0 && client->connected()) {
         size_t avail = client->available();
-        if (avail == 0) {
-          vTaskDelay(pdMS_TO_TICKS(1));
-          continue;
-        }
+        if (avail == 0) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
         size_t toRead = (remaining < avail) ? remaining : avail;
         int n = client->read(buf + readTotal, toRead);
         if (n <= 0) break;
-        readTotal += n;
-        remaining -= n;
+        readTotal += n; remaining -= n;
       }
 
-      if (readTotal == contentLength) {
+      if (readTotal == (size_t)contentLength) {
         lastDataMs = millis();
-
-        // Drain trailing \r\n
+        // Drain trailing CRLF
         { uint8_t tmp[2]; size_t av = client->available();
           if (av >= 2) client->read(tmp, 2); else if (av == 1) client->read(tmp, 1); }
 
-        // HANDOFF TO MAIN LOOP — no LittleFS I/O here.
-        // mjpegTask only deposits the frame into a PSRAM buffer and sets
-        // pendingDraw.  ALL flash writes (rename + write) are deferred to
-        // loop() via the pendingCommit path, which runs after board_draw_jpeg()
-        // returns (DMA idle).  This eliminates the bus-fabric stall that
-        // caused the horizontal scan-line shift on the JC8048 RGB panel.
-        {
-          if (pendingFrameBuf) free(pendingFrameBuf);
-          pendingFrameBuf = buf;
-          pendingFrameLen = readTotal;
-          if (!showingLast) {
-            pendingDraw   = true;
-            pendingCommit = true;  // loop() will write to LittleFS after draw
-          } else {
-            // User is viewing prev — no draw pending so DMA is idle; commit now.
-            if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-              if (LittleFS.exists(PATH_CURRENT)) {
-                LittleFS.remove(PATH_PREV);
-                LittleFS.rename(PATH_CURRENT, PATH_PREV);
-                lastJpgLen = currentJpgLen;
-              }
-              File f = LittleFS.open(PATH_CURRENT, "w", true);
-              if (f) { f.write(buf, readTotal); f.close(); currentJpgLen = readTotal; }
-              xSemaphoreGive(drawMutex);
-            }
-          }
-        }
+        // ---- HANDOFF: deposit into PSRAM, signal loop() ----
+        // No LittleFS calls here, ever.  loop() owns all FS writes.
+        uint8_t* old = pendingFrameBuf;
+        pendingFrameBuf = buf;
+        pendingFrameLen = readTotal;
+        pendingDraw     = true;
+        pendingCommit   = true;
+        if (old) free(old);   // free the previous un-drawn frame if loop() was slow
 
         logEvent("STREAM", "frame size=%u etag=%s heap=%u",
-          (unsigned)readTotal, currentPhotoEtag, (unsigned)ESP.getFreeHeap());
+                 (unsigned)readTotal, currentPhotoEtag, (unsigned)ESP.getFreeHeap());
       } else {
-        logEvent("STREAM", "frame INCOMPLETE read=%u expected=%u", (unsigned)readTotal, (unsigned)contentLength);
+        logEvent("STREAM", "frame INCOMPLETE read=%u expected=%u",
+                 (unsigned)readTotal, (unsigned)contentLength);
+        free(buf);
         break;
       }
 
       if (!client->connected()) break;
     }
+    } // end lastDataMs scope
 
     stream_done:
     client->stop();
     delete client;
-
-    mjpegConnected = false;
+    mjpegConnected     = false;
     lastMjpegAttemptMs = 0;
     logEvent("STREAM", "task ended, sleeping");
   }
@@ -892,40 +877,34 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
 static void mjpegMaybeReconnect() {
   if (mjpegConnected) {
     unsigned long reconnectInterval = (unsigned long)max(cfg.streamReconnectMin, 1) * 60000UL;
-    if (mjpegForceReconnect ||
-        millis() - lastMjpegConnectMs >= reconnectInterval) {
-			mjpegForceReconnect = false;
-			mjpegRequestRefresh = true;
-			lastMjpegAttemptMs = 0;
+    if (mjpegForceReconnect || millis() - lastMjpegConnectMs >= reconnectInterval) {
+      mjpegForceReconnect = false;
+      mjpegRequestRefresh = true;
+      lastMjpegAttemptMs  = 0;
     }
     return;
   }
   if (mjpegForceReconnect) {
     mjpegForceReconnect = false;
-    lastMjpegAttemptMs = 0;
+    lastMjpegAttemptMs  = 0;
   }
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
   if (millis() - lastMjpegAttemptMs < 15000) return;
 
-  // Create task exactly once
   if (mjpegTaskHandle == nullptr) {
     mjpegTaskHandle = xTaskCreateStaticPinnedToCore(
         mjpegTask, "mjpegTask",
         20480 / sizeof(StackType_t),
         nullptr, 0,
-        mjpegStack, &mjpegTaskBuffer,
-        0
-    );
+        mjpegStack, &mjpegTaskBuffer, 0);
   }
-
-  // Wake the sleeping task
-  if (mjpegTaskHandle != nullptr) {
-    xTaskNotifyGive(mjpegTaskHandle);
-  }
+  if (mjpegTaskHandle) xTaskNotifyGive(mjpegTaskHandle);
 }
 
-// ---------------------- Network services ----------------------
+// ============================================================
+// Network services
+// ============================================================
 static void startNetworkServicesOnce() {
   if (networkServicesStarted) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -966,9 +945,8 @@ static void startNetworkServicesOnce() {
   logEvent("NET",  "mdns=%s ota=on web=on psram=%s heapFree=%u",
            mdnsOk ? "on" : "off", hasPsram() ? "yes" : "no", (unsigned)ESP.getFreeHeap());
 
-  if (!wifiEverConnected) {
-  board_draw_boot_status(("IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR)).c_str());
-  }
+  if (!wifiEverConnected)
+    board_draw_boot_status(("IP: " + WiFi.localIP().toString() + "   MAC: " + String(MAC_STR)).c_str());
 }
 
 static void ensureWifi() {
@@ -983,27 +961,26 @@ static void ensureWifi() {
     startPortalMode();
     return;
   }
-
   if (wifiEverConnected) {
     logEvent("WIFI", "reconnect attempt");
     WiFi.reconnect();
     return;
   }
-
   wifiAttemptCount++;
   if (wifiAttemptCount > WIFI_MAX_ATTEMPTS) {
     logEvent("WIFI", "giving up after %u attempts, starting portal", (unsigned)wifiAttemptCount);
     startPortalMode();
     return;
   }
-
   applyWifiDefaults();
   logEvent("WIFI", "connect attempt %u/%u ssid=%s",
            (unsigned)wifiAttemptCount, (unsigned)WIFI_MAX_ATTEMPTS, cfg.wifiSsid.c_str());
   WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
 }
 
-// ---------------------- Web UI handlers ----------------------
+// ============================================================
+// Web UI handlers
+// ============================================================
 static void handleRoot() {
   if (!requireWebAuth()) return;
   server.send(200, "text/html; charset=utf-8", FPSTR(INDEX_HTML));
@@ -1011,22 +988,20 @@ static void handleRoot() {
 
 static void handleConfigPage() {
   if (!requireWebAuth()) return;
-
   String j;
   j.reserve(512);
   j += "{";
-  j += "\"hostname\":\"";       appendJsonEscaped(j, HOSTNAME);          j += "\",";
-  j += "\"photoBaseUrl\":\"";   appendJsonEscaped(j, cfg.photoBaseUrl);  j += "\",";
-  j += "\"photoFilename\":\"";  appendJsonEscaped(j, cfg.photoFilename); j += "\",";
-  j += "\"httpsInsecure\":";    j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
-  j += "\"httpUser\":\"";       appendJsonEscaped(j, cfg.httpUser);      j += "\",";
-  j += "\"httpPass\":\"";       appendJsonPassword(j, cfg.httpPass);     j += "\",";
-  j += "\"webUser\":\"";        appendJsonEscaped(j, cfg.webUser);       j += "\",";
-  j += "\"webPass\":\"";        appendJsonPassword(j, cfg.webPass);      j += "\",";
-  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin); j += ",";
-  j += "\"peekButtonPin\":"; j += String(cfg.peekButtonPin);
+  j += "\"hostname\":\"";        appendJsonEscaped(j, HOSTNAME);          j += "\",";
+  j += "\"photoBaseUrl\":\"";    appendJsonEscaped(j, cfg.photoBaseUrl);  j += "\",";
+  j += "\"photoFilename\":\"";   appendJsonEscaped(j, cfg.photoFilename); j += "\",";
+  j += "\"httpsInsecure\":";     j += (cfg.httpsInsecure ? "true" : "false"); j += ",";
+  j += "\"httpUser\":\"";        appendJsonEscaped(j, cfg.httpUser);      j += "\",";
+  j += "\"httpPass\":\"";        appendJsonPassword(j, cfg.httpPass);     j += "\",";
+  j += "\"webUser\":\"";         appendJsonEscaped(j, cfg.webUser);       j += "\",";
+  j += "\"webPass\":\"";         appendJsonPassword(j, cfg.webPass);      j += "\",";
+  j += "\"streamReconnectMin\":"; j += String(cfg.streamReconnectMin);    j += ",";
+  j += "\"peekButtonPin\":";      j += String(cfg.peekButtonPin);
   j += "}";
-
   String html = FPSTR(CONFIG_HTML);
   html.replace("CFG_INJECT_PLACEHOLDER",
                String("<script>window._cfg=") + j + String(";</script>"));
@@ -1036,7 +1011,6 @@ static void handleConfigPage() {
 static void handleStatusJson() {
   if (!requireWebAuth()) return;
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
-  unsigned long uptimeMs = millis() - bootTimeMs;
   String j;
   j.reserve(640);
   j += "{";
@@ -1047,14 +1021,14 @@ static void handleStatusJson() {
   j += "\"ip\":\""; appendJsonEscaped(j, wifiOk ? WiFi.localIP().toString() : String("")); j += "\",";
   j += "\"mdns\":";  j += (networkServicesStarted ? "true" : "false"); j += ",";
   j += "\"ota\":";   j += (networkServicesStarted ? "true" : "false"); j += ",";
-  j += "\"mjpeg\":";       j += (mjpegConnected ? "true" : "false"); j += ",";
+  j += "\"mjpeg\":"; j += (mjpegConnected ? "true" : "false"); j += ",";
   j += "\"lastMjpegConnectMs\":"; j += String(lastMjpegConnectMs); j += ",";
   j += "\"photoHash\":\""; appendJsonEscaped(j, currentPhotoEtag); j += "\",";
   j += "\"lastLogSeq\":";     j += String(logSeq); j += ",";
   j += "\"installedFw\":\"";  appendJsonEscaped(j, installedFwFilename); j += "\",";
   j += "\"compiledId\":\"";   appendJsonEscaped(j, compileIdStr); j += "\",";
   j += "\"installedFwId\":\""; appendJsonEscaped(j, installedFwToken); j += "\",";
-  j += "\"uptimeMs\":";       j += String(uptimeMs); j += ",";
+  j += "\"uptimeMs\":";       j += String(millis() - bootTimeMs); j += ",";
   j += "\"screenW\":"; j += String(SCREEN_W); j += ",";
   j += "\"screenH\":"; j += String(SCREEN_H); j += ",";
   j += "\"psram\":";   j += (hasPsram() ? "true" : "false"); j += ",";
@@ -1110,9 +1084,9 @@ static bool isRealPassword(const String& val) {
 
 static void handlePostConfig() {
   if (!requireWebAuth()) return;
-  if (server.hasArg("photoBaseUrl"))       cfg.photoBaseUrl       = server.arg("photoBaseUrl");
-  if (server.hasArg("photoFilename"))      cfg.photoFilename      = server.arg("photoFilename");
-  if (server.hasArg("httpUser"))           cfg.httpUser           = server.arg("httpUser");
+  if (server.hasArg("photoBaseUrl"))  cfg.photoBaseUrl  = server.arg("photoBaseUrl");
+  if (server.hasArg("photoFilename")) cfg.photoFilename = server.arg("photoFilename");
+  if (server.hasArg("httpUser"))      cfg.httpUser      = server.arg("httpUser");
   if (server.hasArg("webUser") && server.arg("webUser").length() > 0)
     cfg.webUser = server.arg("webUser");
   if (server.hasArg("httpPass") && isRealPassword(server.arg("httpPass"))) cfg.httpPass = server.arg("httpPass");
@@ -1122,10 +1096,9 @@ static void handlePostConfig() {
     int v = server.arg("streamReconnectMin").toInt();
     if (v >= 1 && v <= 1440) cfg.streamReconnectMin = v;
   }
-  if (server.hasArg("peekButtonPin")) {
+  if (server.hasArg("peekButtonPin"))
     cfg.peekButtonPin = server.arg("peekButtonPin").toInt();
-  }
-  cfg.httpsInsecure   = server.hasArg("httpsInsecure");
+  cfg.httpsInsecure = server.hasArg("httpsInsecure");
   saveConfig();
   if (cfg.peekButtonPin >= 0) pinMode(cfg.peekButtonPin, INPUT_PULLUP);
   mjpegForceReconnect = true;
@@ -1135,9 +1108,9 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  // Hold drawMutex for the full duration of streamFile() so mjpegTask
-  // cannot rename/overwrite current.jpg mid-stream, which was causing
-  // a torn LittleFS read and triggering the LCD glitch ~1s after refresh.
+  // drawMutex is held by loop() during the entire draw+commit block, so
+  // taking it here ensures we never read current.jpg while loop() is
+  // writing it (or while board_draw_jpeg_from_stream is reading it).
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
     server.send(503, "text/plain", "busy");
     return;
@@ -1152,8 +1125,6 @@ static void handleImgCurrent() {
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
-  // Same guard as handleImgCurrent() — prev.jpg can be replaced by the
-  // rename in mjpegTask while we are mid-stream without this mutex.
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
     server.send(503, "text/plain", "busy");
     return;
@@ -1183,7 +1154,9 @@ static void handleActionReboot() {
   ESP.restart();
 }
 
-// ---------------------- Main ----------------------
+// ============================================================
+// setup / loop
+// ============================================================
 void setup() {
   DBG_BEGIN(115200);
   delay(50);
@@ -1200,9 +1173,8 @@ void setup() {
   if (cfg.peekButtonPin >= 0) pinMode(cfg.peekButtonPin, INPUT_PULLUP);
   board_init();
 
-  if (!LittleFS.begin(true)) {
+  if (!LittleFS.begin(true))
     logEvent("FS", "LittleFS mount failed, formatted");
-  }
 
   board_draw_jpeg(splash_logo, splash_logo_len);
   board_draw_boot_status("Connecting to Wi-Fi...");
@@ -1223,49 +1195,61 @@ void loop() {
 
   if (WiFi.status() == WL_CONNECTED) {
     startNetworkServicesOnce();
-
-    if (networkServicesStarted) {
+    if (networkServicesStarted)
       ArduinoOTA.handle();
-      if (ESP.getFreeHeap() > 20000) server.handleClient();
-
-      mjpegMaybeReconnect();
-    }
   }
 
-  // Draw any pending frame from the stream task.
-  // board_draw_jpeg() is called here (main loop / Arduino task) so that
-  // SPI/LCD DMA writes are isolated from WiFi interrupt activity on C3,
-  // and from the mjpegTask stack on S3.
+  // ----------------------------------------------------------------
+  // STEP 1: Draw + Commit  (must run BEFORE server.handleClient)
+  // ----------------------------------------------------------------
+  // drawMutex is held for the entire draw+commit block so that web
+  // handlers (handleImgCurrent/Last) block on the mutex rather than
+  // racing against an in-progress LittleFS write or DMA scan.
+  //
+  // Ordering guarantee per loop() iteration:
+  //   draw  (DMA active)   → commit to FS (DMA idle) → web requests
+  // ----------------------------------------------------------------
   if (pendingDraw && !showingLast) {
     pendingDraw = false;
-    if (pendingFrameBuf) {
-      // --- DRAW (DMA active during this call) ---
-      board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
-      // board_draw_jpeg() returns only after all MCU blocks are pushed;
-      // the DMA engine is now idle between frames — safe window for FS I/O.
+    if (pendingFrameBuf && xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
 
-      // --- COMMIT to LittleFS (DMA idle, safe window) ---
+      // --- DRAW: DMA active ---
+      board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
+      // board_draw_jpeg() returns only after the last MCU block is pushed.
+      // The DMA engine is now idle (inter-frame gap) — safe for flash I/O.
+
+      // --- COMMIT: DMA idle, flash I/O safe ---
       if (pendingCommit) {
         pendingCommit = false;
-        if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-          // promote current → prev
-          if (LittleFS.exists(PATH_CURRENT)) {
-            LittleFS.remove(PATH_PREV);
-            LittleFS.rename(PATH_CURRENT, PATH_PREV);
-            lastJpgLen = currentJpgLen;
-          }
-          // write new frame for Web UI
-          File fsf = LittleFS.open(PATH_CURRENT, "w", true);
-          if (fsf) { fsf.write(pendingFrameBuf, pendingFrameLen); fsf.close(); currentJpgLen = pendingFrameLen; }
-          xSemaphoreGive(drawMutex);
+        if (LittleFS.exists(PATH_CURRENT)) {
+          LittleFS.remove(PATH_PREV);
+          LittleFS.rename(PATH_CURRENT, PATH_PREV);
+          lastJpgLen = currentJpgLen;
         }
+        File fsf = LittleFS.open(PATH_CURRENT, "w", true);
+        if (fsf) { fsf.write(pendingFrameBuf, pendingFrameLen); fsf.close(); currentJpgLen = pendingFrameLen; }
       }
 
       free(pendingFrameBuf);
       pendingFrameBuf = nullptr;
+      xSemaphoreGive(drawMutex);
     }
   }
 
+  // ----------------------------------------------------------------
+  // STEP 2: Web server + mDNS/stream management
+  // (runs after draw+commit — drawMutex is released)
+  // ----------------------------------------------------------------
+  if (networkServicesStarted && WiFi.status() == WL_CONNECTED) {
+    if (ESP.getFreeHeap() > 20000) server.handleClient();
+    mjpegMaybeReconnect();
+  }
+
+  // ----------------------------------------------------------------
+  // STEP 3: Button / board housekeeping
+  // (board_loop calls showCurrentPhoto / showLastPhoto if button pressed;
+  //  those also take drawMutex so they are serialised against commits)
+  // ----------------------------------------------------------------
   board_loop(cfg.peekButtonPin);
   delay(1);
 }
