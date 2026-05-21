@@ -187,5 +187,17 @@ The S3 RGB panel shows a line-shift/wrap artifact on stream connect. The old wor
  - Drew directly from the received RAM buffer instead of writing to LittleFS and rereading — didn't fix
  - Fixed boardDrawActive leak on failed file reads — didn't fix
  ```
- 
- 
+
+5-21-2026
+```
+ESP32-S3 JC8048 Board LCD Glitch — Root Cause Summary
+The cause: LittleFS flash I/O on Core 0 stalls the PSRAM bus mid-frame.
+
+The ESP32-S3's RGB LCD peripheral uses DMA to stream the framebuffer from PSRAM continuously at pixel clock speed (~16 MHz). LittleFS uses SPI flash via the same internal bus fabric. When bgTask (pinned to Core 0) calls f.write() or loop() calls f.read(), the flash controller holds the bus long enough (~1–5 ms per sector operation) to starve the DMA engine. The LCD panel's HSYNC counter keeps running during the stall, so when DMA resumes it's one or more scan lines out of sync — producing the horizontal line-shift/wrap artifact.
+
+Rules for this board
+ - Never do flash I/O while the RGB DMA is actively scanning. LittleFS reads/writes must not overlap a drawJpg() call.
+ - Load from LittleFS into a PSRAM buffer at startup (or between frames), then draw from that buffer only. That's the pattern used by every other test that doesn't glitch.
+ - Alternatively, gate flash access with a binary semaphore that pauses loop() drawing for the entire duration of any FS operation — but this is fragile at high frame rates.
+ - useDataBuf=true (double buffer) does NOT protect against this — the stall happens at the DMA/bus level, below the double-buffer layer.
+```
