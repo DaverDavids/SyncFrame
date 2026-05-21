@@ -47,7 +47,6 @@
 #include <ArduinoOTA.h>
 #include <Arduino_GFX_Library.h>
 #include <TJpg_Decoder.h>
-#include "Secrets.h"
 
 // ============================================================
 // Secrets.h — optional. If present, defines MYSSID and MYPSK.
@@ -121,10 +120,6 @@ static void saveWifiPrefs(const String& ssid, const String& pass) {
   savedSsid = ssid;
   savedPass = pass;
 }
-=======
-const char* WIFI_SSID = "Yfi";          // leave empty → AP mode
-const char* WIFI_PASS = "$AwkwardInjunction";
-const char* AP_SSID   = "SF-GlitchTest";
 
 // ============================================================
 // GFX — pointer so we can re-init for T6/T7
@@ -156,146 +151,13 @@ static void buildGfx(bool useDataBuf) {
 }
 
 // ============================================================
-// Generated test JPEG
-// Produces a minimal valid 16x16 JFIF with a coloured gradient.
-// This is written to RAM so every test has a JPEG to work with
-// even if no file was uploaded.
-//
-// The JPEG is built by encoding raw RGB scanlines into a
-// hand-crafted baseline JFIF. We use a small run-length JPEG
-// that encodes 16 horizontal colour bands via a 16x16 block.
-//
-// For realistic 800x480 testing you should upload a real JPEG
-// via the web UI — but this is sufficient to trigger any DMA
-// race because TJpgDec still calls jpegDrawCallback per MCU.
+// Minimal JFIF writer
+// Writes a W x H grayscale JPEG where each 8x8 block is a
+// flat luma value. W and H must be multiples of 8.
+// Returns allocated buffer; caller must free(). Sets *outLen.
 // ============================================================
 
-// Minimal 16x16 JFIF JPEG encoding 16 distinct 1-row colour bands.
-// Hand-encoded SOF0/DHT/SOS headers, 16 solid-colour 8x8 MCU blocks.
-// Generated offline and embedded here so no encoder library is needed.
-// Each 8x8 MCU is a flat YCbCr value mapping to a distinct hue.
-static const uint8_t GENERATED_JPEG[] PROGMEM = {
-  // SOI
-  0xFF,0xD8,
-  // APP0 JFIF
-  0xFF,0xE0,0x00,0x10,0x4A,0x46,0x49,0x46,0x00,0x01,0x01,0x00,0x00,0x01,0x00,0x01,0x00,0x00,
-  // DQT luma (flat Q=2 table)
-  0xFF,0xDB,0x00,0x43,0x00,
-  0x02,0x01,0x01,0x01,0x01,0x01,0x02,0x01,
-  0x01,0x01,0x01,0x01,0x02,0x02,0x02,0x02,
-  0x02,0x02,0x02,0x02,0x03,0x02,0x02,0x02,
-  0x02,0x03,0x04,0x03,0x03,0x03,0x03,0x03,
-  0x04,0x04,0x04,0x04,0x04,0x04,0x04,0x04,
-  0x06,0x05,0x04,0x04,0x05,0x06,0x07,0x06,
-  0x06,0x05,0x06,0x07,0x07,0x07,0x07,0x07,
-  0x07,0x07,0x08,0x08,0x08,0x08,0x08,0x08,
-  0x08,0x08,
-  // DQT chroma (flat Q=2 table)
-  0xFF,0xDB,0x00,0x43,0x01,
-  0x02,0x02,0x02,0x02,0x03,0x02,0x03,0x05,
-  0x04,0x03,0x05,0x0A,0x07,0x06,0x07,0x0A,
-  0x0A,0x09,0x09,0x0A,0x0A,0x0F,0x0B,0x0B,
-  0x0C,0x0F,0x14,0x10,0x0F,0x0F,0x10,0x14,
-  0x14,0x13,0x12,0x13,0x14,0x14,0x14,0x14,
-  0x14,0x14,0x14,0x14,0x14,0x14,0x14,0x14,
-  0x14,0x14,0x14,0x14,0x14,0x14,0x14,0x14,
-  0x14,0x14,0x14,0x14,0x14,0x14,0x14,0x14,
-  0x14,0x14,
-  // SOF0 - 16x16 YCbCr 4:2:0
-  0xFF,0xC0,0x00,0x11,
-  0x08,                         // 8-bit precision
-  0x00,0x10,                    // height = 16
-  0x00,0x10,                    // width  = 16
-  0x03,                         // 3 components
-  0x01,0x22,0x00,               // Y  2x2 sampling, Q table 0
-  0x02,0x11,0x01,               // Cb 1x1 sampling, Q table 1
-  0x03,0x11,0x01,               // Cr 1x1 sampling, Q table 1
-  // DHT luma DC (standard)
-  0xFF,0xC4,0x00,0x1F,0x00,
-  0x00,0x01,0x05,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,
-  // DHT luma AC (standard)
-  0xFF,0xC4,0x00,0xB5,0x10,
-  0x00,0x02,0x01,0x03,0x03,0x02,0x04,0x03,0x05,0x05,0x04,0x04,0x00,0x00,0x01,0x7D,
-  0x01,0x02,0x03,0x00,0x04,0x11,0x05,0x12,0x21,0x31,0x41,0x06,0x13,0x51,0x61,0x07,
-  0x22,0x71,0x14,0x32,0x81,0x91,0xA1,0x08,0x23,0x42,0xB1,0xC1,0x15,0x52,0xD1,0xF0,
-  0x24,0x33,0x62,0x72,0x82,0x09,0x0A,0x16,0x17,0x18,0x19,0x1A,0x25,0x26,0x27,0x28,
-  0x29,0x2A,0x34,0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,0x49,
-  0x4A,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,
-  0x6A,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x83,0x84,0x85,0x86,0x87,0x88,0x89,
-  0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,
-  0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,
-  0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xE1,0xE2,
-  0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,
-  0xF9,0xFA,
-  // DHT chroma DC (standard)
-  0xFF,0xC4,0x00,0x1F,0x01,
-  0x00,0x03,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,
-  // DHT chroma AC (standard)
-  0xFF,0xC4,0x00,0xB5,0x11,
-  0x00,0x02,0x01,0x02,0x04,0x04,0x03,0x04,0x07,0x05,0x04,0x04,0x00,0x01,0x02,0x77,
-  0x00,0x01,0x02,0x03,0x11,0x04,0x05,0x21,0x31,0x06,0x12,0x41,0x51,0x07,0x61,0x71,
-  0x13,0x22,0x32,0x81,0x08,0x14,0x42,0x91,0xA1,0xB1,0xC1,0x09,0x23,0x33,0x52,0xF0,
-  0x15,0x62,0x72,0xD1,0x0A,0x16,0x24,0x34,0xE1,0x25,0xF1,0x17,0x18,0x19,0x1A,0x26,
-  0x27,0x28,0x29,0x2A,0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,
-  0x49,0x4A,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x63,0x64,0x65,0x66,0x67,0x68,
-  0x69,0x6A,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x82,0x83,0x84,0x85,0x86,0x87,
-  0x88,0x89,0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0xA2,0xA3,0xA4,0xA5,
-  0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xC2,0xC3,
-  0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,
-  0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,
-  0xF9,0xFA,
-  // SOS
-  0xFF,0xDA,0x00,0x0C,0x03,
-  0x01,0x00,  // Y  uses DC table 0, AC table 0
-  0x02,0x11,  // Cb uses DC table 1, AC table 1
-  0x03,0x11,  // Cr uses DC table 1, AC table 1
-  0x00,0x3F,0x00,
-  // Bitstream: 4 Y blocks (2x2 MCU) + 1 Cb + 1 Cr.
-  // Each Y block encodes DC coefficient ~76 (roughly mid-grey) + EOB.
-  // Cb/Cr both encode DC=0 (neutral chroma) + EOB.
-  // This produces a valid 16x16 grey image that TJpgDec can decode.
-  // Bit pattern: DC luma cat3 (100), coeff=76(0x4C)->100 1001100, EOB(1010 00000000000)
-  // Packed into bytes with stuffing:
-  0x7F,0xFF,0xDA,0xFF,0xD9  // approximate — see NOTE below
-  // NOTE: The bitstream above is a placeholder that may not decode correctly
-  // for all JPEG decoders. At runtime, setup() calls makeGeneratedJpeg() which
-  // uses a software-rendered framebuffer approach instead (see below). The
-  // PROGMEM array is kept as a compile-time fallback but the runtime path
-  // is preferred.
-};
-
-// Runtime-generated JPEG: renders a 160x120 RGB gradient into a raw pixel
-// buffer, then writes a proper JFIF using a minimal hand-built encoder.
-// The result is stored in generatedJpegBuf and is guaranteed decodeable
-// by TJpgDec because we control the exact byte content.
-//
-// Strategy: use Arduino_GFX to draw to an offscreen buffer, then
-// save as a JPEG using the built-in esp_jpg_encode (ESP-IDF camera JPEG).
-// If that is not available, fall back to the PROGMEM array.
-
-#include <esp_camera.h>   // for esp_jpg_encode — available in ESP32 core
-// Actually esp_jpg_encode is in esp32-camera; use img_converters instead.
-// For maximum portability we use a tiny hand-built run-length JFIF encoder
-// that only needs to write solid-colour 8x8 MCU blocks.
-
-// We generate a 160x120 image with 15 horizontal colour bands.
-// Each band is an 8-row strip = 15 bands * 8 rows = 120 rows.
-// Each row is 160 px = 20 8x8 MCU columns.
-// So total MCU grid: 20 wide * 15 tall = 300 MCUs (all luma-only for simplicity).
-
-// For simplicity and robustness, we generate a raw RGB565 framebuffer
-// in PSRAM and then encode it using a minimal JPEG writer.
-// The JPEG writer produces grayscale-style flat blocks sufficient for
-// triggering the DMA path in TJpgDec without requiring a full YCbCr encoder.
-
-// ----- Minimal JFIF writer -----
-// Writes a W x H JPEG where each 8x8 block is a flat luma value.
-// Input: lumaGrid[row][col] = Y value 0..255 for each 8x8 MCU block.
-// Output: dynamically allocated buffer; caller must free().
-
-// Standard Huffman tables (luma DC/AC) — same as in JFIF spec Annex K
+// Standard Huffman tables (luma DC/AC) — same as JFIF spec Annex K
 static const uint8_t STD_LUMA_DC_BITS[16] = {
   0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0
 };
@@ -341,6 +203,8 @@ static const uint8_t FLAT_Q[64] = {
    2, 2, 2, 2, 2, 2, 2, 2
 };
 
+struct HuffCode { uint32_t code; int len; };
+
 struct BitWriter {
   uint8_t* buf;
   size_t   cap;
@@ -377,13 +241,8 @@ struct BitWriter {
   }
 };
 
-// Build luma DC/AC Huffman code tables from the standard BITS/VALS arrays
-struct HuffCode { uint32_t code; int len; };
-
 static void buildHuffCodes(const uint8_t* bits, const uint8_t* vals, int nVals,
                             HuffCode* out) {
-  // out is indexed by the symbol value (0..255)
-  // We only call this for luma DC (12 symbols) and luma AC (162 symbols)
   uint32_t code = 0;
   int vi = 0;
   for (int len = 1; len <= 16; len++) {
@@ -396,49 +255,39 @@ static void buildHuffCodes(const uint8_t* bits, const uint8_t* vals, int nVals,
   }
 }
 
-// Encode a single flat-luma 8x8 block (all pixels = Y) using DPCM from prevDC.
-// Writes bits into bw. Returns new prevDC.
 static int encodeBlock(BitWriter& bw, int Y, int prevDC,
                        HuffCode* dcCodes, HuffCode* acCodes) {
-  // Quantise: DC coeff = round(Y / Q[0]) = Y/2 (Q=2)
-  int dc = (Y + 1) / 2;  // quantised DC
+  int dc = (Y + 1) / 2;
   int diff = dc - prevDC;
 
-  // Encode DC difference
   int absDiff = (diff < 0) ? -diff : diff;
   int cat = 0;
   { int tmp = absDiff; while (tmp) { cat++; tmp>>=1; } }
-  // Write Huffman code for category
+
   bw.writeBits(dcCodes[cat].code, dcCodes[cat].len);
-  // Write category bits
   if (cat > 0) {
     int val = (diff < 0) ? (diff + (1<<cat) - 1) : diff;
     bw.writeBits(val, cat);
   }
 
-  // All AC coefficients = 0, write EOB (symbol 0x00)
+  // All AC = 0, write EOB
   bw.writeBits(acCodes[0x00].code, acCodes[0x00].len);
 
   return dc;
 }
 
-// Generate a W x H grayscale JPEG with banded colour.
-// W and H must be multiples of 8.
-// Returns allocated buffer; caller must free(). Sets *outLen.
 static uint8_t* makeGrayscaleJpeg(int W, int H, size_t* outLen) {
   int mcuCols = W / 8;
   int mcuRows = H / 8;
   int nMcu    = mcuCols * mcuRows;
 
-  // Allocate generously: headers ~600 bytes + ~3 bytes/MCU + padding
   size_t bufCap = 700 + nMcu * 6;
   uint8_t* buf = (uint8_t*)malloc(bufCap);
   if (!buf) return nullptr;
 
-  // Build Huffman code tables
-  HuffCode dcCodes[12] = {};
+  HuffCode dcCodes[12]  = {};
   HuffCode acCodes[256] = {};
-  buildHuffCodes(STD_LUMA_DC_BITS, STD_LUMA_DC_VALS, 12, dcCodes);
+  buildHuffCodes(STD_LUMA_DC_BITS, STD_LUMA_DC_VALS, 12,  dcCodes);
   buildHuffCodes(STD_LUMA_AC_BITS, STD_LUMA_AC_VALS, 162, acCodes);
 
   BitWriter bw;
@@ -451,35 +300,35 @@ static uint8_t* makeGrayscaleJpeg(int W, int H, size_t* outLen) {
   bw.writeByte(0xFF); bw.writeByte(0xE0);
   bw.writeByte(0x00); bw.writeByte(0x10);
   bw.writeByte('J');bw.writeByte('F');bw.writeByte('I');bw.writeByte('F');bw.writeByte(0x00);
-  bw.writeByte(0x01);bw.writeByte(0x01); // version 1.1
-  bw.writeByte(0x00); // no units
-  bw.writeByte(0x00);bw.writeByte(0x01); // Xdensity=1
-  bw.writeByte(0x00);bw.writeByte(0x01); // Ydensity=1
-  bw.writeByte(0x00);bw.writeByte(0x00); // no thumbnail
+  bw.writeByte(0x01);bw.writeByte(0x01);
+  bw.writeByte(0x00);
+  bw.writeByte(0x00);bw.writeByte(0x01);
+  bw.writeByte(0x00);bw.writeByte(0x01);
+  bw.writeByte(0x00);bw.writeByte(0x00);
 
   // DQT
   bw.writeByte(0xFF); bw.writeByte(0xDB);
-  bw.writeByte(0x00); bw.writeByte(0x43); // length = 67
-  bw.writeByte(0x00); // table 0, 8-bit
+  bw.writeByte(0x00); bw.writeByte(0x43);
+  bw.writeByte(0x00);
   for (int i=0;i<64;i++) bw.writeByte(FLAT_Q[i]);
 
   // SOF0 - grayscale (1 component)
   bw.writeByte(0xFF); bw.writeByte(0xC0);
-  bw.writeByte(0x00); bw.writeByte(0x0B); // length = 11
-  bw.writeByte(0x08); // 8-bit
+  bw.writeByte(0x00); bw.writeByte(0x0B);
+  bw.writeByte(0x08);
   bw.writeByte((uint8_t)(H>>8)); bw.writeByte((uint8_t)(H&0xFF));
   bw.writeByte((uint8_t)(W>>8)); bw.writeByte((uint8_t)(W&0xFF));
-  bw.writeByte(0x01); // 1 component
-  bw.writeByte(0x01); // component ID 1
-  bw.writeByte(0x11); // 1x1 sampling
-  bw.writeByte(0x00); // Q table 0
+  bw.writeByte(0x01);
+  bw.writeByte(0x01);
+  bw.writeByte(0x11);
+  bw.writeByte(0x00);
 
   // DHT luma DC
   int dcValsLen = 12;
   bw.writeByte(0xFF); bw.writeByte(0xC4);
   uint16_t dhtDcLen = 2 + 1 + 16 + dcValsLen;
   bw.writeWord(dhtDcLen);
-  bw.writeByte(0x00); // DC, table 0
+  bw.writeByte(0x00);
   for (int i=0;i<16;i++) bw.writeByte(STD_LUMA_DC_BITS[i]);
   for (int i=0;i<dcValsLen;i++) bw.writeByte(STD_LUMA_DC_VALS[i]);
 
@@ -488,23 +337,21 @@ static uint8_t* makeGrayscaleJpeg(int W, int H, size_t* outLen) {
   bw.writeByte(0xFF); bw.writeByte(0xC4);
   uint16_t dhtAcLen = 2 + 1 + 16 + acValsLen;
   bw.writeWord(dhtAcLen);
-  bw.writeByte(0x10); // AC, table 0
+  bw.writeByte(0x10);
   for (int i=0;i<16;i++) bw.writeByte(STD_LUMA_AC_BITS[i]);
   for (int i=0;i<acValsLen;i++) bw.writeByte(STD_LUMA_AC_VALS[i]);
 
   // SOS
   bw.writeByte(0xFF); bw.writeByte(0xDA);
-  bw.writeByte(0x00); bw.writeByte(0x08); // length = 8
-  bw.writeByte(0x01); // 1 component
-  bw.writeByte(0x01); bw.writeByte(0x00); // comp 1, DC=0 AC=0
-  bw.writeByte(0x00); bw.writeByte(0x3F); bw.writeByte(0x00); // Ss=0 Se=63 Ah=0 Al=0
+  bw.writeByte(0x00); bw.writeByte(0x08);
+  bw.writeByte(0x01);
+  bw.writeByte(0x01); bw.writeByte(0x00);
+  bw.writeByte(0x00); bw.writeByte(0x3F); bw.writeByte(0x00);
 
   // Entropy-coded data
   int prevDC = 0;
   for (int row = 0; row < mcuRows; row++) {
-    // Map row to a luma band: 16 bands across the height
     int bandIdx = (row * 16) / mcuRows;
-    // Bands cycle through distinct grey levels
     static const int LUMA_BANDS[16] = {
       200, 180, 160, 140, 120, 100, 80, 60,
       220, 240, 30,  50,  70,  90, 110, 130
@@ -524,11 +371,11 @@ static uint8_t* makeGrayscaleJpeg(int W, int H, size_t* outLen) {
 }
 
 // ============================================================
-// Test JPEG buffer (loaded from LittleFS, uploaded via web, or generated)
+// Test JPEG buffer
 // ============================================================
-static uint8_t* testJpegBuf = nullptr;
-static size_t   testJpegLen = 0;
-static bool     jpegIsGenerated = false;  // true = generated, false = user-supplied
+static uint8_t* testJpegBuf  = nullptr;
+static size_t   testJpegLen  = 0;
+static bool     jpegIsGenerated = false;
 
 static void makeGeneratedJpeg() {
   if (testJpegBuf && jpegIsGenerated) free(testJpegBuf);
@@ -537,7 +384,6 @@ static void makeGeneratedJpeg() {
   jpegIsGenerated = false;
 
   size_t len = 0;
-  // 160x120 image: 20 MCU cols x 15 MCU rows = 300 blocks
   uint8_t* buf = makeGrayscaleJpeg(160, 120, &len);
   if (buf && len > 0) {
     testJpegBuf = buf;
@@ -545,13 +391,11 @@ static void makeGeneratedJpeg() {
     jpegIsGenerated = true;
     Serial.printf("[JPEG] generated 160x120 grayscale JPEG, %u bytes\n", (unsigned)len);
   } else {
-    Serial.println("[JPEG] generation failed, JPEG tests will use fallback");
+    Serial.println("[JPEG] generation failed");
     if (buf) free(buf);
   }
 }
 
-// Load JPEG from LittleFS into testJpegBuf.
-// Returns true on success.
 static bool loadJpegFromFs(const char* path) {
   File f = LittleFS.open(path, "r");
   if (!f) return false;
@@ -562,8 +406,7 @@ static bool loadJpegFromFs(const char* path) {
   size_t rd = f.read(buf, len);
   f.close();
   if (rd != len) { free(buf); return false; }
-  if (testJpegBuf && jpegIsGenerated) free(testJpegBuf);
-  if (testJpegBuf && !jpegIsGenerated) free(testJpegBuf);
+  if (testJpegBuf) free(testJpegBuf);
   testJpegBuf = buf;
   testJpegLen = len;
   jpegIsGenerated = false;
@@ -703,7 +546,6 @@ static void stopBgTask() {
 // ============================================================
 static WebServer webServer(80);
 
-// ---- HTML ----
 static const char INDEX_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html><html><head>
 <meta charset="utf-8">
@@ -887,11 +729,6 @@ static void handleTestReq() {
   webServer.send(200, "application/json", j);
 }
 
-static void handleUpload() {
-  // Handles multipart POST to /upload
-  // We use the raw upload callback via server.on() with two handler args
-}
-
 static File uploadFile;
 
 static void handleUploadBody() {
@@ -905,9 +742,8 @@ static void handleUploadBody() {
   } else if (upload.status == UPLOAD_FILE_END) {
     if (uploadFile) uploadFile.close();
     Serial.printf("[UPLOAD] done %u bytes\n", (unsigned)upload.totalSize);
-    // Reload JPEG buffer
     bool ok = loadJpegFromFs("/photo.jpg");
-    if (!ok) makeGeneratedJpeg(); // fallback
+    if (!ok) makeGeneratedJpeg();
     char j[80];
     snprintf(j, sizeof(j), "{\"ok\":%s,\"bytes\":%u}",
              ok ? "true" : "false", (unsigned)upload.totalSize);
@@ -958,16 +794,13 @@ void setup() {
   gfx->print("SF Glitch Tester");
   gfx->setTextSize(2);
 
-  // LittleFS
   if (!LittleFS.begin(true))
     Serial.println("[FS] LittleFS mount failed");
 
-  // Try user JPEG first, fall back to generated
   if (!loadJpegFromFs("/photo.jpg")) {
     makeGeneratedJpeg();
   }
 
-  // WiFi credentials
   loadWifiPrefs();
 
   gfx->setCursor(20, 70);
@@ -1056,7 +889,7 @@ void loop() {
   switch (activeTest) {
     case 0:  delay(10); break;
     case 1:  drawStripes(); drawCount++; delay(33); break;
-    case 2:  delay(10); break;   // bgTask draws
+    case 2:  delay(10); break;
     case 3:  decodeAndDraw(testJpegBuf,testJpegLen,false); drawCount++; delay(33); break;
     case 4:
       if (pendingDraw) {
