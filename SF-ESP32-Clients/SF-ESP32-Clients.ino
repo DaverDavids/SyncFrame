@@ -111,6 +111,8 @@ static char              currentPhotoEtag[24] = "";
 // context, keeping all SPI/LCD DMA writes off the mjpegTask stack and
 // away from concurrent WiFi interrupt activity.
 static volatile bool pendingDraw = false;
+static uint8_t* pendingFrameBuf = nullptr;
+static size_t   pendingFrameLen = 0;
 
 static const uint8_t WIFI_MAX_ATTEMPTS = 6;
 static uint8_t wifiAttemptCount = 0;
@@ -166,11 +168,10 @@ void showCurrentPhoto() {
   boardDrawActive = true;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     File f = LittleFS.open(PATH_CURRENT, "r");
-    if (f) { board_draw_jpeg_from_stream(f); f.close(); boardDrawActive = false; }
+    if (f) { board_draw_jpeg_from_stream(f); f.close(); }
     xSemaphoreGive(drawMutex);
-  } else {
-	  boardDrawActive = false;
   }
+  boardDrawActive = false;
 }
 
 void showLastPhoto() {
@@ -178,9 +179,10 @@ void showLastPhoto() {
   boardDrawActive = true;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     File f = LittleFS.open(PATH_PREV, "r");
-    if (f) { board_draw_jpeg_from_stream(f); f.close(); boardDrawActive = false; }
+    if (f) { board_draw_jpeg_from_stream(f); f.close(); }
     xSemaphoreGive(drawMutex);
   }
+  boardDrawActive = false;
 }
 
 // ---------------------- Helpers ----------------------
@@ -840,21 +842,23 @@ if (!statusLine.startsWith("HTTP/1.1 200")) {
             lastJpgLen = currentJpgLen;
           }
 
-          // Write new frame to /current.jpg
+          // Write new frame to /current.jpg for the Web UI
           File f = LittleFS.open(PATH_CURRENT, "w", true);
           if (f) {
             f.write(buf, readTotal);
             f.close();
             currentJpgLen = readTotal;
           }
-          free(buf); buf = nullptr;
           xSemaphoreGive(drawMutex);
 
-          // Signal the main loop to draw the new frame.
-          // Do NOT draw here — see comment above.
+          // HANDOFF TO MAIN LOOP (Do not free buf here!)
+          if (pendingFrameBuf) free(pendingFrameBuf);
+          pendingFrameBuf = buf;
+          pendingFrameLen = readTotal;
+
           if (!showingLast) pendingDraw = true;
         } else {
-          free(buf); buf = nullptr;
+          free(buf); // Only free if we failed to get the mutex
         }
 
         logEvent("STREAM", "frame size=%u etag=%s heap=%u",
@@ -1225,7 +1229,11 @@ void loop() {
   // so the SPI/LCD DMA writes are isolated from WiFi interrupt activity.
   if (pendingDraw && !showingLast) {
     pendingDraw = false;
-    showCurrentPhoto();
+    if (pendingFrameBuf) {
+      board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
+      free(pendingFrameBuf);
+      pendingFrameBuf = nullptr;
+    }
   }
 
   board_loop(cfg.peekButtonPin);
