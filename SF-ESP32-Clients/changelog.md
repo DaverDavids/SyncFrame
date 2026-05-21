@@ -172,3 +172,20 @@ Where we are confused:
     identified yet.
   - The glitch occurs on the very first frame, before any reconnect,
     which rules out reconnect-specific code paths as the sole trigger.
+```
+
+5-21-2026
+```
+Here's the full summary of what's been tried:
+
+The S3 RGB panel shows a line-shift/wrap artifact on stream connect. The old working code used single-buffer, no flush(), drew directly from RAM, no LittleFS in the display path. Since then, the following were tried and all failed to fix it:
+ - Double-buffer (useDataBuf=true) + single flush() after drawJpg() — glitch persisted
+ - Moved draw from mjpegTask to loop() via pendingDraw flag — reduced frequency, didn't eliminate
+ - Added missing gfx->flush() in board_init() to initialize front buffer — didn't fix
+ - Removed vTaskDelay(1) from jpegDrawCallback — didn't fix
+ - Reverted to single-buffer (useDataBuf=false) + removed all flush() calls — didn't fix
+ - Drew directly from the received RAM buffer instead of writing to LittleFS and rereading — didn't fix
+ - Fixed boardDrawActive leak on failed file reads — didn't fix
+ ```
+ 
+ 

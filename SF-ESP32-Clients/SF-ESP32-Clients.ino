@@ -166,7 +166,9 @@ bool hasLastPhoto() { return LittleFS.exists(PATH_PREV); }
 void showCurrentPhoto() {
   showingLast = false;
   boardDrawActive = true;
-  if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+  if (pendingFrameBuf) {
+    board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
+  } else if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     File f = LittleFS.open(PATH_CURRENT, "r");
     if (f) { board_draw_jpeg_from_stream(f); f.close(); }
     xSemaphoreGive(drawMutex);
@@ -1230,7 +1232,9 @@ void loop() {
   if (pendingDraw && !showingLast) {
     pendingDraw = false;
     if (pendingFrameBuf) {
+      xSemaphoreTake(drawMutex, portMAX_DELAY);
       board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
+      xSemaphoreGive(drawMutex);
       free(pendingFrameBuf);
       pendingFrameBuf = nullptr;
     }
