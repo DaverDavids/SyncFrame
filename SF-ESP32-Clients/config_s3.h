@@ -28,24 +28,7 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   true, 0, 0, 800*20  // 800*20 is correct; larger values cause boot failures
 );
 
-// Double-buffer mode (useDataBuf = true).
-//
-// Why double-buffer, and why it failed before:
-// The RGB panel DMA scans the framebuffer continuously at 16 MHz pixel
-// clock. In single-buffer mode, CPU writes from TJpgDec MCU blocks race
-// the DMA read pointer, producing the wrap-around line-shift artifact.
-//
-// The previous double-buffer attempt called flush() inside the MCU draw
-// callback (or too early), which swapped buffers mid-render and caused
-// partial frames and Core 0 WDT reboots from reentrant GFX calls.
-//
-// Correct usage: TJpgDec writes all MCU blocks into the back buffer
-// during drawJpg(). After drawJpg() returns (full frame complete),
-// board_draw_jpeg() calls gfx->flush() ONCE to atomically swap
-// front/back. The DMA scanner never sees a partially-written frame.
-// The flush() call must ONLY appear in board_draw_jpeg(), never in
-// jpegDrawCallback() or anywhere else.
-Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true /* useDataBuf = double-buffer */);
+Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, false /* useDataBuf = double-buffer */);
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 20
@@ -81,12 +64,8 @@ void board_init() {
                 (psramBefore - psramAfter >= (uint32_t)(SCREEN_W * SCREEN_H * 2 * 2) * 85 / 100)
                   ? "DOUBLE-BUFFER ACTIVE" : "WARNING: may be single-buffer");
 
-  // Initialize front buffer to black. fillScreen() writes to the back buffer;
-  // flush() swaps it to the front so the DMA scanner starts on a clean black
-  // frame instead of garbage PSRAM data. Without this flush, the first frame
-  // shown is whatever was left in PSRAM, causing the first-frame glitch.
+
   gfx->fillScreen(0x0000);
-  gfx->flush();  // push black frame to front buffer before DMA scanning begins
 
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();
@@ -95,9 +74,6 @@ void board_init() {
 
 void board_loop(int peekPin) {
   (void)peekPin;  // S3 uses touchscreen, not a GPIO button
-  // Do not touch the display while a JPEG decode/draw is in progress.
-  // In double-buffer mode the back buffer is being written; an
-  // unsynchronised draw here would corrupt it before flush().
   if (boardDrawActive) return;
 
   //ts.read();

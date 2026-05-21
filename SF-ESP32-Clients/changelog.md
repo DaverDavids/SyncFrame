@@ -136,8 +136,7 @@ Status: glitch still present as of this writing. Summary of what is
 known, what was tried, and where we are confused.
 
 Symptom:
-  Line-shift / wrap artifact on S3 RGB panel on first frame after boot
-  and on many subsequent reconnects. Does not occur on C3 (SPI TFT).
+  Line-shift / wrap artifact on S3 RGB panel on stream connects and reconnects while photo is being displayed. Does not occur on C3 (SPI TFT).
 
 What is confirmed NOT the cause:
   - Which FreeRTOS core draws (tried both, no change)
@@ -173,9 +172,3 @@ Where we are confused:
     identified yet.
   - The glitch occurs on the very first frame, before any reconnect,
     which rules out reconnect-specific code paths as the sole trigger.
-
-Next: verify at runtime whether double-buffer is actually allocating two
-framebuffers (check ESP.getFreePsram() before and after gfx->begin()),
-and confirm flush() is being reached in the current build by adding a
-temporary log or LED toggle after the flush() call.
-```

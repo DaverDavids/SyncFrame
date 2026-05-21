@@ -77,11 +77,6 @@ volatile bool boardDrawActive = false;
 // ---------------------------------------------------------------------------
 // TJpg_Decoder callback - called for each 16x16 decoded MCU block.
 // x/y are absolute screen coordinates (TJpgDec adds the drawJpg origin).
-//
-// On S3 (double-buffer): writes into the back buffer only. flush() is
-// called once after drawJpg() completes in board_draw_jpeg() — NEVER here.
-// On C3 (single-buffer + SPI guard): writes directly to the display
-// under the SPI transaction lock held by board_draw_jpeg().
 // ---------------------------------------------------------------------------
 static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* data) {
   if (x >= SCREEN_W || y >= SCREEN_H) return true;
@@ -97,8 +92,7 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
       gfx->draw16bitRGBBitmap(x, y + row, data + row * w, clipW, 1);
     }
   }
-  // NOTE: no vTaskDelay(1) here. Any yield mid-decode re-opens a preemption
-  // window that the double-buffer / SPI guard is specifically designed to close.
+ 
   return true;
 }
 
@@ -106,12 +100,6 @@ static bool jpegDrawCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint1
 // board_draw_jpeg
 // Decodes a JPEG from a RAM buffer and draws it centred on the display.
 // Scaling is power-of-2 only (1x, 1/2, 1/4, 1/8).
-//
-// S3 DOUBLE-BUFFER PATH:
-//   All MCU block writes go into the back buffer (DMA scans front only).
-//   After drawJpg() returns, gfx->flush() atomically swaps front/back.
-//   The display never shows a partially-decoded frame.
-//   flush() must ONLY be called here, never in the callback.
 //
 // C3 SPI GUARD PATH:
 //   SF_SPI_BEGIN/END hold the Arduino SPI mutex for the full frame,
@@ -203,9 +191,6 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   // display transitions from the previous complete frame directly to the
   // new complete frame — no tearing, no partial frames visible.
   // This call must ONLY appear here, never in jpegDrawCallback.
-#if BOARD_IS_S3
-  gfx->flush();
-#endif
 
   // Release SPI bus (C3 only).
   SF_SPI_END();
@@ -242,7 +227,4 @@ void board_draw_boot_status(const char* text) {
   gfx->setTextColor(0xFFFF);
   gfx->setCursor(10, barY + padding);
   gfx->print(text);
-#if BOARD_IS_S3
-  gfx->flush();  // push boot status text to front buffer
-#endif
 }
