@@ -47,6 +47,7 @@
 #include <ArduinoOTA.h>
 #include <Arduino_GFX_Library.h>
 #include <TJpg_Decoder.h>
+#include "Secrets.h"
 
 // ============================================================
 // Secrets.h — optional. If present, defines MYSSID and MYPSK.
