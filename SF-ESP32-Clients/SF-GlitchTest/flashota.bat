@@ -1,0 +1,1 @@
+python C:\Users\rawdr\Documents\Arduino\hardware\esp32\3.1.1\tools\espota.py -i syncframe-04d.local -a asdf1qwer -f .\build\SF-GlitchTest.ino.bin

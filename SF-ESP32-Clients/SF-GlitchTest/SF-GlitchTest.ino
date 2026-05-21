@@ -96,6 +96,7 @@ static const char* PREF_NS         = "gltest";
 // ============================================================
 // Preferences / WiFi credentials
 // ============================================================
+<<<<<<< Updated upstream
 static Preferences prefs;
 static String savedSsid;
 static String savedPass;
@@ -120,6 +121,11 @@ static void saveWifiPrefs(const String& ssid, const String& pass) {
   savedSsid = ssid;
   savedPass = pass;
 }
+=======
+const char* WIFI_SSID = "Yfi";          // leave empty → AP mode
+const char* WIFI_PASS = "$AwkwardInjunction";
+const char* AP_SSID   = "SF-GlitchTest";
+>>>>>>> Stashed changes
 
 // ============================================================
 // GFX — pointer so we can re-init for T6/T7
