@@ -28,7 +28,12 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
   true, 0, 0, 800*20  // 800*20 is correct; larger values cause boot failures
 );
 
-Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, false /* useDataBuf = double-buffer */);
+// useDataBuf = true enables Arduino_GFX double-buffering:
+// jpegDrawCallback writes into the off-screen back buffer while the DMA
+// engine continuously scans the front buffer.  board_draw_jpeg() then calls
+// gfx->flush() to atomically swap front<->back once the full frame is ready.
+// This is the ONLY correct way to draw on this RGB panel without tearing.
+Arduino_GFX *gfx = new Arduino_RGB_Display(SCREEN_W, SCREEN_H, rgbpanel, 0, true /* useDataBuf = double-buffer ENABLED */);
 
 #define TOUCH_SDA 19
 #define TOUCH_SCL 20
@@ -47,9 +52,9 @@ void board_init() {
   digitalWrite(GFX_BL, HIGH);
 
   // PSRAM debug: log free PSRAM before and after gfx->begin() to confirm
-  // whether double-buffer actually allocates two full 768KB framebuffers.
-  // Expected: freePsram drops by ~1536KB (2 x 800*480*2 bytes) if active.
-  // If it only drops by ~768KB, double-buffer silently fell back to single.
+  // double-buffer actually allocates two full framebuffers.
+  // Expected delta: ~1536KB (2 x 800*480*2 bytes).
+  // If delta is only ~768KB, double-buffer silently fell back to single.
   uint32_t psramBefore = ESP.getFreePsram();
   Serial.printf("[BOARD] PSRAM before gfx->begin(): %u bytes\n", (unsigned)psramBefore);
 
@@ -63,7 +68,6 @@ void board_init() {
                 (unsigned)(psramBefore - psramAfter),
                 (psramBefore - psramAfter >= (uint32_t)(SCREEN_W * SCREEN_H * 2 * 2) * 85 / 100)
                   ? "DOUBLE-BUFFER ACTIVE" : "WARNING: may be single-buffer");
-
 
   gfx->fillScreen(0x0000);
 
