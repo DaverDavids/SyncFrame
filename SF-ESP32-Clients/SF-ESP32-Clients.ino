@@ -1122,7 +1122,6 @@ static void handleImgCurrent() {
   if (!requireWebAuth()) return;
   if (!psramCurrentBuf) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.sendHeader("Content-Length", String(psramCurrentLen));
   server.setContentLength(psramCurrentLen);
   server.send(200, "image/jpeg", "");
   server.sendContent((const char*)psramCurrentBuf, psramCurrentLen);
@@ -1132,7 +1131,6 @@ static void handleImgLast() {
   if (!requireWebAuth()) return;
   if (!psramPrevBuf) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.sendHeader("Content-Length", String(psramPrevLen));
   server.setContentLength(psramPrevLen);
   server.send(200, "image/jpeg", "");
   server.sendContent((const char*)psramPrevBuf, psramPrevLen);
