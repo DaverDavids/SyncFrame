@@ -188,11 +188,54 @@ static bool requireWebAuth() {
 // ============================================================
 bool hasLastPhoto() { return LittleFS.exists(PATH_PREV); }
 
+// ---------------------------------------------------------------------------
+// load_file_to_buf
+// ---------------------------------------------------------------------------
+// Load a LittleFS file into a PSRAM (or heap) buffer.
+// Returns a malloc'd pointer the caller must free(), or nullptr on failure.
+// Flash I/O is fully complete before this function returns; the caller can
+// then pass the buffer to board_draw_jpeg() without any LittleFS involvement
+// during the DMA decode+draw phase.
+// ---------------------------------------------------------------------------
+static uint8_t* load_file_to_buf(const char* path, size_t* outLen) {
+  File f = LittleFS.open(path, "r");
+  if (!f) return nullptr;
+  size_t len = f.size();
+  if (len == 0) { f.close(); return nullptr; }
+  uint8_t* buf = nullptr;
+#if defined(BOARD_HAS_PSRAM)
+  if (ESP.getPsramSize() > 0)
+    buf = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if (!buf) buf = (uint8_t*)malloc(len);
+  if (!buf) { f.close(); return nullptr; }
+  size_t rd = f.read(buf, len);
+  f.close();
+  if (rd != len) { free(buf); return nullptr; }
+  if (outLen) *outLen = len;
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// showCurrentPhoto / showLastPhoto
+// ---------------------------------------------------------------------------
+// FIX: previously called board_draw_jpeg_from_stream(f), which fed the JPEG
+// decoder directly from an open LittleFS file. That caused flash reads to
+// overlap with RGB DMA scanning, stalling the DMA bus and producing the
+// line-shift artifact.
+//
+// Now: load the file into a RAM buffer (flash I/O completes here), then call
+// board_draw_jpeg(buf, len) so the decode+DMA write happens entirely from RAM.
+// ---------------------------------------------------------------------------
 void showCurrentPhoto() {
   showingLast = false;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    File f = LittleFS.open(PATH_CURRENT, "r");
-    if (f) { board_draw_jpeg_from_stream(f); f.close(); }
+    size_t len = 0;
+    uint8_t* buf = load_file_to_buf(PATH_CURRENT, &len);
+    if (buf) {
+      board_draw_jpeg(buf, len);
+      free(buf);
+    }
     xSemaphoreGive(drawMutex);
   }
 }
@@ -200,8 +243,12 @@ void showCurrentPhoto() {
 void showLastPhoto() {
   showingLast = true;
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    File f = LittleFS.open(PATH_PREV, "r");
-    if (f) { board_draw_jpeg_from_stream(f); f.close(); }
+    size_t len = 0;
+    uint8_t* buf = load_file_to_buf(PATH_PREV, &len);
+    if (buf) {
+      board_draw_jpeg(buf, len);
+      free(buf);
+    }
     xSemaphoreGive(drawMutex);
   }
 }
@@ -1212,30 +1259,75 @@ void loop() {
 
   // ----------------------------------------------------------------
   // STEP 1: Draw + Commit
+  //
   // Skip entirely while networkBusy is set (TLS handshake in progress
   // on Core 0). The last committed frame stays static on the display;
   // the RGB DMA engine keeps scanning it cleanly with no bus contention.
+  //
+  // FIX (5-27-2026): Flash I/O (LittleFS commit) is now split into a
+  // separate Phase B that runs AFTER the mutex is released and the draw
+  // is complete. Previously, rename + f.write() ran while drawMutex was
+  // still held, meaning flash sector ops could stall the PSRAM/AHB bus
+  // mid-scan-cycle and produce the line-shift artifact.
+  //
+  // Phase A (drawMutex held): board_draw_jpeg() from RAM only.
+  //   No LittleFS calls. DMA writes happen entirely from pendingFrameBuf
+  //   in PSRAM. Flash bus is idle.
+  //
+  // Phase B (drawMutex released, between frames): LittleFS rename + write.
+  //   The DMA engine is scanning the just-decoded frame. No new decode
+  //   is in progress. Flash I/O now happens between frames, not during.
+  //   networkBusy guard still suppresses Phase B during TLS windows.
   // ----------------------------------------------------------------
   if (pendingDraw && !showingLast && !networkBusy) {
     pendingDraw = false;
-    if (pendingFrameBuf && xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
 
+    // --- Phase A: draw from RAM, mutex held, zero flash I/O ---
+    bool doCommit = false;
+    uint8_t* commitBuf = nullptr;
+    size_t   commitLen = 0;
+
+    if (pendingFrameBuf && xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
       board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
 
       if (pendingCommit) {
         pendingCommit = false;
-        if (LittleFS.exists(PATH_CURRENT)) {
-          LittleFS.remove(PATH_PREV);
-          LittleFS.rename(PATH_CURRENT, PATH_PREV);
-          lastJpgLen = currentJpgLen;
-        }
-        File fsf = LittleFS.open(PATH_CURRENT, "w", true);
-        if (fsf) { fsf.write(pendingFrameBuf, pendingFrameLen); fsf.close(); currentJpgLen = pendingFrameLen; }
+        doCommit   = true;
+        commitBuf  = pendingFrameBuf;
+        commitLen  = pendingFrameLen;
+        // Prevent mjpegTask from freeing this buffer before Phase B;
+        // ownership transfers here — mjpegTask will not touch pendingFrameBuf
+        // once pendingCommit is cleared.
+        pendingFrameBuf = nullptr;
+      } else {
+        free(pendingFrameBuf);
+        pendingFrameBuf = nullptr;
       }
 
-      free(pendingFrameBuf);
-      pendingFrameBuf = nullptr;
       xSemaphoreGive(drawMutex);
+    }
+
+    // --- Phase B: LittleFS commit, mutex NOT held, between frames ---
+    // Only run if the draw succeeded and a commit was requested.
+    // networkBusy is re-checked so a TLS reconnect that arrives in the
+    // gap does not race the flash controller.
+    if (doCommit && commitBuf && !networkBusy) {
+      if (LittleFS.exists(PATH_CURRENT)) {
+        LittleFS.remove(PATH_PREV);
+        LittleFS.rename(PATH_CURRENT, PATH_PREV);
+        lastJpgLen = currentJpgLen;
+      }
+      File fsf = LittleFS.open(PATH_CURRENT, "w", true);
+      if (fsf) {
+        fsf.write(commitBuf, commitLen);
+        fsf.close();
+        currentJpgLen = commitLen;
+      }
+      free(commitBuf);
+    } else if (doCommit && commitBuf) {
+      // networkBusy came up — discard this commit cycle; the frame is
+      // already on screen from Phase A. Next received frame will commit.
+      free(commitBuf);
     }
   }
 
