@@ -707,6 +707,7 @@ static void mjpegTask(void* pv) {
     // stops making PSRAM bus requests during the TLS handshake window.
     // ---------------------------------------------------------------
     networkBusy = true;
+    __sync_synchronize();
     logEvent("STREAM", "connecting %s:%d (draw paused)", host.c_str(), port);
     bool connected = client->connect(host.c_str(), port);
     // ---------------------------------------------------------------
@@ -927,7 +928,7 @@ static void mjpegTask(void* pv) {
     client->stop();
     delete client;
     mjpegConnected     = false;
-    lastMjpegAttemptMs = 0;
+    lastMjpegAttemptMs = millis();
     logEvent("STREAM", "task ended, sleeping");
   }
 }
@@ -938,13 +939,13 @@ static void mjpegMaybeReconnect() {
     if (mjpegForceReconnect || millis() - lastMjpegConnectMs >= reconnectInterval) {
       mjpegForceReconnect = false;
       mjpegRequestRefresh = true;
-      lastMjpegAttemptMs  = 0;
+      lastMjpegAttemptMs  = millis();
     }
     return;
   }
   if (mjpegForceReconnect) {
     mjpegForceReconnect = false;
-    lastMjpegAttemptMs  = 0;
+    lastMjpegAttemptMs  = millis();
   }
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
