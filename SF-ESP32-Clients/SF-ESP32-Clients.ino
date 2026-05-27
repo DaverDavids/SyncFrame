@@ -750,7 +750,7 @@ static void mjpegTask(void* pv) {
         logEvent("STREAM", "refresh requested, reconnecting");
         break;
       }
-      if (millis() - lastDataMs > 2000) {
+      if (millis() - lastDataMs > 150000) {
         logEvent("STREAM", "idle timeout");
         break;
       }
