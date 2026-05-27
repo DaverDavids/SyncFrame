@@ -77,16 +77,29 @@ void board_init() {
 }
 
 void board_loop(int peekPin) {
-  (void)peekPin;  // S3 uses touchscreen, not a GPIO button
+  (void)peekPin;
   if (boardDrawActive) return;
 
   ts.read();
-  bool pressed = ts.isTouched;
+  bool touched = ts.isTouched;
 
-  // Only act on state CHANGES, not every loop tick (1ms)
+  static bool lastTouched = false;
+  static unsigned long touchStartMs = 0;
+  static const unsigned long DEBOUNCE_MS = 80;
+
+  if (touched && !lastTouched) {
+    touchStartMs = millis();
+  }
+
+  bool pressed = touched && (millis() - touchStartMs >= DEBOUNCE_MS);
   static bool lastPressed = false;
-  if (pressed == lastPressed) return;
+
+  if (pressed == lastPressed) {
+    lastTouched = touched;
+    return;
+  }
   lastPressed = pressed;
+  lastTouched = touched;
 
   if (pressed && !showingLast && hasLastPhoto()) {
     showLastPhoto();

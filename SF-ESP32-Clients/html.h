@@ -97,15 +97,8 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   </footer>
 <script>
 let lastImgStamp = null;
-async function loadImg(url) {
-  try {
-    const r = await fetch(url, {credentials:"include", cache:"no-store"});
-    if (!r.ok) return;
-    const blob = await r.blob();
-    const old = document.getElementById("img").src;
-    document.getElementById("img").src = URL.createObjectURL(blob);
-    if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
-  } catch(e) {}
+function loadImg(url) {
+  document.getElementById("img").src = url;
 }
 loadImg("/img/current?ts=" + Date.now());
 async function poll() {
