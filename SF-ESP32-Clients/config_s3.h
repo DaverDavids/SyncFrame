@@ -80,7 +80,7 @@ void board_loop(int peekPin) {
   (void)peekPin;  // S3 uses touchscreen, not a GPIO button
   if (boardDrawActive) return;
 
-  //ts.read();
+  ts.read();
   bool pressed = ts.isTouched;
 
   // Only act on state CHANGES, not every loop tick (1ms)

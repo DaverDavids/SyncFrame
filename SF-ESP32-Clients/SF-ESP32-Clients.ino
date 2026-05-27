@@ -616,7 +616,8 @@ static void mjpegTask(void* pv) {
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     mjpegRequestRefresh = false;
-    vTaskDelay(pdMS_TO_TICKS(500));
+    if (!mjpegForceReconnect)
+      vTaskDelay(pdMS_TO_TICKS(500));
 
     String url = cfg.photoBaseUrl;
     if (!url.startsWith("http://") && !url.startsWith("https://"))
@@ -897,7 +898,7 @@ static void mjpegMaybeReconnect() {
   }
   if (mjpegForceReconnect) {
     mjpegForceReconnect = false;
-    lastMjpegAttemptMs  = millis();
+    lastMjpegAttemptMs  = 0;
   }
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
@@ -1121,14 +1122,20 @@ static void handleImgCurrent() {
   if (!requireWebAuth()) return;
   if (!psramCurrentBuf) { server.send(404, "text/plain", "no image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)psramCurrentBuf, psramCurrentLen);
+  server.sendHeader("Content-Length", String(psramCurrentLen));
+  server.setContentLength(psramCurrentLen);
+  server.send(200, "image/jpeg", "");
+  server.sendContent((const char*)psramCurrentBuf, psramCurrentLen);
 }
 
 static void handleImgLast() {
   if (!requireWebAuth()) return;
   if (!psramPrevBuf) { server.send(404, "text/plain", "no last image"); return; }
   server.sendHeader("Cache-Control", "no-store");
-  server.send_P(200, "image/jpeg", (const char*)psramPrevBuf, psramPrevLen);
+  server.sendHeader("Content-Length", String(psramPrevLen));
+  server.setContentLength(psramPrevLen);
+  server.send(200, "image/jpeg", "");
+  server.sendContent((const char*)psramPrevBuf, psramPrevLen);
 }
 
 static void handleActionRefresh() {

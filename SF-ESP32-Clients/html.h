@@ -97,8 +97,17 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   </footer>
 <script>
 let lastImgStamp = null;
-// Load image immediately on page open without waiting for a hash change
-document.getElementById("img").src = "/img/current?ts=" + Date.now();
+async function loadImg(url) {
+  try {
+    const r = await fetch(url, {credentials:"include", cache:"no-store"});
+    if (!r.ok) return;
+    const blob = await r.blob();
+    const old = document.getElementById("img").src;
+    document.getElementById("img").src = URL.createObjectURL(blob);
+    if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
+  } catch(e) {}
+}
+loadImg("/img/current?ts=" + Date.now());
 async function poll() {
   try {
     const r = await fetch("/api/status",{cache:"no-store",credentials:"include"});
@@ -108,7 +117,7 @@ async function poll() {
     if (s.hostname) document.getElementById("f_host").textContent = "Host: "+s.hostname;
     if (s.photoHash !== lastImgStamp) {
       lastImgStamp = s.photoHash;
-      document.getElementById("img").src = "/img/current?ts=" + encodeURIComponent(s.photoHash || Date.now());
+      loadImg("/img/current?ts=" + encodeURIComponent(s.photoHash || Date.now()));
       if (s.photoHash) {
         document.getElementById("last-updated").textContent =
           "Last updated: " + new Date().toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
