@@ -73,7 +73,6 @@ void board_init() {
 
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   ts.begin();
-  pinMode(TOUCH_INT, INPUT_PULLUP);
   ts.setRotation(0);
 }
 
@@ -81,23 +80,23 @@ void board_loop(int peekPin) {
   (void)peekPin;
   if (boardDrawActive) return;
 
-  bool intAsserted = (digitalRead(TOUCH_INT) == LOW);
+  static unsigned long lastReadMs = 0;
+  unsigned long now = millis();
+  if (now - lastReadMs < 20) return;
+  lastReadMs = now;
 
-  static bool lastInt = false;
+  ts.read();
+  bool pressed = ts.isTouched;
 
-  if (intAsserted && !lastInt) {
-    ts.read();
-    lastInt = true;
-    Serial.printf("[TOUCH] DOWN at %lu\n", millis());
-    if (!showingLast && hasLastPhoto()) {
-      showLastPhoto();
-    }
-  } else if (!intAsserted && lastInt) {
-    ts.read();
-    lastInt = false;
-    Serial.printf("[TOUCH] UP at %lu\n", millis());
-    if (showingLast) {
-      showCurrentPhoto();
-    }
+  static bool lastPressed = false;
+  if (pressed == lastPressed) return;
+  lastPressed = pressed;
+
+  Serial.printf("[TOUCH] %s at %lu\n", pressed ? "DOWN" : "UP", millis());
+
+  if (pressed && !showingLast && hasLastPhoto()) {
+    showLastPhoto();
+  } else if (!pressed && showingLast) {
+    showCurrentPhoto();
   }
 }

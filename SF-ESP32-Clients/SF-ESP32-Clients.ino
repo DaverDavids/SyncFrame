@@ -124,7 +124,7 @@ static TaskHandle_t      mjpegTaskHandle  = nullptr;
 static StaticTask_t      mjpegTaskBuffer;
 static StackType_t       mjpegStack[20480 / sizeof(StackType_t)];
 static unsigned long     lastMjpegConnectMs  = 0;
-static unsigned long     lastMjpegAttemptMs  = ULONG_MAX - 15000UL;
+static unsigned long     lastMjpegAttemptMs  = ULONG_MAX - 2000UL;
 static bool              mjpegForceReconnect = false;
 static volatile bool     mjpegRequestRefresh = false;
 static char              currentPhotoEtag[24] = "";
@@ -721,7 +721,7 @@ static void mjpegTask(void* pv) {
       delete client;
       mjpegConnected = false;
       if (statusLine.indexOf("304") >= 0)
-        lastMjpegAttemptMs = millis() - 15000 + 60000UL;
+        lastMjpegAttemptMs = millis() - 2000 + 60000UL;
       else
         lastMjpegAttemptMs = millis();
       continue;
@@ -750,7 +750,7 @@ static void mjpegTask(void* pv) {
         logEvent("STREAM", "refresh requested, reconnecting");
         break;
       }
-      if (millis() - lastDataMs > 150000) {
+      if (millis() - lastDataMs > 2000) {
         logEvent("STREAM", "idle timeout");
         break;
       }
@@ -902,7 +902,7 @@ static void mjpegMaybeReconnect() {
   }
   if (WiFi.status() != WL_CONNECTED) return;
   if (cfg.photoBaseUrl.length() == 0) return;
-  if (millis() - lastMjpegAttemptMs < 15000) return;
+  if (millis() - lastMjpegAttemptMs < 2000) return;
 
   if (mjpegTaskHandle == nullptr) {
     mjpegTaskHandle = xTaskCreateStaticPinnedToCore(
