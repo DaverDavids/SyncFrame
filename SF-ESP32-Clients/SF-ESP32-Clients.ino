@@ -95,6 +95,30 @@ static size_t      currentJpgLen = 0;
 static size_t      lastJpgLen    = 0;
 bool showingLast = false;
 
+// ---------------------------------------------------------------------------
+// networkBusy
+// ---------------------------------------------------------------------------
+// Set TRUE by mjpegTask immediately before WiFiClientSecure::connect() and
+// cleared as soon as the connect attempt finishes (success or failure).
+//
+// While TRUE, loop() skips the pendingDraw block completely so the RGB DMA
+// engine makes zero PSRAM bus requests during the TLS handshake window.
+//
+// WHY THIS IS NECESSARY:
+//   WiFiClientSecure::connect() runs a full TLS handshake on Core 0.
+//   mbedTLS allocates large temporaries in PSRAM and calls esp_fill_random()
+//   (hardware RNG via AHB bus).  This saturates the PSRAM/AHB bus fabric
+//   for 200 ms - 2 s.  The RGB panel DMA engine streams the framebuffer
+//   from PSRAM continuously at 16 MHz pixel clock.  When the bus is starved
+//   by the TLS stack the DMA engine drops scan lines, causing the
+//   horizontal line-shift/wrap artifact.
+//
+//   double-buffer + flush() prevents write races but cannot stop the bus
+//   arbitration from starving DMA.  Pausing the draw loop is the only
+//   correct solution at the hardware level.
+// ---------------------------------------------------------------------------
+volatile bool networkBusy = false;
+
 // Stream (mjpeg)
 static bool              mjpegConnected   = false;
 static TaskHandle_t      mjpegTaskHandle  = nullptr;
@@ -108,21 +132,6 @@ static char              currentPhotoEtag[24] = "";
 
 // ---------------------------------------------------------------------------
 // Pending-frame handoff
-// ---------------------------------------------------------------------------
-// mjpegTask deposits each received JPEG frame into pendingFrameBuf (PSRAM)
-// and raises pendingDraw + pendingCommit.  It NEVER touches LittleFS.
-//
-// loop() services the flags in this order every iteration:
-//   1. pendingDraw  -> board_draw_jpeg()             (DMA active)
-//   2. pendingCommit -> LittleFS rename + write       (DMA idle -- safe)
-//   3. server.handleClient()                          (after FS work done)
-//
-// This ordering guarantees that flash I/O never overlaps an active RGB DMA
-// scan, eliminating the horizontal scan-line shift artifact on the JC8048.
-//
-// drawMutex is held for the entire draw+commit block so that web-server
-// handlers (handleImgCurrent/Last) cannot open a LittleFS file while loop()
-// is writing it, and vice versa.
 // ---------------------------------------------------------------------------
 static volatile bool pendingDraw   = false;
 static volatile bool pendingCommit = false;
@@ -179,15 +188,8 @@ static bool requireWebAuth() {
 // ============================================================
 bool hasLastPhoto() { return LittleFS.exists(PATH_PREV); }
 
-// showCurrentPhoto / showLastPhoto are called from board_loop() which runs
-// at the BOTTOM of loop(), AFTER the draw+commit block has already completed
-// for this iteration.  DMA is therefore idle when these run.
-// Both read from LittleFS into a heap buffer then call board_draw_jpeg() --
-// the same safe pattern as every other non-streaming draw path.
 void showCurrentPhoto() {
   showingLast = false;
-  // Use the already-committed LittleFS file.  Reading from flash here is
-  // safe: loop() runs draw+commit before board_loop(), so DMA is idle.
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     File f = LittleFS.open(PATH_CURRENT, "r");
     if (f) { board_draw_jpeg_from_stream(f); f.close(); }
@@ -604,12 +606,10 @@ static inline bool hasPsram() {
 // MJPEG stream task (Core 0)
 // ============================================================
 // CRITICAL CONTRACT:
-//   This task NEVER calls LittleFS.open/write/rename/exists.
-//   It only:
-//     1. Allocates a PSRAM buffer and reads the JPEG payload into it.
-//     2. Atomically replaces pendingFrameBuf with the new buffer.
-//     3. Sets pendingDraw = pendingCommit = true.
-//   loop() (Core 1, Arduino task) owns ALL flash I/O.
+//   This task sets networkBusy=true BEFORE calling client->connect()
+//   and clears it as soon as connect() returns (success or failure).
+//   This pauses the draw loop on Core 1 for the entire TLS handshake
+//   window so the PSRAM/AHB bus is not contended by DMA.
 // ============================================================
 static void mjpegTask(void* pv) {
   (void)pv;
@@ -655,7 +655,19 @@ static void mjpegTask(void* pv) {
     secClient->setTimeout(15);
     WiFiClient* client = secClient;
 
-    if (!client->connect(host.c_str(), port)) {
+    // ---------------------------------------------------------------
+    // PAUSE DRAW: set networkBusy before connect() so loop() on Core 1
+    // stops making PSRAM bus requests during the TLS handshake window.
+    // ---------------------------------------------------------------
+    networkBusy = true;
+    logEvent("STREAM", "connecting %s:%d (draw paused)", host.c_str(), port);
+    bool connected = client->connect(host.c_str(), port);
+    networkBusy = false;
+    // ---------------------------------------------------------------
+    // RESUME DRAW: bus contention window is over regardless of outcome.
+    // ---------------------------------------------------------------
+
+    if (!connected) {
       logEvent("STREAM", "connect failed %s:%d", host.c_str(), port);
       delete client;
       mjpegConnected     = false;
@@ -843,14 +855,13 @@ static void mjpegTask(void* pv) {
         { uint8_t tmp[2]; size_t av = client->available();
           if (av >= 2) client->read(tmp, 2); else if (av == 1) client->read(tmp, 1); }
 
-        // ---- HANDOFF: deposit into PSRAM, signal loop() ----
-        // No LittleFS calls here, ever.  loop() owns all FS writes.
+        // Handoff: deposit into PSRAM, signal loop()
         uint8_t* old = pendingFrameBuf;
         pendingFrameBuf = buf;
         pendingFrameLen = readTotal;
         pendingDraw     = true;
         pendingCommit   = true;
-        if (old) free(old);   // free the previous un-drawn frame if loop() was slow
+        if (old) free(old);
 
         logEvent("STREAM", "frame size=%u etag=%s heap=%u",
                  (unsigned)readTotal, currentPhotoEtag, (unsigned)ESP.getFreeHeap());
@@ -1108,9 +1119,6 @@ static void handlePostConfig() {
 
 static void handleImgCurrent() {
   if (!requireWebAuth()) return;
-  // drawMutex is held by loop() during the entire draw+commit block, so
-  // taking it here ensures we never read current.jpg while loop() is
-  // writing it (or while board_draw_jpeg_from_stream is reading it).
   if (xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
     server.send(503, "text/plain", "busy");
     return;
@@ -1195,30 +1203,25 @@ void loop() {
 
   if (WiFi.status() == WL_CONNECTED) {
     startNetworkServicesOnce();
-    if (networkServicesStarted)
+    // Gate ArduinoOTA.handle() behind !networkBusy:
+    // ArduinoOTA uses WiFiClient internally; during an OTA check it can
+    // make brief socket connections that hit PSRAM just like mjpegTask.
+    if (networkServicesStarted && !networkBusy)
       ArduinoOTA.handle();
   }
 
   // ----------------------------------------------------------------
-  // STEP 1: Draw + Commit  (must run BEFORE server.handleClient)
+  // STEP 1: Draw + Commit
+  // Skip entirely while networkBusy is set (TLS handshake in progress
+  // on Core 0). The last committed frame stays static on the display;
+  // the RGB DMA engine keeps scanning it cleanly with no bus contention.
   // ----------------------------------------------------------------
-  // drawMutex is held for the entire draw+commit block so that web
-  // handlers (handleImgCurrent/Last) block on the mutex rather than
-  // racing against an in-progress LittleFS write or DMA scan.
-  //
-  // Ordering guarantee per loop() iteration:
-  //   draw  (DMA active)   → commit to FS (DMA idle) → web requests
-  // ----------------------------------------------------------------
-  if (pendingDraw && !showingLast) {
+  if (pendingDraw && !showingLast && !networkBusy) {
     pendingDraw = false;
     if (pendingFrameBuf && xSemaphoreTake(drawMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
 
-      // --- DRAW: DMA active ---
       board_draw_jpeg(pendingFrameBuf, pendingFrameLen);
-      // board_draw_jpeg() returns only after the last MCU block is pushed.
-      // The DMA engine is now idle (inter-frame gap) — safe for flash I/O.
 
-      // --- COMMIT: DMA idle, flash I/O safe ---
       if (pendingCommit) {
         pendingCommit = false;
         if (LittleFS.exists(PATH_CURRENT)) {
@@ -1237,8 +1240,7 @@ void loop() {
   }
 
   // ----------------------------------------------------------------
-  // STEP 2: Web server + mDNS/stream management
-  // (runs after draw+commit — drawMutex is released)
+  // STEP 2: Web server + stream management
   // ----------------------------------------------------------------
   if (networkServicesStarted && WiFi.status() == WL_CONNECTED) {
     if (ESP.getFreeHeap() > 20000) server.handleClient();
@@ -1247,8 +1249,6 @@ void loop() {
 
   // ----------------------------------------------------------------
   // STEP 3: Button / board housekeeping
-  // (board_loop calls showCurrentPhoto / showLastPhoto if button pressed;
-  //  those also take drawMutex so they are serialised against commits)
   // ----------------------------------------------------------------
   board_loop(cfg.peekButtonPin);
   delay(1);
