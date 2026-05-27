@@ -709,7 +709,6 @@ static void mjpegTask(void* pv) {
     networkBusy = true;
     logEvent("STREAM", "connecting %s:%d (draw paused)", host.c_str(), port);
     bool connected = client->connect(host.c_str(), port);
-    networkBusy = false;
     // ---------------------------------------------------------------
     // RESUME DRAW: bus contention window is over regardless of outcome.
     // ---------------------------------------------------------------
@@ -909,6 +908,7 @@ static void mjpegTask(void* pv) {
         pendingDraw     = true;
         pendingCommit   = true;
         if (old) free(old);
+		if (networkBusy) networkBusy = false;
 
         logEvent("STREAM", "frame size=%u etag=%s heap=%u",
                  (unsigned)readTotal, currentPhotoEtag, (unsigned)ESP.getFreeHeap());
