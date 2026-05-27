@@ -1,8 +1,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <LittleFS.h>
-
 // Use TJpg_Decoder (Bodmer) instead of JPEGDEC.
 // JPEGDEC 1.8.4 has an internal MCU-batching bug that causes a cache/MMU
 // crash on ESP32-S3 for images whose width produces >4096 pixels/MCU-row
@@ -190,15 +188,6 @@ void board_draw_jpeg(const uint8_t* jpg, size_t len) {
   SF_SPI_END();
 
   boardDrawActive = false;
-}
-
-inline void board_draw_jpeg_from_stream(fs::File& f) {
-  size_t len = f.size();
-  uint8_t* buf = (uint8_t*)malloc(len);
-  if (!buf) return;
-  f.read(buf, len);
-  board_draw_jpeg(buf, len);
-  free(buf);
 }
 
 // ---------------------------------------------------------------------------
