@@ -74,7 +74,12 @@ static SPISettings _spiCfg(80000000, MSBFIRST, SPI_MODE0);
 #define SPI_BEGIN() SPI.beginTransaction(_spiCfg)
 #define SPI_END()   SPI.endTransaction()
 
-// ── Image buffer (PSRAM preferred) ────────────────────────────────────────────
+// ── Image buffer ──────────────────────────────────────────────────────────────
+// C3 has NO PSRAM. Max JPEG = 280*240*2 = 131400 bytes. Allocate 140KB from
+// internal heap. The WebServer upload buffer sits in internal RAM too, so we
+// allocate at START and keep it for the lifetime of the test run.
+#define MAX_JPG_BYTES 140000UL
+
 static uint8_t* g_jpgBuf   = nullptr;
 static size_t   g_jpgLen   = 0;
 static bool     g_hasImage = false;
@@ -214,45 +219,44 @@ static void runTest(int t) {
       letterbox(ox, oy, sw, sh);
       doDecode(scale, src, g_jpgLen, ox, oy, false);
       snprintf(g_res.note, sizeof(g_res.note),
-        "PSRAM src draw16bitRGBBitmap scale=%d sw=%d sh=%d ox=%d oy=%d",
+        "internal-heap src draw16bitRGBBitmap scale=%d sw=%d sh=%d ox=%d oy=%d",
         scale, sw, sh, ox, oy);
       break;
 
-    case 2: // Internal RAM copy
+    case 2: // Second internal RAM copy (fresh malloc)
       tmp = (uint8_t*)malloc(g_jpgLen);
       if (tmp) { memcpy(tmp, g_jpgBuf, g_jpgLen); src = tmp; }
       letterbox(ox, oy, sw, sh);
       doDecode(scale, src, g_jpgLen, ox, oy, false);
       snprintf(g_res.note, sizeof(g_res.note),
-        "internalRAM copy=%s scale=%d sw=%d sh=%d",
-        tmp ? "OK" : "FAIL(PSRAM)", scale, sw, sh);
+        "fresh-malloc copy=%s scale=%d sw=%d sh=%d",
+        tmp ? "OK" : "FAIL(heap full)", scale, sw, sh);
       break;
 
     case 3: // Count-only — no GFX, no SPI at all
       g_countOnly = true;
       doDecode(scale, src, g_jpgLen, ox, oy, false);
       snprintf(g_res.note, sizeof(g_res.note),
-        "count-only noSPI PSRAM src scale=%d sw=%d sh=%d", scale, sw, sh);
+        "count-only noSPI scale=%d sw=%d sh=%d", scale, sw, sh);
       break;
 
-    case 4: // Internal RAM + count-only
+    case 4: // Fresh malloc + count-only
       g_countOnly = true;
       tmp = (uint8_t*)malloc(g_jpgLen);
       if (tmp) { memcpy(tmp, g_jpgBuf, g_jpgLen); src = tmp; }
       doDecode(scale, src, g_jpgLen, ox, oy, false);
       snprintf(g_res.note, sizeof(g_res.note),
-        "internalRAM+count-only copy=%s scale=%d",
+        "fresh-malloc+count-only copy=%s scale=%d",
         tmp ? "OK" : "FAIL", scale);
       break;
 
-    case 5: // 32-byte aligned PSRAM alloc
-      tmp = (uint8_t*)heap_caps_aligned_alloc(32, g_jpgLen,
-               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    case 5: // 32-byte aligned alloc (tests alignment sensitivity)
+      tmp = (uint8_t*)heap_caps_aligned_alloc(32, g_jpgLen, MALLOC_CAP_DEFAULT);
       if (tmp) { memcpy(tmp, g_jpgBuf, g_jpgLen); src = tmp; }
       letterbox(ox, oy, sw, sh);
       doDecode(scale, src, g_jpgLen, ox, oy, false);
       snprintf(g_res.note, sizeof(g_res.note),
-        "32B-aligned PSRAM alloc=%s scale=%d",
+        "32B-aligned alloc=%s scale=%d",
         tmp ? "OK" : "FAIL(orig)", scale);
       break;
 
@@ -260,7 +264,7 @@ static void runTest(int t) {
       letterbox(ox, oy, sw, sh);
       doDecode(scale, src, g_jpgLen, ox, oy, true);
       snprintf(g_res.note, sizeof(g_res.note),
-        "writeAddrWindow+writePixels PSRAM src scale=%d sw=%d sh=%d", scale, sw, sh);
+        "writeAddrWindow+writePixels scale=%d sw=%d sh=%d", scale, sw, sh);
       break;
 
     case 7: // Force scale=2 — avoids 256-col boundary
@@ -277,13 +281,13 @@ static void runTest(int t) {
         "FORCED scale=2 sw=%d sh=%d (bypasses 256-col boundary)", sw, sh);
       break;
 
-    case 8: // Internal RAM + writePixels combined
+    case 8: // Fresh malloc + writePixels combined
       tmp = (uint8_t*)malloc(g_jpgLen);
       if (tmp) { memcpy(tmp, g_jpgBuf, g_jpgLen); src = tmp; }
       letterbox(ox, oy, sw, sh);
       doDecode(scale, src, g_jpgLen, ox, oy, true);
       snprintf(g_res.note, sizeof(g_res.note),
-        "internalRAM+writePixels copy=%s scale=%d", tmp ? "OK" : "FAIL", scale);
+        "fresh-malloc+writePixels copy=%s scale=%d", tmp ? "OK" : "FAIL", scale);
       break;
 
     default:
@@ -344,14 +348,14 @@ legend{color:#4af;font-size:.9em}
 <fieldset>
 <legend>Tests</legend>
 <button class='all' onclick='runAll()'>&#9654;&#9654; Run All</button><br><br>
-<button onclick='run(1)'>T1</button><span class='desc'>Baseline &mdash; PSRAM src, draw16bitRGBBitmap</span><br>
-<button onclick='run(2)'>T2</button><span class='desc'>Internal RAM copy before decode</span><br>
+<button onclick='run(1)'>T1</button><span class='desc'>Baseline &mdash; internal heap src, draw16bitRGBBitmap</span><br>
+<button onclick='run(2)'>T2</button><span class='desc'>Fresh malloc copy before decode</span><br>
 <button onclick='run(3)'>T3</button><span class='desc'>Count-only callback (zero GFX/SPI)</span><br>
-<button onclick='run(4)'>T4</button><span class='desc'>Internal RAM + count-only</span><br>
-<button onclick='run(5)'>T5</button><span class='desc'>32-byte aligned PSRAM alloc</span><br>
+<button onclick='run(4)'>T4</button><span class='desc'>Fresh malloc + count-only</span><br>
+<button onclick='run(5)'>T5</button><span class='desc'>32-byte aligned alloc</span><br>
 <button onclick='run(6)'>T6</button><span class='desc'>writeAddrWindow + writePixels (Arduino_TFT path)</span><br>
 <button onclick='run(7)'>T7</button><span class='desc'>Force scale=2 (bypasses 256-col boundary)</span><br>
-<button onclick='run(8)'>T8</button><span class='desc'>Internal RAM + writePixels combined</span><br>
+<button onclick='run(8)'>T8</button><span class='desc'>Fresh malloc + writePixels combined</span><br>
 </fieldset>
 <div id='status'></div>
 <div id='result'>No test run yet.</div>
@@ -440,30 +444,32 @@ static void handleUploadBody() {
   HTTPUpload& u = server.upload();
   if (u.status == UPLOAD_FILE_START) {
     s_upLen = 0;
-    if (g_jpgBuf) {
-      heap_caps_free(g_jpgBuf);
-      g_jpgBuf = nullptr; g_jpgLen = 0; g_hasImage = false;
-    }
-    g_jpgBuf = (uint8_t*)heap_caps_malloc(256*1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!g_jpgBuf) g_jpgBuf = (uint8_t*)malloc(256*1024);
+    if (g_jpgBuf) { free(g_jpgBuf); g_jpgBuf = nullptr; g_jpgLen = 0; g_hasImage = false; }
+    // C3 has no PSRAM; malloc from internal heap. Max needed = 280*240*2 = 131400 bytes.
+    g_jpgBuf = (uint8_t*)malloc(MAX_JPG_BYTES);
+    Serial.printf("[upload] alloc %lu bytes: %s  freeHeap=%u\n",
+      MAX_JPG_BYTES, g_jpgBuf ? "OK" : "FAIL", ESP.getFreeHeap());
   } else if (u.status == UPLOAD_FILE_WRITE) {
-    if (g_jpgBuf && s_upLen + u.currentSize <= 256*1024) {
+    if (g_jpgBuf && s_upLen + u.currentSize <= MAX_JPG_BYTES) {
       memcpy(g_jpgBuf + s_upLen, u.buf, u.currentSize);
       s_upLen += u.currentSize;
     }
   } else if (u.status == UPLOAD_FILE_END) {
     if (g_jpgBuf && s_upLen > 0) { g_jpgLen = s_upLen; g_hasImage = true; }
+    Serial.printf("[upload] end len=%u hasImage=%d\n", (unsigned)s_upLen, (int)g_hasImage);
   }
 }
 
 static void handleUploadDone() {
+  char buf[120];
   if (g_hasImage) {
-    char buf[80];
     snprintf(buf, sizeof(buf), "{\"ok\":true,\"msg\":\"%u bytes\"}", (unsigned)g_jpgLen);
-    server.send(200, "application/json", buf);
   } else {
-    server.send(200, "application/json", "{\"ok\":false,\"err\":\"empty or alloc failed\"}");
+    snprintf(buf, sizeof(buf),
+      "{\"ok\":false,\"err\":\"alloc failed or empty (freeHeap=%u)\"}",
+      ESP.getFreeHeap());
   }
+  server.send(200, "application/json", buf);
 }
 
 // ── setup / loop ──────────────────────────────────────────────────────────────
@@ -486,7 +492,7 @@ void setup() {
     delay(500); Serial.print('.');
   }
   Serial.println();
-  Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("IP: %s  freeHeap: %u\n", WiFi.localIP().toString().c_str(), ESP.getFreeHeap());
   gfx->setCursor(4, 28);
   gfx->print(WiFi.localIP().toString());
 
