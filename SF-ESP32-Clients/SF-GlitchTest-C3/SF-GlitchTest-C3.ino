@@ -19,7 +19,7 @@
  *  T3  NoSPI             Count-only callback — no GFX writes at all
  *  T4  InternalRAM+NoSPI Both T2 and T3 combined
  *  T5  AlignedPSRAM      32-byte aligned PSRAM alloc
- *  T6  WritePixels       Use bus->writePixels instead of draw16bitRGBBitmap
+ *  T6  WritePixels       Use gfx->writeAddrWindow/writePixels (Arduino_TFT path)
  *  T7  Scale2            Force scale=2 (avoids 256-column boundary)
  *  T8  Combined          InternalRAM + WritePixels
  *
@@ -45,7 +45,7 @@
 #include <Arduino_GFX_Library.h>
 #include <TJpg_Decoder.h>
 
-// ── Secrets ────────────────────────────────────────────────────────────────
+// ── Secrets ───────────────────────────────────────────────────────────────────
 #if __has_include(<Secrets.h>)
   #include <Secrets.h>
 #else
@@ -54,7 +54,7 @@
   static const char* ARDUINO_OTA_PASSWORD = "";
 #endif
 
-// ── Board: ESP32-C3 + ST7789 280x240 SPI ──────────────────────────────────
+// ── Board: ESP32-C3 + ST7789 280x240 SPI ─────────────────────────────────────
 #define TFT_SCLK 0
 #define TFT_MOSI 1
 #define TFT_DC   3
@@ -64,27 +64,28 @@
 static const int SCREEN_W = 280;
 static const int SCREEN_H = 240;
 
-// Arduino_GFX objects — bus exposed so T6 can call bus->writePixels
-static Arduino_ESP32SPI* bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED);
-static Arduino_GFX*      gfx = new Arduino_ST7789(bus, TFT_RST, 1, true, 240, 280, 0, 20, 0, 20);
+// Declare as Arduino_TFT* so writeAddrWindow/writePixels/startWrite are visible.
+// Arduino_ST7789 extends Arduino_TFT which has those methods; Arduino_GFX does not.
+static Arduino_DataBus* bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED);
+static Arduino_TFT*     gfx = new Arduino_ST7789(bus, TFT_RST, 1, true, 240, 280, 0, 20, 0, 20);
 
 // SPI transaction guards — keep WiFi off the bus during MCU writes
 static SPISettings _spiCfg(80000000, MSBFIRST, SPI_MODE0);
 #define SPI_BEGIN() SPI.beginTransaction(_spiCfg)
 #define SPI_END()   SPI.endTransaction()
 
-// ── Image buffer (PSRAM preferred) ─────────────────────────────────────────
+// ── Image buffer (PSRAM preferred) ────────────────────────────────────────────
 static uint8_t* g_jpgBuf   = nullptr;
 static size_t   g_jpgLen   = 0;
 static bool     g_hasImage = false;
 
-// ── Per-test MCU counters ───────────────────────────────────────────────────
+// ── Per-test MCU counters ─────────────────────────────────────────────────────
 static int      s_cbCount = 0;
 static int16_t  s_lastX = -1, s_lastY = -1;
 static uint16_t s_lastW = 0,  s_lastH = 0;
 static void resetCb() { s_cbCount=0; s_lastX=-1; s_lastY=-1; s_lastW=0; s_lastH=0; }
 
-// ── Result ──────────────────────────────────────────────────────────────────
+// ── Result ────────────────────────────────────────────────────────────────────
 struct Result {
   int      t;
   bool     ran;
@@ -96,7 +97,7 @@ struct Result {
 };
 static Result g_res;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 static int expectedMCUs(int w, int h) {
   return ((w + 15) / 16) * ((h + 15) / 16);
@@ -137,7 +138,7 @@ static void letterbox(int ox, int oy, int sw, int sh) {
   }
 }
 
-// ── Callbacks ────────────────────────────────────────────────────────────────
+// ── Callbacks ─────────────────────────────────────────────────────────────────
 
 static bool g_countOnly = false;
 
@@ -160,30 +161,30 @@ static bool jpegCB_draw(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* 
   return true;
 }
 
-// T6 / T8 — bus->writePixels path (bypasses draw16bitRGBBitmap clipping)
+// T6 / T8 — writeAddrWindow + writePixels path (Arduino_TFT members)
 static bool jpegCB_wpx(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* data) {
   s_cbCount++;
   s_lastX = x; s_lastY = y; s_lastW = w; s_lastH = h;
   if (x >= SCREEN_W || y >= SCREEN_H || x < 0 || y < 0) return true;
   int cw = (x+w > SCREEN_W) ? SCREEN_W-x : (int)w;
   int ch = (y+h > SCREEN_H) ? SCREEN_H-y : (int)h;
-  bus->startWrite();
+  gfx->startWrite();
   for (int r = 0; r < ch; r++) {
-    bus->writeAddrWindow(x, y+r, cw, 1);
-    bus->writePixels(data + r*w, cw);
+    gfx->writeAddrWindow(x, y+r, cw, 1);
+    gfx->writePixels(data + r*w, cw);
   }
-  bus->endWrite();
+  gfx->endWrite();
   return true;
 }
 
 static void doDecode(int scale, const uint8_t* src, size_t len, int ox, int oy, bool wpx) {
   TJpgDec.setJpgScale((uint8_t)scale);
-  TJpgDec.setSwapBytes(false); // ST7789 is BGR — swap handled in data
+  TJpgDec.setSwapBytes(false);
   TJpgDec.setCallback(wpx ? jpegCB_wpx : jpegCB_draw);
   TJpgDec.drawJpg(ox, oy, src, (uint32_t)len);
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 static void runTest(int t) {
   memset(&g_res, 0, sizeof(g_res));
@@ -227,7 +228,7 @@ static void runTest(int t) {
         tmp ? "OK" : "FAIL(PSRAM)", scale, sw, sh);
       break;
 
-    case 3: // Count-only — no GFX, no SPI
+    case 3: // Count-only — no GFX, no SPI at all
       g_countOnly = true;
       doDecode(scale, src, g_jpgLen, ox, oy, false);
       snprintf(g_res.note, sizeof(g_res.note),
@@ -255,11 +256,11 @@ static void runTest(int t) {
         tmp ? "OK" : "FAIL(orig)", scale);
       break;
 
-    case 6: // bus->writePixels path
+    case 6: // gfx->writeAddrWindow + writePixels (Arduino_TFT path)
       letterbox(ox, oy, sw, sh);
       doDecode(scale, src, g_jpgLen, ox, oy, true);
       snprintf(g_res.note, sizeof(g_res.note),
-        "bus->writePixels PSRAM src scale=%d sw=%d sh=%d", scale, sw, sh);
+        "writeAddrWindow+writePixels PSRAM src scale=%d sw=%d sh=%d", scale, sw, sh);
       break;
 
     case 7: // Force scale=2 — avoids 256-col boundary
@@ -309,7 +310,7 @@ static void runTest(int t) {
     (int)g_res.lx, (int)g_res.ly, g_res.note);
 }
 
-// ── Web server ───────────────────────────────────────────────────────────────
+// ── Web server ────────────────────────────────────────────────────────────────
 
 WebServer server(80);
 
@@ -348,7 +349,7 @@ legend{color:#4af;font-size:.9em}
 <button onclick='run(3)'>T3</button><span class='desc'>Count-only callback (zero GFX/SPI)</span><br>
 <button onclick='run(4)'>T4</button><span class='desc'>Internal RAM + count-only</span><br>
 <button onclick='run(5)'>T5</button><span class='desc'>32-byte aligned PSRAM alloc</span><br>
-<button onclick='run(6)'>T6</button><span class='desc'>bus-&gt;writePixels callback</span><br>
+<button onclick='run(6)'>T6</button><span class='desc'>writeAddrWindow + writePixels (Arduino_TFT path)</span><br>
 <button onclick='run(7)'>T7</button><span class='desc'>Force scale=2 (bypasses 256-col boundary)</span><br>
 <button onclick='run(8)'>T8</button><span class='desc'>Internal RAM + writePixels combined</span><br>
 </fieldset>
@@ -412,15 +413,13 @@ static void handleRun() {
 }
 
 static void handleResult() {
-  // Build JSON manually — avoids String+literal concat issues
-  char buf[512];
-  // note field: escape quotes and backslashes
   char noteSafe[200] = {};
   int ni = 0;
   for (const char* p = g_res.note; *p && ni < (int)sizeof(noteSafe)-2; p++) {
     if (*p == '"' || *p == '\\') noteSafe[ni++] = '\\';
     noteSafe[ni++] = *p;
   }
+  char buf[512];
   snprintf(buf, sizeof(buf),
     "{\"t\":%d,\"ran\":%s,\"got\":%d,\"expected\":%d,\"missing\":%d,"
     "\"lx\":%d,\"ly\":%d,\"lw\":%d,\"lh\":%d,"
@@ -445,7 +444,6 @@ static void handleUploadBody() {
       heap_caps_free(g_jpgBuf);
       g_jpgBuf = nullptr; g_jpgLen = 0; g_hasImage = false;
     }
-    // Prefer PSRAM; fall back to internal heap
     g_jpgBuf = (uint8_t*)heap_caps_malloc(256*1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!g_jpgBuf) g_jpgBuf = (uint8_t*)malloc(256*1024);
   } else if (u.status == UPLOAD_FILE_WRITE) {
@@ -468,7 +466,7 @@ static void handleUploadDone() {
   }
 }
 
-// ── setup / loop ─────────────────────────────────────────────────────────────
+// ── setup / loop ──────────────────────────────────────────────────────────────
 
 void setup() {
   Serial.begin(115200);
