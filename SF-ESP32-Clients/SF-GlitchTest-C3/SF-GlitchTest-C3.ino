@@ -479,6 +479,7 @@ void setup() {
   gfx->print("GlitchTest C3");
 
   WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.begin(MYSSID, MYPSK);
   Serial.print("WiFi");
   for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; i++) {

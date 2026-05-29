@@ -1,3 +1,3 @@
-arduino-cli.exe upload -p COM16 --build-path .\build\
+arduino-cli.exe upload -p COM17 --build-path .\build\
 
 pause
